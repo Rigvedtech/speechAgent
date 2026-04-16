@@ -1,0 +1,17 @@
+# Environment variables - NEVER commit this file
+.env
+
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Temp audio files & large models
+*.mp3
+*.onnx
+
+# Backup files
+*_legacy.py

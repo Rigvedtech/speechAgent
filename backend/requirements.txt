@@ -1,0 +1,13 @@
+faster-whisper
+sounddevice
+numpy
+scipy
+torch # Optional but recommended for CUDA detection logic
+torchaudio
+ollama
+edge-tts
+pygame-ce
+groq
+python-dotenv
+fastapi
+uvicorn
