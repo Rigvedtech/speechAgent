@@ -1,17 +1,38 @@
 # Environment variables - NEVER commit this file
 .env
+.env.*
+!.env.example
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
 
 # Virtual environment
 venv/
+.venv/
 
 # Python cache
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.log
 
 # Temp audio files & large models
 *.mp3
+*.wav
 *.onnx
+
+# Generated meeting-bot greeting audio
+meeting-bot/wwwroot/generated-audio/
+
+# .NET build artifacts
+meeting-bot/bin/
+meeting-bot/obj/
+meeting-bot/tmp-build/
 
 # Backup files
 *_legacy.py
+
