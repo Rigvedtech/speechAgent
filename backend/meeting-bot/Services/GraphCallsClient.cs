@@ -10,6 +10,9 @@ public sealed class GraphCallsClient
 {
     private sealed record CreatedMeeting(string Id, string JoinWebUrl, DateTimeOffset StartDateTime, DateTimeOffset EndDateTime);
     private sealed record MeetingJoinContext(string Tid, string Oid, string ThreadId, string MessageId);
+    private sealed record MediaInfo(string Uri);
+    private sealed record MediaPrompt(MediaInfo MediaInfo);
+    private sealed record PlayPromptRequest(MediaPrompt[] Prompts);
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly GraphTokenProvider _tokenProvider;
@@ -204,5 +207,60 @@ public sealed class GraphCallsClient
         var client = _httpClientFactory.CreateClient(nameof(GraphCallsClient));
         using var response = await client.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
+    }
+
+    public async Task PlayPromptAsync(string callId, string mediaUri, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(callId))
+        {
+            throw new ArgumentException("callId is required.", nameof(callId));
+        }
+
+        if (string.IsNullOrWhiteSpace(mediaUri))
+        {
+            throw new ArgumentException("mediaUri is required.", nameof(mediaUri));
+        }
+
+        // Graph action: POST /communications/calls/{id}/playPrompt
+        // Prompts array contains one mediaPrompt with mediaInfo.uri pointing at a WAV file.
+        var payload = new Dictionary<string, object?>
+        {
+            ["prompts"] = new object[]
+            {
+                new Dictionary<string, object?>
+                {
+                    ["@odata.type"] = "#microsoft.graph.mediaPrompt",
+                    ["mediaInfo"] = new Dictionary<string, object?>
+                    {
+                        ["@odata.type"] = "#microsoft.graph.mediaInfo",
+                        ["uri"] = mediaUri
+                    }
+                }
+            }
+        };
+
+        using var request = await _tokenProvider.CreateGraphRequestAsync(
+            HttpMethod.Post,
+            $"/communications/calls/{callId}/playPrompt",
+            cancellationToken);
+
+        request.Content = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+
+        var client = _httpClientFactory.CreateClient(nameof(GraphCallsClient));
+        using var response = await client.SendAsync(request, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogError(
+                "Graph playPrompt failed. Status: {StatusCode}. Response body: {GraphResponseBody}",
+                (int)response.StatusCode,
+                body);
+
+            throw new HttpRequestException(
+                $"Graph playPrompt failed with status {(int)response.StatusCode} ({response.ReasonPhrase}). Graph body: {body}",
+                null,
+                response.StatusCode);
+        }
     }
 }

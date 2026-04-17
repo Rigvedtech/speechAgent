@@ -1,9 +1,11 @@
+using DotNetEnv;
 using MeetingBot.Middleware;
 using MeetingBot.Models.Requests;
 using MeetingBot.Models.Options;
 using MeetingBot.Services;
 using Microsoft.Extensions.Options;
 
+Env.TraversePath().NoClobber().Load();
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<GraphOptions>(builder.Configuration.GetSection(GraphOptions.SectionName));
@@ -22,6 +24,7 @@ builder.Services.AddSingleton<CallLifecycleService>();
 
 var app = builder.Build();
 app.UseMiddleware<CorrelationIdMiddleware>();
+app.UseStaticFiles();
 
 if (app.Environment.IsDevelopment())
 {

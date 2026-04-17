@@ -3,7 +3,7 @@
 
 # Optional canonical candidate name for voice/STT mismatch handling.
 # If set, interviewer should use this exact name and ignore minor spoken-name variants.
-candidate_name = "Payal"
+candidate_name = "Pranay"
 
 jd = "Senior Full Stack Software Engineer role focused on building scalable Java/Spring Boot microservices and high-performance applications in fintech and banking. Requires strong experience in REST APIs, databases, cloud (AWS/Azure), and DevOps tools, along with knowledge of CI/CD, system design, and Agile practices. Ideal candidate has experience in UPI/payment systems, performance optimization, and leading or mentoring teams."
 resume = "Senior Full Stack Software Engineer with 6+ years of experience in fintech and banking, specializing in building scalable Java/Spring Boot microservices and high-performance systems with 99.98% uptime. Strong expertise in backend development, REST APIs, databases, and cloud technologies, with hands-on experience in Databricks, Apache Spark, and data-driven architectures. Proven track record of improving system performance, reducing response times, and optimizing CI/CD processes, along with leading Agile teams and mentoring developers to deliver reliable, enterprise-grade solutions. :contentReference[oaicite:0]{index=0}"
