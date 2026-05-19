@@ -9,6 +9,7 @@ from tts_voice import TTSVoice
 
 def main():
     print("Welcome to SpeechAgent Modular S2S Pipeline!")
+    print("[Mode] Standalone interactive mode: startup greeting + local two-way conversation")
     
     # 1. Initialize Shared Global State
     state = AgentState()

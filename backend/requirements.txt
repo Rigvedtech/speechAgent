@@ -11,3 +11,4 @@ groq
 python-dotenv
 fastapi
 uvicorn
+google-genai>=1.14.0

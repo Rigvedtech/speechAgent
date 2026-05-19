@@ -3,13 +3,16 @@ using MeetingBot.Middleware;
 using MeetingBot.Models.Requests;
 using MeetingBot.Models.Options;
 using MeetingBot.Services;
+using MeetingBot.Services.Comms;
 using Microsoft.Extensions.Options;
 
-Env.TraversePath().NoClobber().Load();
+// Allow repo .env to override stale machine/user env (NoClobber would keep e.g. MeetingBot__AutoLeaveSeconds=45).
+Env.TraversePath().Load();
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<GraphOptions>(builder.Configuration.GetSection(GraphOptions.SectionName));
 builder.Services.Configure<MeetingBotOptions>(builder.Configuration.GetSection(MeetingBotOptions.SectionName));
+builder.Services.Configure<MediaPlatformOptions>(builder.Configuration.GetSection(MediaPlatformOptions.SectionName));
 builder.Services.Configure<AiBridgeOptions>(builder.Configuration.GetSection(AiBridgeOptions.SectionName));
 builder.Services.AddHttpClient();
 builder.Services.AddHealthChecks();
@@ -19,10 +22,39 @@ builder.Services.AddSingleton<RoomSessionStore>();
 builder.Services.AddSingleton<GraphTokenProvider>();
 builder.Services.AddSingleton<GraphCallsClient>();
 builder.Services.AddSingleton<AiBridgeClient>();
+builder.Services.AddSingleton<ISttVoiceLoopStarter>(sp =>
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return new NullSttVoiceLoopStarter();
+    }
+
+    return new WindowsSttVoiceLoopStarter(
+        sp.GetRequiredService<IOptions<MeetingBotOptions>>(),
+        sp.GetRequiredService<RoomSessionStore>(),
+        sp.GetRequiredService<IServiceScopeFactory>(),
+        sp.GetRequiredService<ILogger<WindowsSttVoiceLoopStarter>>());
+});
 builder.Services.AddSingleton<BaselineValidator>();
+builder.Services.AddSingleton<TeamsCommunicationsService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<TeamsCommunicationsService>());
 builder.Services.AddSingleton<CallLifecycleService>();
 
 var app = builder.Build();
+{
+    var mb = app.Services.GetRequiredService<IOptions<MeetingBotOptions>>().Value;
+    var comms = app.Services.GetRequiredService<TeamsCommunicationsService>();
+    app.Logger.LogInformation(
+        "MeetingBot effective: AutoLeaveSeconds={AutoLeave}, EnableSttVoiceLoop={Stt}, SttSource={Src}, SttSuppressionAfterPlaySeconds={Supp}, SttMinWordCount={MinW}, UseApplicationHostedMedia={Hosted}, CommsClientActive={Comms}",
+        mb.AutoLeaveSeconds,
+        mb.EnableSttVoiceLoop,
+        mb.SttLocalAudioSource,
+        mb.SttSuppressionAfterPlaySeconds,
+        mb.SttMinWordCount,
+        mb.UseApplicationHostedMedia,
+        comms.IsEnabled);
+}
+
 app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseStaticFiles();
 
@@ -102,13 +134,34 @@ app.MapPost("/api/meetings/leave", async (LeaveMeetingRequest request, CallLifec
         : Results.NotFound(new { error = "Room not found or call not initialized", roomId = request.RoomId });
 });
 
-app.MapPost("/api/calls/callback", async (HttpRequest request, CallLifecycleService lifecycle, ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
+app.MapPost("/api/rooms/{roomId}/turn", async (string roomId, SubmitTurnRequest request, CallLifecycleService lifecycle, CancellationToken cancellationToken) =>
 {
-    using var reader = new StreamReader(request.Body);
-    var payload = await reader.ReadToEndAsync(cancellationToken);
+    var result = await lifecycle.SubmitTurnAsync(roomId, request, cancellationToken);
+    return result.Success
+        ? Results.Ok(new { roomId, result.Message, result.TurnId, result.TraceId })
+        : Results.BadRequest(new { roomId, error = result.Message, result.TurnId, result.TraceId });
+});
+
+app.MapPost("/api/calls/callback", async (HttpContext http, TeamsCommunicationsService comms, CallLifecycleService lifecycle, ILoggerFactory loggerFactory, CancellationToken cancellationToken) =>
+{
     var logger = loggerFactory.CreateLogger("GraphCallbackEndpoint");
+    if (comms.IsEnabled)
+    {
+        var sdkResponse = await comms.ProcessIncomingNotificationAsync(http.Request, cancellationToken).ConfigureAwait(false);
+        if (sdkResponse is null)
+        {
+            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }
+
+        var body = sdkResponse.Content is null ? string.Empty : await sdkResponse.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        var mediaType = sdkResponse.Content?.Headers.ContentType?.MediaType ?? "application/json; charset=utf-8";
+        return Results.Content(body, mediaType, statusCode: (int)sdkResponse.StatusCode);
+    }
+
+    using var reader = new StreamReader(http.Request.Body);
+    var payload = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
     logger.LogInformation("Received Graph callback payload length: {PayloadLength}", payload.Length);
-    await lifecycle.HandleCallbackAsync(payload, cancellationToken);
+    await lifecycle.HandleCallbackAsync(payload, cancellationToken).ConfigureAwait(false);
     return Results.Ok(new { received = true });
 });
 

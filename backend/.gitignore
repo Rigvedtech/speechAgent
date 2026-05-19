@@ -32,6 +32,9 @@ meeting-bot/wwwroot/generated-audio/
 meeting-bot/bin/
 meeting-bot/obj/
 meeting-bot/tmp-build/
+meeting-bot/_verify_build_out/
+meeting-bot/_verify_build_out2/
+meeting-bot/_vb3/
 
 # Backup files
 *_legacy.py

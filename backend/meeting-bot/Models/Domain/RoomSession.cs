@@ -35,5 +35,26 @@ public sealed class RoomSession
 
     public string? LeaveReason { get; set; }
 
+    public int NextTurnId { get; set; } = 1;
+
+    public bool IsProcessingTurn { get; set; }
+
+    public string? LastUserUtterance { get; set; }
+
+    public string? LastBotReply { get; set; }
+
+    public DateTimeOffset? LastPlayPromptAtUtc { get; set; }
+
+    /// <summary>While set and in the future, Windows STT loop ignores finals (reduces echo after bot speaks).</summary>
+    public DateTimeOffset? SttSuppressedUntilUtc { get; set; }
+
+    public string? LastSttForwardedText { get; set; }
+
+    public DateTimeOffset? LastSttForwardedAtUtc { get; set; }
+
+    public string? LastTurnTraceId { get; set; }
+
+    public HashSet<string> ProcessedTurnKeys { get; } = new(StringComparer.OrdinalIgnoreCase);
+
     public List<CallEvent> Events { get; } = new();
 }

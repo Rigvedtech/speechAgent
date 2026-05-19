@@ -48,7 +48,9 @@ public sealed class GraphCallsClient
             ["requestedModalities"] = new[] { "audio" },
             ["mediaConfig"] = new Dictionary<string, object?>
             {
-                ["@odata.type"] = "#microsoft.graph.serviceHostedMediaConfig"
+                ["@odata.type"] = _botOptions.UseApplicationHostedMedia
+                    ? "#microsoft.graph.appHostedMediaConfig"
+                    : "#microsoft.graph.serviceHostedMediaConfig"
             },
             ["chatInfo"] = new Dictionary<string, object?>
             {

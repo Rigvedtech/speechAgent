@@ -1,0 +1,7 @@
+# Local scratch: certs, keys, PFX exports — never commit secrets
+temp/
+temp.rar
+
+# OS / editor noise at repo root
+.DS_Store
+Thumbs.db
