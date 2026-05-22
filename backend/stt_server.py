@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import logging
 import time
@@ -15,7 +16,14 @@ try:
 except Exception:  # pragma: no cover
     WhisperModel = None  # type: ignore
 
-from config import DEVICE, COMPUTE_TYPE, MODEL_SIZE, SAMPLE_RATE
+from config import (
+    ASSEMBLYAI_API_KEY,
+    DEVICE,
+    COMPUTE_TYPE,
+    MODEL_SIZE,
+    SAMPLE_RATE,
+    STT_PROVIDER,
+)
 
 logger = logging.getLogger("stt_server")
 
@@ -41,7 +49,7 @@ def _rms(x: np.ndarray) -> float:
     return float(np.sqrt(np.mean(np.square(x))))
 
 
-def _transcribe_to_text(model: object, audio: np.ndarray, beam_size: int, *, vad_filter: bool) -> str:
+def _transcribe_to_text_whisper(model: object, audio: np.ndarray, beam_size: int, *, vad_filter: bool) -> str:
     segments, _info = model.transcribe(  # type: ignore[union-attr]
         audio,
         beam_size=beam_size,
@@ -49,7 +57,6 @@ def _transcribe_to_text(model: object, audio: np.ndarray, beam_size: int, *, vad
         condition_on_previous_text=False,
         vad_filter=vad_filter,
     )
-    # Drop segments Whisper labels as non-speech (common on loopback hiss / muted-ish noise).
     parts: list[str] = []
     for seg in segments:
         nsp = getattr(seg, "no_speech_prob", None)
@@ -61,14 +68,30 @@ def _transcribe_to_text(model: object, audio: np.ndarray, beam_size: int, *, vad
     return " ".join(parts).strip()
 
 
-async def _transcribe_in_thread(
-    model: object, audio: np.ndarray, beam_size: int, *, vad_filter: bool = True
+def _transcribe_to_text_assembly(audio: np.ndarray) -> str:
+    from stt_assemblyai import transcribe_float32_mono
+
+    return transcribe_float32_mono(audio, SAMPLE_RATE)
+
+
+def _transcribe_to_text(
+    model: object | None, audio: np.ndarray, beam_size: int, *, vad_filter: bool
 ) -> str:
-    """faster-whisper transcribe is CPU-heavy and must not block the asyncio loop."""
+    if STT_PROVIDER == "assemblyai":
+        return _transcribe_to_text_assembly(audio)
+    return _transcribe_to_text_whisper(model, audio, beam_size, vad_filter=vad_filter)  # type: ignore[arg-type]
+
+
+async def _transcribe_in_thread(
+    model: object | None, audio: np.ndarray, beam_size: int, *, vad_filter: bool = True
+) -> str:
+    """STT must not block the asyncio loop."""
     try:
-        return await asyncio.to_thread(_transcribe_to_text, model, audio, beam_size, vad_filter=vad_filter)
+        return await asyncio.to_thread(
+            _transcribe_to_text, model, audio, beam_size, vad_filter=vad_filter
+        )
     except Exception:
-        logger.exception("Whisper transcribe failed")
+        logger.exception("STT transcribe failed (%s)", STT_PROVIDER)
         return ""
 
 
@@ -80,40 +103,49 @@ async def _send_json(ws: WebSocket, payload: dict) -> None:
 async def stt_websocket(ws: WebSocket):
     await ws.accept()
 
-    if WhisperModel is None:
-        await _send_json(
-            ws,
-            {
-                "type": "error",
-                "message": "faster-whisper is not installed in this Python environment. Install requirements.txt first.",
-            },
-        )
-        await ws.close()
-        return
+    if STT_PROVIDER == "assemblyai":
+        if not ASSEMBLYAI_API_KEY:
+            await _send_json(
+                ws,
+                {
+                    "type": "error",
+                    "message": "STT_PROVIDER=assemblyai but ASSEMBLYAI_API_KEY / AssemblyAI_API_KEY is missing in .env.",
+                },
+            )
+            await ws.close()
+            return
+        if importlib.util.find_spec("assemblyai") is None:
+            await _send_json(
+                ws,
+                {
+                    "type": "error",
+                    "message": "assemblyai package not installed. Run: pip install assemblyai",
+                },
+            )
+            await ws.close()
+            return
+        model = None
+    else:
+        if WhisperModel is None:
+            await _send_json(
+                ws,
+                {
+                    "type": "error",
+                    "message": "faster-whisper is not installed in this Python environment. Install requirements.txt first.",
+                },
+            )
+            await ws.close()
+            return
+        model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
 
-    # Streaming strategy (Phase 1):
-    # - client sends raw PCM16LE mono 16kHz chunks (binary messages)
-    # - server accumulates until silence gap, then runs whisper on the buffered audio
-    # - emits partial + final messages as JSON text frames
-    #
-    # Whisper runs in a worker thread (to_thread). The main task must not own ws.receive() alone:
-    # while it awaits transcribe, a dedicated task keeps calling ws.receive() and appends PCM to
-    # the buffer so TCP/backlog and control frames do not stall (client otherwise sees RST / 10053).
-
-    model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
     state = StreamState(buffer=bytearray(), last_audio_ts=time.time(), last_partial_text="")
 
-    # Loopback capture is often quieter than mic; slightly higher reduces false "speech" timestamps on hiss.
     silence_threshold_rms = 0.0035
     silence_timeout_s = 0.9
     min_audio_s = 0.6
     partial_min_interval_s = 2.0
-    # Loopback often has non-silence noise; if last_audio_ts never ages, flush never runs and the
-    # buffer grows until Whisper tries to allocate multi‑GiB STFT buffers and the process dies (10054).
     max_buffer_bytes = int(45 * SAMPLE_RATE * 2)
 
-    # Text control frames only (low volume). Binary PCM is merged in the receiver task so
-    # ws.receive() never blocks behind a full Queue while the main task awaits transcribe.
     control_queue: asyncio.Queue[dict | None] = asyncio.Queue()
     buffer_lock = asyncio.Lock()
 
@@ -156,7 +188,6 @@ async def stt_websocket(ws: WebSocket):
             raw = bytes(state.buffer)
             state.buffer.clear()
 
-        # Hard cap segment length passed to Whisper (safety if buffer grew before trim landed).
         max_pcm_bytes = max_buffer_bytes
         if len(raw) > max_pcm_bytes:
             raw = raw[-max_pcm_bytes:]
@@ -186,8 +217,15 @@ async def stt_websocket(ws: WebSocket):
 
     recv_task = asyncio.create_task(pump_ws_to_buffer())
 
-    try:            
-        await _send_json(ws, {"type": "ready", "sample_rate": SAMPLE_RATE})
+    try:
+        await _send_json(
+            ws,
+            {
+                "type": "ready",
+                "sample_rate": SAMPLE_RATE,
+                "stt_provider": STT_PROVIDER,
+            },
+        )
 
         while True:
             try:
@@ -231,12 +269,11 @@ async def stt_websocket(ws: WebSocket):
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "service": "speechagent-stt-stream"}
+    return {"status": "healthy", "service": "speechagent-stt-stream", "stt_provider": STT_PROVIDER}
 
 
 if __name__ == "__main__":
     import uvicorn
 
-    print("[Mode] STT websocket server: ws://0.0.0.0:8020/stt")
+    print(f"[Mode] STT websocket server: ws://0.0.0.0:8020/stt (provider={STT_PROVIDER})")
     uvicorn.run("stt_server:app", host="0.0.0.0", port=8020, reload=False)
-

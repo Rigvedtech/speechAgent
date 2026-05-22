@@ -5,3 +5,4 @@ temp.rar
 # OS / editor noise at repo root
 .DS_Store
 Thumbs.db
+old_temp/

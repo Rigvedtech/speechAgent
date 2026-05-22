@@ -100,6 +100,7 @@ def main():
             print("Press Ctrl+C to stop.")
             while state.is_running:
                 sd.sleep(100)
+            print("\n[Interview] Microphone stream ended.\n", flush=True)
     except KeyboardInterrupt:
         print("\nStopping...")
         state.is_running = False
