@@ -212,48 +212,7 @@ def _load_reply_text(room_id: str, transcript: str, history: List[str]) -> str:
     if len(brain.conversation_history) > (brain.max_runtime_history_messages + 2):
         brain.conversation_history = brain.conversation_history[-brain.max_runtime_history_messages :]
 
-    request_messages = brain._build_request_messages()
-
-    groq_api_key = (os.getenv("GROQ_API_KEY") or "").strip()
-    groq_model = (os.getenv("GROQ_MODEL") or "llama-3.1-8b-instant").strip()
-    ollama_model = (os.getenv("OLLAMA_MODEL") or "llama3.2:3b").strip()
-
-    content = ""
-
-    if groq_api_key:
-        try:
-            from groq import Groq
-
-            client = Groq(api_key=groq_api_key)
-            completion = client.chat.completions.create(
-                model=groq_model,
-                messages=request_messages,
-                max_tokens=150,
-            )
-            content = completion.choices[0].message.content if completion.choices else ""
-        except Exception:
-            content = ""
-
-    if not (content or "").strip():
-        try:
-            import ollama
-
-            response = ollama.chat(model=ollama_model, messages=request_messages, stream=False)
-            content = response.get("message", {}).get("content", "")
-        except Exception:
-            content = ""
-
-    text = (content or "").strip()
-    if not text:
-        text = brain._safe_interviewer_fallback()
-    elif brain._is_forbidden_interviewer_output(text):
-        text = brain._safe_interviewer_fallback()
-    else:
-        brain.conversation_history.append({"role": "assistant", "content": text})
-        if len(brain.conversation_history) > (brain.max_runtime_history_messages + 2):
-            brain.conversation_history = brain.conversation_history[-brain.max_runtime_history_messages :]
-
-    return text
+    return brain.complete_turn_sync_for_bridge()
 
 
 @app.get("/health")
