@@ -41,19 +41,24 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<TeamsCommunication
 builder.Services.AddSingleton<CallLifecycleService>();
 
 var app = builder.Build();
+
+app.Lifetime.ApplicationStarted.Register(() =>
 {
     var mb = app.Services.GetRequiredService<IOptions<MeetingBotOptions>>().Value;
+    var mp = app.Services.GetRequiredService<IOptions<MediaPlatformOptions>>().Value;
     var comms = app.Services.GetRequiredService<TeamsCommunicationsService>();
     app.Logger.LogInformation(
-        "MeetingBot effective: AutoLeaveSeconds={AutoLeave}, EnableSttVoiceLoop={Stt}, SttSource={Src}, SttSuppressionAfterPlaySeconds={Supp}, SttMinWordCount={MinW}, UseApplicationHostedMedia={Hosted}, CommsClientActive={Comms}",
+        "MeetingBot effective: AutoLeaveSeconds={AutoLeave}, EnableSttVoiceLoop={Stt}, SttSource={Src}, SttSuppressionAfterPlaySeconds={Supp}, SttMinWordCount={MinW}, UseApplicationHostedMedia={Hosted}, CommsClientActive={Comms}, MediaUdpRange={UdpMin}-{UdpMax}",
         mb.AutoLeaveSeconds,
         mb.EnableSttVoiceLoop,
         mb.SttLocalAudioSource,
         mb.SttSuppressionAfterPlaySeconds,
         mb.SttMinWordCount,
         mb.UseApplicationHostedMedia,
-        comms.IsEnabled);
-}
+        comms.IsEnabled,
+        mp.MediaPortMin,
+        mp.MediaPortMax);
+});
 
 app.UseMiddleware<CorrelationIdMiddleware>();
 app.UseStaticFiles();
@@ -150,19 +155,23 @@ app.MapPost("/api/calls/callback", async (HttpContext http, TeamsCommunicationsS
         var sdkResponse = await comms.ProcessIncomingNotificationAsync(http.Request, cancellationToken).ConfigureAwait(false);
         if (sdkResponse is null)
         {
-            return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+            http.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+            return;
         }
 
         var body = sdkResponse.Content is null ? string.Empty : await sdkResponse.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        var mediaType = sdkResponse.Content?.Headers.ContentType?.MediaType ?? "application/json; charset=utf-8";
-        return Results.Content(body, mediaType, statusCode: (int)sdkResponse.StatusCode);
+        http.Response.StatusCode = (int)sdkResponse.StatusCode;
+        http.Response.ContentType = sdkResponse.Content?.Headers.ContentType?.MediaType ?? "application/json; charset=utf-8";
+        await http.Response.WriteAsync(body, cancellationToken).ConfigureAwait(false);
+        return;
     }
 
     using var reader = new StreamReader(http.Request.Body);
-    var payload = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+    var payload = await reader.ReadToEndAsync().ConfigureAwait(false);
     logger.LogInformation("Received Graph callback payload length: {PayloadLength}", payload.Length);
     await lifecycle.HandleCallbackAsync(payload, cancellationToken).ConfigureAwait(false);
-    return Results.Ok(new { received = true });
+    http.Response.StatusCode = 200;
+    await http.Response.WriteAsJsonAsync(new { received = true }, cancellationToken).ConfigureAwait(false);
 });
 
 app.MapGet("/api/rooms", (RoomSessionStore store) => Results.Ok(store.GetAll()));

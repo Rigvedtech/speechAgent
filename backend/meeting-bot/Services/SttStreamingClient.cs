@@ -147,7 +147,7 @@ public sealed class SttStreamingClient : IAsyncDisposable
             return;
         }
 
-        var bytes = Encoding.UTF8.GetBytes("""{"type":"flush"}""");
+        var bytes = Encoding.UTF8.GetBytes("{\"type\":\"flush\"}");
         await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);
     }
 
@@ -158,7 +158,7 @@ public sealed class SttStreamingClient : IAsyncDisposable
             return;
         }
 
-        var bytes = Encoding.UTF8.GetBytes("""{"type":"close"}""");
+        var bytes = Encoding.UTF8.GetBytes("{\"type\":\"close\"}");
         try
         {
             await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, cancellationToken).ConfigureAwait(false);

@@ -22,10 +22,18 @@ public sealed class MediaPlatformOptions
     /// <summary>Hostname placed in media platform config (should match the certificate CN/SAN).</summary>
     public string ServiceFqdn { get; init; } = string.Empty;
 
+    /// <summary>UDP RTP port range (inclusive). Microsoft Teams media uses this range for audio; open on firewall/NAT.</summary>
+    public int MediaPortMin { get; init; } = 41000;
+
+    /// <summary>UDP RTP port range (inclusive). Must be &gt;= <see cref="MediaPortMin"/>.</summary>
+    public int MediaPortMax { get; init; } = 41999;
+
     public bool IsComplete() =>
         !string.IsNullOrWhiteSpace(CertificateThumbprint) &&
         InstanceInternalPort > 0 &&
         InstancePublicPort > 0 &&
         !string.IsNullOrWhiteSpace(InstancePublicIPAddress) &&
-        !string.IsNullOrWhiteSpace(ServiceFqdn);
+        !string.IsNullOrWhiteSpace(ServiceFqdn) &&
+        MediaPortMin > 0 &&
+        MediaPortMax >= MediaPortMin;
 }

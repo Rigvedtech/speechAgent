@@ -37,7 +37,7 @@ The bot streams **16 kHz mono PCM** to the STT websocket; on each **final** tran
 
 ## App-hosted media (in-meeting STT from any Teams client)
 1. Provision a TLS certificate in **LocalMachine\\My** whose subject/SAN matches **`MediaPlatform:ServiceFqdn`** (see Microsoft app-hosted media bot requirements).
-2. Open **MediaPlatform:InstancePublicPort** (UDP/TCP per Microsoft docs) to the internet; set **`MediaPlatform:InstancePublicIPAddress`** to the instance’s public IPv4 and **`InstanceInternalPort`** to the local bind port.
+2. Open **TCP `InstancePublicPort`** (default **8445**) and **inbound UDP `MediaPortMin`–`MediaPortMax`** (default **41000–41999**) on the firewall/NAT to the bot host. Set **`MediaPlatform:InstancePublicIPAddress`** to the instance’s public IPv4 and **`InstanceInternalPort`** to the local bind port. TCP-only on 8445 is not enough for app-hosted media (calls may fail with **500#1203002**).
 3. Set **`MeetingBot:CallbackBaseUrl`** to your public HTTPS base (e.g. ngrok) ending with `/`; notifications use `{CallbackBaseUrl}api/calls/callback`.
 4. Set **`MeetingBot:UseApplicationHostedMedia`**=**true**, **`MeetingBot:EnableSttVoiceLoop`**=**false** (loopback is not used in this mode), and run **`python stt_server.py`** on the bot host.
 5. Deploy on a topology where **one process** owns signaling + media for the call (see “Production constraints” above). Plain HTTP-only tunnels do **not** replace public media ports.

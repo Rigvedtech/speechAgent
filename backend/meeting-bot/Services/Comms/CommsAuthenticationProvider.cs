@@ -1,5 +1,6 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Headers;
+using System.Security.Claims;
 using Microsoft.Graph.Communications.Client.Authentication;
 using Microsoft.Graph.Communications.Common;
 using Microsoft.Graph.Communications.Common.Telemetry;
@@ -13,6 +14,10 @@ namespace MeetingBot.Services.Comms;
 /// <summary>Minimal IRequestAuthenticationProvider for Graph Communications Calling (from Microsoft sample pattern).</summary>
 internal sealed class CommsAuthenticationProvider : ObjectRoot, IRequestAuthenticationProvider
 {
+    private const string TenantClaimUri = "http://schemas.microsoft.com/identity/claims/tenantid";
+    /// <summary>Skype/Graph callback tokens are ~5 minutes; VMs under org policy often drift from NTP.</summary>
+    private static readonly TimeSpan InboundTokenClockSkew = TimeSpan.FromMinutes(20);
+
     private readonly string _appId;
     private readonly string _appSecret;
     private readonly TimeSpan _openIdConfigRefreshInterval = TimeSpan.FromHours(2);
@@ -58,6 +63,7 @@ internal sealed class CommsAuthenticationProvider : ObjectRoot, IRequestAuthenti
         var token = request.Headers.Authorization?.Parameter;
         if (string.IsNullOrWhiteSpace(token))
         {
+            GraphLogger.Warn("Inbound callback rejected: missing Bearer token.");
             return new RequestValidationResult { IsValid = false };
         }
 
@@ -78,28 +84,71 @@ internal sealed class CommsAuthenticationProvider : ObjectRoot, IRequestAuthenti
             ValidIssuers = new[] { "https://graph.microsoft.com", "https://api.botframework.com" },
             ValidAudience = _appId,
             IssuerSigningKeys = _openIdConfiguration.SigningKeys,
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ClockSkew = InboundTokenClockSkew,
         };
+
+        var handler = new JwtSecurityTokenHandler { MapInboundClaims = false };
 
         try
         {
-            var handler = new JwtSecurityTokenHandler();
-            var claimsPrincipal = handler.ValidateToken(token, validationParameters, out _);
-            const string tenantClaimType = "http://schemas.microsoft.com/identity/claims/tenantid";
-            var tenantClaim = claimsPrincipal.FindFirst(c => c.Type.Equals(tenantClaimType, StringComparison.Ordinal));
-            if (string.IsNullOrEmpty(tenantClaim?.Value))
+            var principal = handler.ValidateToken(token, validationParameters, out var validatedToken);
+            var jwt = validatedToken as JwtSecurityToken ?? handler.ReadJwtToken(token);
+            var tenantId = ResolveTenantId(jwt, principal);
+            if (string.IsNullOrEmpty(tenantId))
             {
+                GraphLogger.Warn("Inbound callback rejected: tenant id (tid) missing after token validation.");
                 return new RequestValidationResult { IsValid = false };
             }
 
 #pragma warning disable CS0618
-            request.Properties.Add(HttpConstants.HeaderNames.Tenant, tenantClaim.Value);
+            request.Properties.Add(HttpConstants.HeaderNames.Tenant, tenantId);
 #pragma warning restore CS0618
-            return new RequestValidationResult { IsValid = true, TenantId = tenantClaim.Value };
+            return new RequestValidationResult { IsValid = true, TenantId = tenantId };
         }
         catch (Exception ex)
         {
-            GraphLogger.Error(ex, "Failed to validate inbound notification token.");
+            try
+            {
+                var jwt = handler.ReadJwtToken(token);
+                var aud = jwt.Audiences.FirstOrDefault() ?? jwt.Subject ?? "(none)";
+                GraphLogger.Error(
+                    ex,
+                    $"Failed to validate inbound notification token. iss={jwt.Issuer} aud={aud} nbf={jwt.ValidFrom:O} exp={jwt.ValidTo:O} utcNow={DateTime.UtcNow:O} clockSkewMin={InboundTokenClockSkew.TotalMinutes}");
+            }
+            catch
+            {
+                GraphLogger.Error(ex, "Failed to validate inbound notification token.");
+            }
+
             return new RequestValidationResult { IsValid = false };
         }
+    }
+
+    private static string? ResolveTenantId(JwtSecurityToken jwt, ClaimsPrincipal? principal)
+    {
+        var fromJwt = FindTenantClaim(jwt.Claims);
+        if (!string.IsNullOrEmpty(fromJwt))
+        {
+            return fromJwt;
+        }
+
+        return principal is null ? null : FindTenantClaim(principal.Claims);
+    }
+
+    private static string? FindTenantClaim(IEnumerable<Claim> claims)
+    {
+        foreach (var claim in claims)
+        {
+            if (claim.Type.Equals("tid", StringComparison.Ordinal) ||
+                claim.Type.Equals(TenantClaimUri, StringComparison.Ordinal))
+            {
+                return claim.Value;
+            }
+        }
+
+        return null;
     }
 }
