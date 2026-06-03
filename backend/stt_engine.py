@@ -39,6 +39,18 @@ class STTEngine:
             data = data.mean(axis=1, keepdims=True)
             
         self.state.audio_queue.put(data)
+    
+    def feed_external_audio(self, audio_data: np.ndarray):
+        """
+        Feed audio from external source (e.g., Recall.ai) instead of microphone.
+        
+        Args:
+            audio_data: Audio as numpy array (float32, normalized to [-1, 1])
+        """
+        try:
+            self.state.audio_queue.put(audio_data, block=False)
+        except queue.Full:
+            print("[STT] Warning: Audio queue full, dropping chunk", file=sys.stderr)
 
     def process_audio(self):
         """Worker thread to process audio chunks using VAD and transcribe."""
