@@ -1,9 +1,9 @@
-using System.Text.Json;
 using System.Net;
+using System.Text.Json;
 using MeetingBot.Models.Domain;
 using MeetingBot.Models.Options;
 using MeetingBot.Models.Requests;
-using MeetingBot.Services.Comms;
+using MeetingBot.Services.Acs;
 using Microsoft.Extensions.Options;
 
 namespace MeetingBot.Services;
@@ -11,37 +11,41 @@ namespace MeetingBot.Services;
 public sealed class CallLifecycleService
 {
     private sealed record CallNotification(string CallId, bool IsEstablished, bool IsTerminated);
+
     public sealed record TurnProcessingResult(bool Success, string Message, string? TurnId = null, string? TraceId = null);
 
     private readonly GraphCallsClient _graphCallsClient;
+    private readonly AcsCallJoinService _acsJoin;
+    private readonly AcsCallActionsService _acsActions;
+    private readonly AcsCallRegistry _acsRegistry;
     private readonly RoomSessionStore _store;
     private readonly AiBridgeClient _aiBridgeClient;
-    private readonly ISttVoiceLoopStarter _sttVoiceLoopStarter;
-    private readonly TeamsCommunicationsService _comms;
     private readonly ILogger<CallLifecycleService> _logger;
     private readonly MeetingBotOptions _options;
 
     public CallLifecycleService(
         GraphCallsClient graphCallsClient,
+        AcsCallJoinService acsJoin,
+        AcsCallActionsService acsActions,
+        AcsCallRegistry acsRegistry,
         RoomSessionStore store,
         AiBridgeClient aiBridgeClient,
-        ISttVoiceLoopStarter sttVoiceLoopStarter,
-        TeamsCommunicationsService comms,
         IOptions<MeetingBotOptions> options,
         ILogger<CallLifecycleService> logger)
     {
         _graphCallsClient = graphCallsClient;
+        _acsJoin = acsJoin;
+        _acsActions = acsActions;
+        _acsRegistry = acsRegistry;
         _store = store;
         _aiBridgeClient = aiBridgeClient;
-        _sttVoiceLoopStarter = sttVoiceLoopStarter;
-        _comms = comms;
         _logger = logger;
         _options = options.Value;
     }
 
-    // Phase-3 wiring note:
-    // Actual Teams audio ingestion requires the application-hosted media pipeline (Graph Communications Calling SDK).
-    // This method is the orchestration hook we will call from the media receive loop once PCM frames arrive.
+    private static bool IsAcsBackend(RoomSession session) =>
+        session.JoinBackend.Equals("Acs", StringComparison.OrdinalIgnoreCase);
+
     public async Task HandleFinalTranscriptAsync(string roomId, string transcript, CancellationToken cancellationToken)
     {
         await SubmitTurnAsync(roomId, new SubmitTurnRequest { Transcript = transcript }, cancellationToken);
@@ -56,30 +60,34 @@ public sealed class CallLifecycleService
             Status = RoomStatus.Joining,
             StartedAtUtc = DateTimeOffset.UtcNow
         };
-        session.Events.Add(new CallEvent { EventType = "start-requested", Details = "Start endpoint triggered" });
+        session.JoinBackend = _options.UseGraphJoin ? "Graph" : "Acs";
+        session.Events.Add(new CallEvent { EventType = "start-requested", Details = $"{session.JoinBackend} join requested" });
         _store.Upsert(session);
 
         string callId;
-        if (_comms.IsEnabled)
+        if (_options.UseGraphJoin)
         {
-            session.Events.Add(new CallEvent { EventType = "join-via-comms-sdk", Details = "Application-hosted media join" });
-            _store.Upsert(session);
-            callId = await _comms.JoinMeetingAsync(request.RoomId, request.MeetingJoinUrl, cancellationToken).ConfigureAwait(false);
+            callId = await _graphCallsClient.CreateMeetingCallAsync(request.MeetingJoinUrl, cancellationToken)
+                .ConfigureAwait(false);
+            session.Events.Add(new CallEvent { EventType = "graph-call-created", Details = $"CallId={callId}" });
         }
         else
         {
-            if (_options.UseApplicationHostedMedia)
+            if (!_acsJoin.IsConfigured)
             {
                 throw new InvalidOperationException(
-                    "MeetingBot:UseApplicationHostedMedia is true but the Communications client failed to start. " +
-                    "Complete MediaPlatform settings (certificate, ports, public IP, ServiceFqdn) or set UseApplicationHostedMedia=false.");
+                    "ACS join is not configured. Set Acs__ConnectionString and MeetingBot__CallbackBaseUrl, " +
+                    "or set MeetingBot__MeetingJoinBackend=Graph for Teams meetings.");
             }
 
-            callId = await _graphCallsClient.CreateMeetingCallAsync(request.MeetingJoinUrl, cancellationToken).ConfigureAwait(false);
+            callId = await _acsJoin.JoinTeamsMeetingAsync(
+                request.RoomId,
+                request.MeetingJoinUrl,
+                cancellationToken).ConfigureAwait(false);
+            session.Events.Add(new CallEvent { EventType = "acs-call-created", Details = $"CallConnectionId={callId}" });
         }
 
         session.CallId = callId;
-        session.Events.Add(new CallEvent { EventType = "graph-call-created", Details = $"CallId={callId}" });
         _store.Upsert(session);
         return session;
     }
@@ -91,34 +99,41 @@ public sealed class CallLifecycleService
             return false;
         }
 
-        await _sttVoiceLoopStarter.StopAsync(roomId, cancellationToken).ConfigureAwait(false);
-
         session.Status = RoomStatus.Leaving;
         session.Events.Add(new CallEvent { EventType = "leave-requested", Details = reason });
         _store.Upsert(session);
 
         try
         {
-            if (_comms.IsEnabled)
+            if (IsAcsBackend(session))
             {
-                await _comms.TryDeleteCallAsync(session.CallId, cancellationToken).ConfigureAwait(false);
+                await _acsActions.HangUpAsync(session.CallId, cancellationToken).ConfigureAwait(false);
             }
             else
             {
                 await _graphCallsClient.EndCallAsync(session.CallId, cancellationToken).ConfigureAwait(false);
             }
         }
-        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound)
+        catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.NotFound && !IsAcsBackend(session))
         {
-            // Idempotent leave: call may already be ended by callback/manual leave.
             _logger.LogInformation("Call {CallId} already ended when leave was requested.", session.CallId);
             session.Events.Add(new CallEvent { EventType = "call-end-already-ended", Details = "Graph returned 404 on end call" });
         }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Hang up / end call error for room {RoomId}", roomId);
+        }
+
         session.Status = RoomStatus.Ended;
         session.EndedAtUtc = DateTimeOffset.UtcNow;
         session.LeaveReason = reason;
         session.Events.Add(new CallEvent { EventType = "call-ended", Details = reason });
         _store.Upsert(session);
+        if (IsAcsBackend(session))
+        {
+            _acsRegistry.RemoveByRoom(roomId);
+        }
+
         return true;
     }
 
@@ -164,9 +179,6 @@ public sealed class CallLifecycleService
 
         try
         {
-            session.Events.Add(new CallEvent { EventType = "stt-ready", Details = $"TurnId={turnId}; Transcript={transcript}" });
-            _store.Upsert(session);
-
             var history = new List<string>();
             if (!string.IsNullOrWhiteSpace(session.LastBotReply))
             {
@@ -179,31 +191,15 @@ public sealed class CallLifecycleService
                 transcript,
                 turnId,
                 history,
-                cancellationToken);
+                cancellationToken).ConfigureAwait(false);
 
             if (turnResponse is null)
             {
-                session.Events.Add(new CallEvent { EventType = "turn-processing-failed", Details = $"TurnId={turnId}; AI bridge returned null response." });
-                _store.Upsert(session);
                 return new TurnProcessingResult(false, "AI bridge did not return a response.", turnId, turnId);
             }
 
             session.LastTurnTraceId = turnResponse.TraceId;
             session.LastBotReply = turnResponse.ReplyText;
-            session.Events.Add(
-                new CallEvent
-                {
-                    EventType = "llm-reply-ready",
-                    Details = $"TurnId={turnId}; TraceId={turnResponse.TraceId}; Reply={turnResponse.ReplyText}"
-                });
-            session.Events.Add(
-                new CallEvent
-                {
-                    EventType = "tts-audio-ready",
-                    Details = string.IsNullOrWhiteSpace(turnResponse.AudioUri)
-                        ? $"TurnId={turnId}; No audio URI returned."
-                        : $"TurnId={turnId}; AudioUri={turnResponse.AudioUri}; LatencyMs={turnResponse.LatencyMs}"
-                });
             _store.Upsert(session);
 
             if (string.IsNullOrWhiteSpace(turnResponse.AudioUri))
@@ -211,21 +207,11 @@ public sealed class CallLifecycleService
                 return new TurnProcessingResult(false, "TTS did not return audio URI.", turnId, turnResponse.TraceId);
             }
 
-            var played = await TryPlayPromptWithRetryAsync(
-                session,
-                session.CallId!,
-                turnResponse.AudioUri!,
-                turnId,
-                cancellationToken);
-
-            if (played)
-            {
-                session.LastPlayPromptAtUtc = DateTimeOffset.UtcNow;
-                _store.Upsert(session);
-                return new TurnProcessingResult(true, "Turn played successfully.", turnId, turnResponse.TraceId);
-            }
-
-            return new TurnProcessingResult(false, "Failed to play turn audio.", turnId, turnResponse.TraceId);
+            var played = await TryPlayAudioWithRetryAsync(session, session.CallId!, turnResponse.AudioUri, turnId, cancellationToken)
+                .ConfigureAwait(false);
+            return played
+                ? new TurnProcessingResult(true, "Turn processed and audio playback requested.", turnId, turnResponse.TraceId)
+                : new TurnProcessingResult(false, "Failed to play turn audio.", turnId, turnResponse.TraceId);
         }
         finally
         {
@@ -239,8 +225,6 @@ public sealed class CallLifecycleService
         var notifications = ParseCallNotifications(payload);
         if (notifications.Count == 0)
         {
-            // Some Graph callback payloads omit/reshape state fields.
-            // As a fallback, infer call id by matching known active call ids in the payload.
             var inferredCallId = _store
                 .GetAll()
                 .Select(s => s.CallId)
@@ -271,25 +255,337 @@ public sealed class CallLifecycleService
                 continue;
             }
 
-            await RunEstablishedSessionFlowAsync(session, callId, startLocalSttAfterGreeting: !_comms.IsEnabled, cancellationToken)
-                .ConfigureAwait(false);
+            if (IsAcsBackend(session))
+            {
+                continue;
+            }
+
+            await RunEstablishedSessionFlowAsync(session, callId, cancellationToken).ConfigureAwait(false);
         }
 
         foreach (var notification in notifications.Where(n => n.IsTerminated))
         {
             var callId = notification.CallId;
             var session = string.IsNullOrWhiteSpace(callId) ? null : _store.FindByCallId(callId);
-            if (session is not null)
+            if (session is null || IsAcsBackend(session))
             {
-                await _sttVoiceLoopStarter.StopAsync(session.RoomId, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
 
-                session.Status = RoomStatus.Ended;
-                session.EndedAtUtc = DateTimeOffset.UtcNow;
-                session.LeaveReason ??= "terminated-callback";
-                session.Events.Add(new CallEvent { EventType = "call-terminated-callback", Details = "Graph callback terminated" });
-                _store.Upsert(session);
+            session.Status = RoomStatus.Ended;
+            session.EndedAtUtc = DateTimeOffset.UtcNow;
+            session.LeaveReason ??= "terminated-callback";
+            session.Events.Add(new CallEvent { EventType = "call-terminated-callback", Details = "Graph callback terminated" });
+            _store.Upsert(session);
+        }
+    }
+
+    public async Task RunAcsEstablishedFlowAsync(string roomId, string callConnectionId, CancellationToken cancellationToken)
+    {
+        if (!_store.TryGet(roomId, out var session) || session is null || !IsAcsBackend(session))
+        {
+            return;
+        }
+
+        session.CallId = callConnectionId;
+        await RunEstablishedSessionFlowAsync(session, callConnectionId, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task TryConsumeSttFinalAsync(string roomId, string transcript, CancellationToken cancellationToken)
+    {
+        if (!_store.TryGet(roomId, out var session) || session is null)
+        {
+            return;
+        }
+
+        if (session.Status is RoomStatus.Ended or RoomStatus.Leaving)
+        {
+            return;
+        }
+
+        if (session.SttSuppressedUntilUtc is { } sup && DateTimeOffset.UtcNow < sup)
+        {
+            return;
+        }
+
+        if (session.IsProcessingTurn)
+        {
+            return;
+        }
+
+        var t = transcript.Trim();
+        if (t.Length < _options.SttMinTranscriptLength)
+        {
+            return;
+        }
+
+        var wordCount = t.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
+        if (wordCount < _options.SttMinWordCount)
+        {
+            return;
+        }
+
+        if (session.LastSttForwardedAtUtc is { } la &&
+            session.LastSttForwardedText is { } lx &&
+            (DateTimeOffset.UtcNow - la) < TimeSpan.FromSeconds(4) &&
+            string.Equals(lx, t, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(session.LastBotReply) &&
+            t.Length <= session.LastBotReply.Length + 12 &&
+            session.LastBotReply.Contains(t, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        session.LastSttForwardedText = t;
+        session.LastSttForwardedAtUtc = DateTimeOffset.UtcNow;
+        session.Events.Add(new CallEvent { EventType = "stt-final-received", Details = t });
+        _store.Upsert(session);
+
+        await HandleFinalTranscriptAsync(roomId, t, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task RunEstablishedSessionFlowAsync(
+        RoomSession session,
+        string callConnectionId,
+        CancellationToken cancellationToken)
+    {
+        if (!session.Events.Any(e => e.EventType == "call-established"))
+        {
+            session.Status = RoomStatus.Established;
+            session.Events.Add(new CallEvent
+            {
+                EventType = "call-established",
+                Details = IsAcsBackend(session) ? "ACS CallConnected" : "Graph callback established"
+            });
+            _store.Upsert(session);
+        }
+
+        var greetingRequested = session.Events.Any(e =>
+            e.EventType is "greeting-play-requested" or "greeting-playprompt-requested");
+        if (!greetingRequested)
+        {
+            var audioUri = await _aiBridgeClient.RequestFixedPhraseAsync(
+                session.RoomId,
+                callConnectionId,
+                _options.FixedGreetingLine,
+                cancellationToken).ConfigureAwait(false);
+
+            session.Events.Add(
+                new CallEvent
+                {
+                    EventType = "fixed-line-ready",
+                    Details = audioUri is null ? "No TTS URI" : $"AudioUri={audioUri}"
+                });
+            _store.Upsert(session);
+
+            if (!string.IsNullOrWhiteSpace(audioUri))
+            {
+                await TryPlayGreetingWithRetryAsync(session, callConnectionId, audioUri, cancellationToken).ConfigureAwait(false);
             }
         }
+
+        if (!session.Events.Any(e => e.EventType == "auto-leave-scheduled") && _options.AutoLeaveSeconds > 0)
+        {
+            session.Events.Add(new CallEvent { EventType = "auto-leave-scheduled", Details = $"Delay={_options.AutoLeaveSeconds}s" });
+            _store.Upsert(session);
+
+            _ = Task.Run(
+                async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(_options.AutoLeaveSeconds), cancellationToken).ConfigureAwait(false);
+                        await LeaveAsync(session.RoomId, "auto-leave-timer", cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Auto-leave failed for room {RoomId}", session.RoomId);
+                    }
+                },
+                cancellationToken);
+        }
+    }
+
+    private Task TryPlayGreetingWithRetryAsync(
+        RoomSession session,
+        string callId,
+        string audioUri,
+        CancellationToken cancellationToken) =>
+        IsAcsBackend(session)
+            ? TryPlayAcsGreetingWithRetryAsync(session, callId, audioUri, cancellationToken)
+            : TryPlayGraphGreetingWithRetryAsync(session, callId, audioUri, cancellationToken);
+
+    private async Task TryPlayAcsGreetingWithRetryAsync(
+        RoomSession session,
+        string callConnectionId,
+        string audioUri,
+        CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 5;
+        var delay = TimeSpan.FromSeconds(2);
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                session.Events.Add(new CallEvent { EventType = "greeting-play-requested", Details = $"Attempt={attempt}" });
+                _store.Upsert(session);
+                await _acsActions.PlayAudioUriAsync(callConnectionId, audioUri, cancellationToken).ConfigureAwait(false);
+                ArmSttSuppression(session);
+                return;
+            }
+            catch (Exception ex) when (attempt < maxAttempts)
+            {
+                _logger.LogInformation(ex, "ACS greeting play deferred attempt {Attempt} room {RoomId}", attempt, session.RoomId);
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "ACS greeting play failed room {RoomId}", session.RoomId);
+                session.Events.Add(new CallEvent { EventType = "greeting-play-failed", Details = ex.Message });
+                _store.Upsert(session);
+                return;
+            }
+        }
+    }
+
+    private async Task TryPlayGraphGreetingWithRetryAsync(
+        RoomSession session,
+        string callId,
+        string audioUri,
+        CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 5;
+        var delay = TimeSpan.FromSeconds(2);
+        Exception? lastException = null;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                await _graphCallsClient.PlayPromptAsync(callId, audioUri, cancellationToken).ConfigureAwait(false);
+                session.Events.Add(new CallEvent
+                {
+                    EventType = "greeting-playprompt-requested",
+                    Details = $"Requested Graph playPrompt on attempt {attempt}"
+                });
+                ArmSttSuppression(session);
+                _store.Upsert(session);
+                return;
+            }
+            catch (Exception ex) when (IsNotEstablishedPlayPromptError(ex) && attempt < maxAttempts)
+            {
+                lastException = ex;
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+                break;
+            }
+        }
+
+        if (lastException is not null)
+        {
+            _logger.LogWarning(lastException, "Graph playPrompt failed for room {RoomId} call {CallId}", session.RoomId, callId);
+            session.Events.Add(new CallEvent { EventType = "greeting-playprompt-failed", Details = lastException.Message });
+            _store.Upsert(session);
+        }
+    }
+
+    private Task<bool> TryPlayAudioWithRetryAsync(
+        RoomSession session,
+        string callId,
+        string audioUri,
+        string turnId,
+        CancellationToken cancellationToken) =>
+        IsAcsBackend(session)
+            ? TryPlayAcsAudioWithRetryAsync(session, callId, audioUri, turnId, cancellationToken)
+            : TryPlayGraphAudioWithRetryAsync(session, callId, audioUri, turnId, cancellationToken);
+
+    private async Task<bool> TryPlayAcsAudioWithRetryAsync(
+        RoomSession session,
+        string callConnectionId,
+        string audioUri,
+        string turnId,
+        CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 5;
+        var delay = TimeSpan.FromSeconds(2);
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                session.Events.Add(new CallEvent { EventType = "acs-play-requested", Details = $"TurnId={turnId}; Attempt={attempt}" });
+                _store.Upsert(session);
+                await _acsActions.PlayAudioUriAsync(callConnectionId, audioUri, cancellationToken).ConfigureAwait(false);
+                ArmSttSuppression(session);
+                return true;
+            }
+            catch (Exception ex) when (attempt < maxAttempts)
+            {
+                _logger.LogInformation(ex, "ACS play deferred attempt {Attempt} room {RoomId}", attempt, session.RoomId);
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "ACS play failed room {RoomId} turn {TurnId}", session.RoomId, turnId);
+                session.Events.Add(new CallEvent { EventType = "acs-play-failed", Details = ex.Message });
+                _store.Upsert(session);
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    private async Task<bool> TryPlayGraphAudioWithRetryAsync(
+        RoomSession session,
+        string callId,
+        string audioUri,
+        string turnId,
+        CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 5;
+        var delay = TimeSpan.FromSeconds(2);
+        Exception? lastException = null;
+
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        {
+            try
+            {
+                session.Events.Add(new CallEvent { EventType = "playprompt-requested", Details = $"TurnId={turnId}; Attempt={attempt}" });
+                _store.Upsert(session);
+                await _graphCallsClient.PlayPromptAsync(callId, audioUri, cancellationToken).ConfigureAwait(false);
+                session.Events.Add(new CallEvent { EventType = "playprompt-completed", Details = $"TurnId={turnId}; Attempt={attempt}" });
+                ArmSttSuppression(session);
+                _store.Upsert(session);
+                return true;
+            }
+            catch (Exception ex) when (IsNotEstablishedPlayPromptError(ex) && attempt < maxAttempts)
+            {
+                lastException = ex;
+                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                lastException = ex;
+                break;
+            }
+        }
+
+        if (lastException is not null)
+        {
+            session.Events.Add(new CallEvent { EventType = "playprompt-failed", Details = $"TurnId={turnId}; {lastException.Message}" });
+            _store.Upsert(session);
+        }
+
+        return false;
     }
 
     private List<CallNotification> ParseCallNotifications(string payload)
@@ -323,7 +619,7 @@ public sealed class CallLifecycleService
                     var resourcePath = GetString(item, "resource");
                     if (!string.IsNullOrWhiteSpace(resourcePath))
                     {
-                        var marker = "/communications/calls/";
+                        const string marker = "/communications/calls/";
                         var idx = resourcePath.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
                         if (idx >= 0)
                         {
@@ -352,7 +648,7 @@ public sealed class CallLifecycleService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to parse Graph callback payload.");
-            return new List<CallNotification>();
+            return [];
         }
     }
 
@@ -380,241 +676,15 @@ public sealed class CallLifecycleService
         payload.Contains("\"status\":\"terminated\"", StringComparison.OrdinalIgnoreCase) ||
         payload.Contains("\"changeType\":\"deleted\"", StringComparison.OrdinalIgnoreCase);
 
-    private async Task TryPlayGreetingWithRetryAsync(RoomSession session, string callId, string audioUri, CancellationToken cancellationToken)
+    private static bool IsNotEstablishedPlayPromptError(Exception ex)
     {
-        const int maxAttempts = 5;
-        var delay = TimeSpan.FromSeconds(2);
-        Exception? lastException = null;
-
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
+        if (ex is not HttpRequestException httpEx || string.IsNullOrWhiteSpace(httpEx.Message))
         {
-            try
-            {
-                await _graphCallsClient.PlayPromptAsync(callId, audioUri, cancellationToken);
-                session.Events.Add(
-                    new CallEvent
-                    {
-                        EventType = "greeting-playprompt-requested",
-                        Details = $"Requested Graph playPrompt on attempt {attempt}"
-                    });
-                ArmSttSuppression(session);
-                _store.Upsert(session);
-                return;
-            }
-            catch (Exception ex) when (IsNotEstablishedPlayPromptError(ex) && attempt < maxAttempts)
-            {
-                lastException = ex;
-                _logger.LogInformation(
-                    "playPrompt attempt {Attempt}/{MaxAttempts} deferred for room {RoomId} call {CallId}: call not established yet.",
-                    attempt,
-                    maxAttempts,
-                    session.RoomId,
-                    callId);
-                await Task.Delay(delay, cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                lastException = ex;
-                break;
-            }
+            return false;
         }
 
-        if (lastException is not null)
-        {
-            _logger.LogWarning(lastException, "playPrompt failed for room {RoomId} call {CallId}", session.RoomId, callId);
-            session.Events.Add(new CallEvent { EventType = "greeting-playprompt-failed", Details = lastException.Message });
-            _store.Upsert(session);
-        }
-    }
-
-    private async Task<bool> TryPlayPromptWithRetryAsync(
-        RoomSession session,
-        string callId,
-        string audioUri,
-        string turnId,
-        CancellationToken cancellationToken)
-    {
-        const int maxAttempts = 5;
-        var delay = TimeSpan.FromSeconds(2);
-        Exception? lastException = null;
-
-        for (var attempt = 1; attempt <= maxAttempts; attempt++)
-        {
-            try
-            {
-                session.Events.Add(new CallEvent { EventType = "playprompt-requested", Details = $"TurnId={turnId}; Attempt={attempt}" });
-                _store.Upsert(session);
-                await _graphCallsClient.PlayPromptAsync(callId, audioUri, cancellationToken);
-                session.Events.Add(new CallEvent { EventType = "playprompt-completed", Details = $"TurnId={turnId}; Attempt={attempt}" });
-                ArmSttSuppression(session);
-                _store.Upsert(session);
-                return true;
-            }
-            catch (Exception ex) when (IsNotEstablishedPlayPromptError(ex) && attempt < maxAttempts)
-            {
-                lastException = ex;
-                _logger.LogInformation(
-                    "turn playPrompt attempt {Attempt}/{MaxAttempts} deferred for room {RoomId} call {CallId}: call not established yet.",
-                    attempt,
-                    maxAttempts,
-                    session.RoomId,
-                    callId);
-                await Task.Delay(delay, cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                lastException = ex;
-                break;
-            }
-        }
-
-        if (lastException is not null)
-        {
-            session.Events.Add(new CallEvent { EventType = "playprompt-failed", Details = $"TurnId={turnId}; {lastException.Message}" });
-            _store.Upsert(session);
-            _logger.LogWarning(lastException, "Turn playPrompt failed for room {RoomId} call {CallId}", session.RoomId, callId);
-        }
-        return false;
-    }
-
-    /// <summary>Invoked when an app-hosted media call becomes established.</summary>
-    public async Task OnAppHostedCallEstablishedAsync(string callId, CancellationToken cancellationToken)
-    {
-        var session = _store.FindByCallId(callId);
-        if (session is null)
-        {
-            _logger.LogWarning("App-hosted call {CallId} established but no room session is registered.", callId);
-            return;
-        }
-
-        await RunEstablishedSessionFlowAsync(session, callId, startLocalSttAfterGreeting: false, cancellationToken).ConfigureAwait(false);
-    }
-
-    /// <summary>Shared gate for STT finals from loopback/mic or in-call media before turn processing.</summary>
-    public async Task TryConsumeSttFinalAsync(string roomId, string transcript, CancellationToken cancellationToken)
-    {
-        if (!_store.TryGet(roomId, out var session) || session is null)
-        {
-            return;
-        }
-
-        if (session.Status is RoomStatus.Ended or RoomStatus.Leaving)
-        {
-            return;
-        }
-
-        if (session.SttSuppressedUntilUtc is { } sup && DateTimeOffset.UtcNow < sup)
-        {
-            _logger.LogInformation("STT final dropped (suppressed until {Until:o}) room={RoomId} text={Text}", sup, roomId, transcript);
-            return;
-        }
-
-        if (session.IsProcessingTurn)
-        {
-            return;
-        }
-
-        var t = transcript.Trim();
-        if (t.Length < _options.SttMinTranscriptLength)
-        {
-            return;
-        }
-
-        var wordCount = t.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length;
-        if (wordCount < _options.SttMinWordCount)
-        {
-            _logger.LogDebug("STT final dropped (min words {Need}) room={RoomId} text={Text}", _options.SttMinWordCount, roomId, t);
-            return;
-        }
-
-        if (session.LastSttForwardedAtUtc is { } la &&
-            session.LastSttForwardedText is { } lx &&
-            (DateTimeOffset.UtcNow - la) < TimeSpan.FromSeconds(4) &&
-            string.Equals(lx, t, StringComparison.OrdinalIgnoreCase))
-        {
-            return;
-        }
-
-        if (!string.IsNullOrWhiteSpace(session.LastBotReply) &&
-            t.Length <= session.LastBotReply.Length + 12 &&
-            session.LastBotReply.Contains(t, StringComparison.OrdinalIgnoreCase))
-        {
-            _logger.LogDebug("STT skipped as likely bot-playback echo room={RoomId}", roomId);
-            return;
-        }
-
-        session.LastSttForwardedText = t;
-        session.LastSttForwardedAtUtc = DateTimeOffset.UtcNow;
-        session.Events.Add(new CallEvent { EventType = "stt-final-received", Details = t });
-        _store.Upsert(session);
-
-        await HandleFinalTranscriptAsync(roomId, t, cancellationToken).ConfigureAwait(false);
-    }
-
-    private async Task RunEstablishedSessionFlowAsync(
-        RoomSession session,
-        string callId,
-        bool startLocalSttAfterGreeting,
-        CancellationToken cancellationToken)
-    {
-        var alreadyEstablished = session.Events.Any(e => e.EventType == "call-established");
-        if (!alreadyEstablished)
-        {
-            session.Status = RoomStatus.Established;
-            session.Events.Add(new CallEvent { EventType = "call-established", Details = "Callback state established" });
-            _store.Upsert(session);
-        }
-
-        var alreadyRequestedGreeting = session.Events.Any(e => e.EventType == "greeting-playprompt-requested");
-        if (!alreadyRequestedGreeting)
-        {
-            var audioUri = await _aiBridgeClient.RequestFixedPhraseAsync(
-                session.RoomId,
-                callId,
-                _options.FixedGreetingLine,
-                cancellationToken).ConfigureAwait(false);
-            session.Events.Add(
-                new CallEvent
-                {
-                    EventType = "fixed-line-ready",
-                    Details = audioUri is null
-                        ? "No AI audio URI returned; continue with media SDK implementation."
-                        : $"AI audio URI generated: {audioUri}"
-                });
-            _store.Upsert(session);
-
-            if (!string.IsNullOrWhiteSpace(audioUri))
-            {
-                await TryPlayGreetingWithRetryAsync(session, callId, audioUri, cancellationToken).ConfigureAwait(false);
-            }
-        }
-
-        if (startLocalSttAfterGreeting)
-        {
-            _sttVoiceLoopStarter.RequestStartAfterGreeting(session.RoomId);
-        }
-
-        var alreadyScheduledAutoLeave = session.Events.Any(e => e.EventType == "auto-leave-scheduled");
-        if (!alreadyScheduledAutoLeave && _options.AutoLeaveSeconds > 0)
-        {
-            session.Events.Add(new CallEvent { EventType = "auto-leave-scheduled", Details = $"Delay={_options.AutoLeaveSeconds}s" });
-            _store.Upsert(session);
-
-            _ = Task.Run(
-                async () =>
-                {
-                    try
-                    {
-                        await Task.Delay(TimeSpan.FromSeconds(_options.AutoLeaveSeconds), cancellationToken).ConfigureAwait(false);
-                        await LeaveAsync(session.RoomId, "auto-leave-timer", cancellationToken).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Auto-leave timer failed for room {RoomId}", session.RoomId);
-                    }
-                },
-                cancellationToken);
-        }
+        return httpEx.Message.Contains("\"code\":\"8501\"", StringComparison.OrdinalIgnoreCase) ||
+               httpEx.Message.Contains("not in Established state", StringComparison.OrdinalIgnoreCase);
     }
 
     private void ArmSttSuppression(RoomSession session)
@@ -625,16 +695,5 @@ public sealed class CallLifecycleService
         }
 
         session.SttSuppressedUntilUtc = DateTimeOffset.UtcNow.AddSeconds(_options.SttSuppressionAfterPlaySeconds);
-    }
-
-    private static bool IsNotEstablishedPlayPromptError(Exception ex)
-    {
-        if (ex is not HttpRequestException httpEx || string.IsNullOrWhiteSpace(httpEx.Message))
-        {
-            return false;
-        }
-
-        return httpEx.Message.Contains("\"code\":\"8501\"", StringComparison.OrdinalIgnoreCase) ||
-               httpEx.Message.Contains("not in Established state", StringComparison.OrdinalIgnoreCase);
     }
 }

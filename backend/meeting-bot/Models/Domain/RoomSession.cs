@@ -27,6 +27,9 @@ public sealed class RoomSession
 
     public string? CallId { get; set; }
 
+    /// <summary><c>Graph</c> or <c>Acs</c> — controls leave, playback, and callbacks.</summary>
+    public string JoinBackend { get; set; } = "Graph";
+
     public RoomStatus Status { get; set; } = RoomStatus.Created;
 
     public DateTimeOffset StartedAtUtc { get; set; } = DateTimeOffset.UtcNow;
@@ -44,6 +47,9 @@ public sealed class RoomSession
     public string? LastBotReply { get; set; }
 
     public DateTimeOffset? LastPlayPromptAtUtc { get; set; }
+
+    /// <summary>TTS audio URI waiting for ACS outbound media playback.</summary>
+    public string? PendingPlaybackAudioUri { get; set; }
 
     /// <summary>While set and in the future, Windows STT loop ignores finals (reduces echo after bot speaks).</summary>
     public DateTimeOffset? SttSuppressedUntilUtc { get; set; }

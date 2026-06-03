@@ -10,7 +10,13 @@ public sealed class MeetingBotOptions
 
     public string OrganizerUserIdOrUpn { get; init; } = string.Empty;
 
+    /// <summary>Teams meeting join: <c>Graph</c> (default, supported) or <c>Acs</c> (Call Automation; Teams meeting link not in public API).</summary>
+    public string MeetingJoinBackend { get; init; } = "Graph";
+
     public string FixedGreetingLine { get; init; } = "Hello, I am the interview bot. Audio path check passed.";
+
+    public bool UseGraphJoin =>
+        !MeetingJoinBackend.Equals("Acs", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>When &gt; 0, the bot ends the call automatically after this many seconds post-establish. 0 disables auto-leave.</summary>
     public int AutoLeaveSeconds { get; init; }

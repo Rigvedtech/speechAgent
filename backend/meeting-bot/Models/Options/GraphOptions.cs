@@ -11,4 +11,10 @@ public sealed class GraphOptions
     public string ClientSecret { get; init; } = string.Empty;
 
     public string Scope { get; init; } = "https://graph.microsoft.com/.default";
+
+    /// <summary>
+    /// Declared app registration tenant mode for baseline validation output.
+    /// Supported values: SingleTenant, MultiTenant, Unknown.
+    /// </summary>
+    public string AppRegistrationTenantMode { get; init; } = "Unknown";
 }
