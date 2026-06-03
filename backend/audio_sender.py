@@ -6,7 +6,6 @@ Handles TTS audio generation and sending to Recall.ai bot for playback in meetin
 import os
 import logging
 import asyncio
-import base64
 from pathlib import Path
 from typing import Optional
 import edge_tts
@@ -64,57 +63,6 @@ class AudioSender:
             logger.error(f"Failed to generate audio: {e}")
             return False
     
-    def convert_to_wav(self, input_path: Path, output_path: Path) -> bool:
-        """
-        Convert MP3 to WAV using ffmpeg (16kHz mono).
-        
-        Args:
-            input_path: Input MP3 file
-            output_path: Output WAV file
-            
-        Returns:
-            True if conversion successful
-        """
-        import subprocess
-        import shutil
-        
-        ffmpeg = shutil.which("ffmpeg")
-        if not ffmpeg:
-            logger.warning("ffmpeg not found, skipping WAV conversion")
-            return False
-        
-        try:
-            cmd = [
-                ffmpeg,
-                "-hide_banner",
-                "-loglevel", "error",
-                "-y",
-                "-i", str(input_path),
-                "-ar", "16000",  # 16kHz sample rate
-                "-ac", "1",       # Mono
-                "-acodec", "pcm_s16le",  # 16-bit PCM
-                str(output_path)
-            ]
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False
-            )
-            
-            if result.returncode == 0 and output_path.exists():
-                logger.debug(f"Converted to WAV: {output_path.name}")
-                return True
-            else:
-                logger.error(f"ffmpeg conversion failed: {result.stderr}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error converting audio: {e}")
-            return False
-    
     async def send_text_to_bot(self, bot_id: str, text: str) -> bool:
         """
         Generate TTS audio and send to bot for playback in meeting.
@@ -134,60 +82,54 @@ class AudioSender:
         # Generate unique filename
         filename = f"tts_{uuid.uuid4().hex[:8]}"
         mp3_path = self.temp_dir / f"{filename}.mp3"
-        wav_path = self.temp_dir / f"{filename}.wav"
         
         try:
             # Generate MP3 using Edge-TTS
             success = await self.generate_audio(text, mp3_path)
             if not success:
+                logger.error(f"Failed to generate TTS audio for text: {text[:50]}")
                 return False
             
-            # Try to convert to WAV (preferred for Teams)
-            final_path = mp3_path
-            audio_codec = "mp3"
-            
-            if self.convert_to_wav(mp3_path, wav_path):
-                final_path = wav_path
-                audio_codec = "wav"
-                # Clean up MP3
-                try:
-                    mp3_path.unlink(missing_ok=True)
-                except:
-                    pass
-            else:
-                logger.info("Using MP3 format (install ffmpeg for WAV)")
+            # Verify file exists and has content
+            if not mp3_path.exists() or mp3_path.stat().st_size == 0:
+                logger.error(f"Generated audio file is empty or missing: {mp3_path}")
+                return False
             
             # Read audio file
-            with open(final_path, "rb") as f:
+            with open(mp3_path, "rb") as f:
                 audio_data = f.read()
             
-            # Send to bot
+            # Send to bot (Recall.ai only supports MP3)
             success = self.recall_service.send_audio_to_bot(
                 bot_id=bot_id,
                 audio_data=audio_data,
-                audio_codec=audio_codec,
-                sample_rate=16000
+                audio_codec="mp3"
             )
             
             elapsed = time.time() - start_time
-            logger.info(
-                f"Sent audio to bot {bot_id}: '{text[:50]}...' "
-                f"({len(audio_data)} bytes, {elapsed:.2f}s)"
-            )
+            
+            if success:
+                logger.info(
+                    f"Sent audio to bot {bot_id}: '{text[:50]}...' "
+                    f"({len(audio_data)} bytes, {elapsed:.2f}s)"
+                )
+            else:
+                logger.error(
+                    f"Failed to send audio to bot {bot_id} for text: {text[:50]}"
+                )
             
             return success
             
         except Exception as e:
-            logger.error(f"Failed to send audio to bot: {e}")
+            logger.error(f"Failed to send audio to bot: {e}", exc_info=True)
             return False
             
         finally:
             # Cleanup temp files
             try:
                 mp3_path.unlink(missing_ok=True)
-                wav_path.unlink(missing_ok=True)
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to cleanup temp file {mp3_path}: {e}")
     
     def send_text_to_bot_sync(self, bot_id: str, text: str) -> bool:
         """

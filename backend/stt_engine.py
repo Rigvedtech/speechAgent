@@ -160,4 +160,6 @@ class STTEngine:
         full_text = re.sub(r'\s+', ' ', full_text).strip()
         
         if len(full_text) > 2:
+            # Log transcription for monitoring
+            print(f"\n[TRANSCRIPTION]: {full_text}")
             self.state.llm_queue.put(full_text)

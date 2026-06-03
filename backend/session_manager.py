@@ -132,6 +132,9 @@ class SessionManager:
         """
         logger.info(f"TTS worker started for bot {session.bot_id}")
         
+        consecutive_failures = 0
+        max_consecutive_failures = 5
+        
         while session.is_active and session.state.is_running:
             try:
                 # Get text from TTS queue (with timeout)
@@ -140,7 +143,13 @@ class SessionManager:
                 # Check for special markers
                 if text == "<END_OF_TURN>":
                     session.state.is_ai_speaking = False
-                    logger.debug("AI finished speaking")
+                    logger.debug(f"Bot {session.bot_id[:8]} finished speaking")
+                    consecutive_failures = 0  # Reset on successful operation
+                    continue
+                
+                # Validate text
+                if not text or len(text.strip()) == 0:
+                    logger.warning(f"Bot {session.bot_id[:8]} received empty text, skipping")
                     continue
                 
                 # Generate and send audio to bot
@@ -152,15 +161,42 @@ class SessionManager:
                         text
                     )
                     
-                    if not success:
-                        logger.error(f"Failed to send audio for text: {text[:50]}")
+                    if success:
+                        consecutive_failures = 0  # Reset on success
+                        logger.debug(f"Bot {session.bot_id[:8]} successfully sent TTS: {text[:30]}...")
+                    else:
+                        consecutive_failures += 1
+                        logger.error(
+                            f"Bot {session.bot_id[:8]} failed to send audio (attempt {consecutive_failures}/{max_consecutive_failures}): {text[:50]}..."
+                        )
+                        
+                        # Check if we should stop the session due to repeated failures
+                        if consecutive_failures >= max_consecutive_failures:
+                            logger.critical(
+                                f"Bot {session.bot_id[:8]} exceeded max consecutive TTS failures ({max_consecutive_failures}). "
+                                f"This may indicate the bot has left the meeting or the API is unavailable."
+                            )
+                            # Don't stop the session automatically, just warn
+                            consecutive_failures = 0  # Reset to avoid spam
+                else:
+                    logger.error(f"Bot {session.bot_id[:8]} has no audio_sender configured")
                 
             except queue.Empty:
+                # Normal timeout, no action needed
+                consecutive_failures = 0  # Reset on idle
                 continue
             except Exception as e:
-                logger.error(f"Error in TTS worker: {e}", exc_info=True)
+                consecutive_failures += 1
+                logger.error(
+                    f"Bot {session.bot_id[:8]} TTS worker error (attempt {consecutive_failures}/{max_consecutive_failures}): {e}",
+                    exc_info=True
+                )
+                
+                # Brief pause on error to avoid tight error loops
+                import time
+                time.sleep(0.5)
         
-        logger.info(f"TTS worker stopped for bot {session.bot_id}")
+        logger.info(f"TTS worker stopped for bot {session.bot_id[:8]}")
     
     def handle_audio_chunk(self, bot_id: str, audio_array: np.ndarray):
         """
@@ -175,18 +211,27 @@ class SessionManager:
             session = self.sessions.get(bot_id)
         
         if not session:
-            logger.warning(f"Received audio for unknown bot {bot_id}")
+            # Only log warning occasionally to avoid spam
+            if not hasattr(self, '_unknown_bot_warnings'):
+                self._unknown_bot_warnings = {}
+            
+            if bot_id not in self._unknown_bot_warnings:
+                logger.warning(
+                    f"Received audio for unknown bot {bot_id[:8]}... "
+                    f"(This may be from a previous session. Further warnings for this bot will be suppressed.)"
+                )
+                self._unknown_bot_warnings[bot_id] = True
             return
         
         if not session.is_active:
-            logger.debug(f"Received audio for inactive session {bot_id}")
+            logger.debug(f"Received audio for inactive session {bot_id[:8]}")
             return
         
         # Feed audio to STT engine's queue
         try:
             session.state.audio_queue.put(audio_array, block=False)
         except queue.Full:
-            logger.warning(f"Audio queue full for bot {bot_id}, dropping chunk")
+            logger.warning(f"Audio queue full for bot {bot_id[:8]}, dropping chunk (may indicate processing backlog)")
     
     def get_session(self, bot_id: str) -> Optional[MeetingSession]:
         """

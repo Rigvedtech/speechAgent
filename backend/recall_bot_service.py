@@ -66,6 +66,14 @@ class RecallBotService:
             "bot_name": config.bot_name,
             "recording_config": {
                 "audio_mixed_raw": {},  # Enable real-time audio streaming
+            },
+            # Required for using output_audio endpoint - add minimal silent MP3
+            # This is a 0.1s silent MP3 file in base64 (just enough to satisfy the requirement)
+            "automatic_audio_output": {
+                "data": {
+                    "kind": "mp3",
+                    "b64_data": "//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgP////////////////////////////////8AAAAATGF2YzU4LjM1AAAAAAAAAAAAAAAAJAAAAAAAAAAAAnEX3+CkAAAAAAD/+xDECgADSAMAAgBMAAABLAAAAHkA"
+                }
             }
         }
         
@@ -77,14 +85,14 @@ class RecallBotService:
                 "events": ["audio_mixed_raw.data"]
             }]
         
-        # Add greeting audio if provided
+        # Override with custom greeting audio if provided
         if config.greeting_audio_path and os.path.exists(config.greeting_audio_path):
             with open(config.greeting_audio_path, "rb") as f:
                 import base64
                 audio_b64 = base64.b64encode(f.read()).decode()
-                payload["automatic_audio_output"] = {
-                    "b64_data": audio_b64,
-                    "audio_codec": "wav"
+                payload["automatic_audio_output"]["data"] = {
+                    "kind": "mp3",
+                    "b64_data": audio_b64
                 }
         
         # Add scheduled join time if provided
@@ -172,30 +180,32 @@ class RecallBotService:
         self,
         bot_id: str,
         audio_data: bytes,
-        audio_codec: str = "wav",
-        sample_rate: int = 16000
+        audio_codec: str = "mp3"
     ) -> bool:
         """
         Send audio for bot to play in the meeting.
         
         Args:
             bot_id: Bot ID
-            audio_data: Audio data in bytes
-            audio_codec: Audio format (wav or mp3)
-            sample_rate: Audio sample rate
+            audio_data: Audio data in bytes (must be MP3 format)
+            audio_codec: Audio format (only 'mp3' is supported by Recall.ai)
             
         Returns:
             True if audio sent successfully
         """
         import base64
         
+        # Validate audio codec
+        if audio_codec.lower() != "mp3":
+            logger.error(f"Unsupported audio codec '{audio_codec}'. Only 'mp3' is supported.")
+            return False
+        
         audio_b64 = base64.b64encode(audio_data).decode()
         
+        # Recall.ai API requires only 'kind' and 'b64_data' fields
         payload = {
-            "b64_data": audio_b64,
-            "audio_codec": audio_codec,
-            "sample_rate": sample_rate,
-            "channels": 1
+            "kind": "mp3",  # Required field - only 'mp3' is currently supported
+            "b64_data": audio_b64
         }
         
         try:
@@ -206,11 +216,14 @@ class RecallBotService:
                 timeout=30
             )
             response.raise_for_status()
-            logger.debug(f"Audio sent to bot {bot_id}")
+            logger.debug(f"Audio sent to bot {bot_id} ({len(audio_data)} bytes)")
             return True
             
         except requests.HTTPError as e:
-            logger.error(f"Failed to send audio to bot: {e.response.text}")
+            logger.error(f"Failed to send audio to bot {bot_id}: {e.response.text}")
+            return False
+        except Exception as e:
+            logger.error(f"Error sending audio to bot {bot_id}: {str(e)}")
             return False
 
 
