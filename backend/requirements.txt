@@ -17,3 +17,6 @@ google-genai>=1.14.0
 websockets>=12.0
 requests>=2.31.0
 aiohttp>=3.9.0
+
+# WebRTC Output Media API
+pydub>=0.25.1  # For MP3 to PCM audio conversion

@@ -18,6 +18,15 @@ class STTEngine:
         self.actual_samplerate = SAMPLE_RATE
         self.actual_channels = CHANNELS
         
+        # Adaptive endpointing
+        self.base_silence_duration = SILENCE_DURATION
+        self.adaptive_silence_duration = SILENCE_DURATION
+        self.recent_utterance_lengths = []
+        
+        # SMART INTERRUPTION: Track how long candidate speaks while AI is speaking
+        self.candidate_speaking_duration = 0.0  # Seconds of continuous speech
+        self.interruption_threshold = 3.0  # If candidate speaks > 3s, interrupt AI
+        
         print(f"Loading Whisper model '{MODEL_SIZE}' on {DEVICE}...")
         self.model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
         
@@ -64,8 +73,65 @@ class STTEngine:
                 chunk = self.state.audio_queue.get(timeout=1.0)
                 chunk = chunk.flatten().astype(np.float32)
 
-                # Barge-in disabled: drop user audio completely while AI is speaking.
+                # SMART INTERRUPTION: Allow candidate to interrupt if speaking too long
                 if self.state.is_ai_speaking:
+                    # Check if candidate is speaking
+                    if len(chunk) > 0:
+                        vad_chunk = chunk
+                        if self.actual_samplerate != SAMPLE_RATE:
+                            import scipy.signal
+                            num_samples = int(len(chunk) * SAMPLE_RATE / self.actual_samplerate)
+                            vad_chunk = scipy.signal.resample(chunk, num_samples)
+                        
+                        # Quick VAD check on this chunk
+                        if len(vad_chunk) >= 512:
+                            tensor_chunk = torch.from_numpy(vad_chunk[:512]).to(DEVICE)
+                            tensor_chunk = tensor_chunk.unsqueeze(0)
+                            with torch.no_grad():
+                                speech_prob = self.vad_model(tensor_chunk, SAMPLE_RATE).item()
+                            
+                            if speech_prob >= 0.5:
+                                # Candidate is speaking
+                                self.candidate_speaking_duration += (len(chunk) / self.actual_samplerate)
+                                
+                                # If candidate speaks > 3 seconds continuously, interrupt AI
+                                if self.candidate_speaking_duration >= self.interruption_threshold:
+                                    print(f"\n[INTERRUPTION DETECTED] Candidate spoke for {self.candidate_speaking_duration:.1f}s - Stopping AI")
+                                    self.state.interrupt_flag = True
+                                    self.state.is_ai_speaking = False
+                                    self.candidate_speaking_duration = 0.0
+                                    # Don't clear buffer - let this speech be processed
+                                    continue
+                            else:
+                                # Silence - reset counter
+                                self.candidate_speaking_duration = max(0, self.candidate_speaking_duration - 0.1)
+                        
+                        # Drop audio if AI still speaking and threshold not reached
+                        if self.state.is_ai_speaking:
+                            self.audio_buffer = []
+                            self.is_recording = False
+                            self.last_speech_time = 0.0
+                            vad_accumulator = np.empty(0, dtype=np.float32)
+                            pre_speech_buffer.clear()
+                            continue
+                    else:
+                        # Reset interruption counter on silence
+                        self.candidate_speaking_duration = 0.0
+                        self.audio_buffer = []
+                        self.is_recording = False
+                        continue
+                else:
+                    # AI not speaking - reset interruption counter
+                    self.candidate_speaking_duration = 0.0
+                
+                # MANUAL START: Don't process audio until interview is started
+                if not self.state.is_started:
+                    self.audio_buffer = []
+                    self.is_recording = False
+                    continue
+                
+                # START TRIGGER: Don't process audio until interview starts
+                if not self.state.is_started:
                     self.audio_buffer = []
                     self.is_recording = False
                     self.last_speech_time = 0.0
@@ -106,7 +172,8 @@ class STTEngine:
                         if self.is_recording:
                             self.last_speech_time += (512 / SAMPLE_RATE)
                             
-                            if self.last_speech_time >= SILENCE_DURATION:
+                            # P1 FIX: Use adaptive silence duration instead of fixed threshold
+                            if self.last_speech_time >= self.adaptive_silence_duration:
                                 self.transcribe_buffer()
                                 self.is_recording = False
                                 self.last_speech_time = 0.0
@@ -122,6 +189,14 @@ class STTEngine:
         """Concatenate buffer and transcribe using Whisper."""
         if not self.audio_buffer:
             return
+        
+        # START TRIGGER: Don't transcribe until interview starts
+        if not self.state.is_started:
+            self.audio_buffer = []
+            self.is_recording = False
+            self.last_speech_time = 0.0
+            return
+        
         if self.state.is_ai_speaking:
             self.audio_buffer = []
             self.is_recording = False
@@ -129,6 +204,30 @@ class STTEngine:
             return
 
         audio_data = np.concatenate(self.audio_buffer).flatten().astype(np.float32)
+        
+        # P1 FIX: Adaptive endpointing - learn from user's speaking patterns
+        # Track utterance length to adjust silence threshold dynamically
+        utterance_duration = len(audio_data) / SAMPLE_RATE
+        self.recent_utterance_lengths.append(utterance_duration)
+        
+        # Keep only last 10 utterances for adaptive learning
+        if len(self.recent_utterance_lengths) > 10:
+            self.recent_utterance_lengths.pop(0)
+        
+        # Adjust silence duration based on speaking pattern:
+        # - Short utterances (< 2s): user is giving brief answers → shorter silence (1.5s)
+        # - Medium utterances (2-5s): normal conversation → default silence (2.0s)
+        # - Long utterances (> 5s): user is elaborating → longer silence (3.0s) to avoid cutoff
+        if len(self.recent_utterance_lengths) >= 3:
+            avg_duration = sum(self.recent_utterance_lengths) / len(self.recent_utterance_lengths)
+            
+            if avg_duration < 2.0:
+                self.adaptive_silence_duration = 1.5  # Quick back-and-forth
+            elif avg_duration > 5.0:
+                self.adaptive_silence_duration = 3.0  # Long explanations (increased from 2.5s)
+            else:
+                self.adaptive_silence_duration = self.base_silence_duration  # Default
+        
         self.audio_buffer = [] 
         self.vad_model.reset_states() 
 
@@ -156,8 +255,31 @@ class STTEngine:
             
         full_text = full_text.strip()
         
+        # P1 FIX: Backchannel filtering (research-based turn-taking improvement)
+        # Filter out common backchannels ("uh-huh", "yeah", "okay") that don't warrant AI response
+        # Based on 2026 production voice AI systems (Krisp.ai, Retell AI)
+        
+        # First remove filler words as before
         full_text = re.sub(r'\b(um|uh|hmm|ah|uhm)\b[\.\,]?', '', full_text, flags=re.IGNORECASE)
         full_text = re.sub(r'\s+', ' ', full_text).strip()
+        
+        # Now check if remaining text is just a backchannel
+        if full_text:
+            lowered = full_text.lower()
+            backchannel_patterns = [
+                # Single-word backchannels
+                r'^(yeah|yes|yep|yup|okay|ok|mhm|mmhmm|uh-huh|mm-hmm|right|sure|got it)$',
+                # With punctuation
+                r'^(yeah|yes|yep|yup|okay|ok|mhm|mmhmm|uh-huh|mm-hmm|right|sure|got it)[\.!\?]*$',
+                # Repeated affirmations
+                r'^(yeah yeah|ok ok|yes yes)$',
+            ]
+            
+            is_backchannel = any(re.match(pattern, lowered) for pattern in backchannel_patterns)
+            
+            if is_backchannel:
+                print(f"\n[BACKCHANNEL FILTERED]: '{full_text}' (ignored - not a real turn)")
+                return  # Don't send to LLM
         
         if len(full_text) > 2:
             # Log transcription for monitoring

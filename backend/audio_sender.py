@@ -1,6 +1,7 @@
 """
 Audio Sender
 Handles TTS audio generation and sending to Recall.ai bot for playback in meeting.
+Supports both Output Media API (WebRTC streaming) and output_audio API (file upload).
 """
 
 import os
@@ -15,13 +16,21 @@ logger = logging.getLogger(__name__)
 
 
 class AudioSender:
-    """Generate TTS audio and send to Recall.ai bot."""
+    """
+    Generate TTS audio and send to Recall.ai bot.
+    
+    Supports two output methods:
+    - WebRTC streaming (Output Media API) for low latency (<1.5s)
+    - File upload (output_audio API) for fallback/compatibility (4-8s latency)
+    """
     
     def __init__(
         self,
         recall_service: RecallBotService,
         voice: str = "en-IN-PrabhatNeural",
-        rate: str = "+0%"
+        rate: str = "+35%",
+        reduce_pauses: bool = True,
+        webrtc_manager: Optional[any] = None  # WebRTCStreamManager instance
     ):
         """
         Initialize audio sender.
@@ -29,13 +38,56 @@ class AudioSender:
         Args:
             recall_service: RecallBotService instance
             voice: Edge-TTS voice name
-            rate: Speech rate adjustment
+            rate: Speech rate adjustment (+35% = 35% faster)
+            reduce_pauses: If True, reduces pauses at sentence boundaries
+            webrtc_manager: Optional WebRTCStreamManager for Output Media API
         """
         self.recall_service = recall_service
         self.voice = voice
         self.rate = rate
+        self.reduce_pauses = reduce_pauses
+        self.webrtc_manager = webrtc_manager
         self.temp_dir = Path("tmp_audio")
         self.temp_dir.mkdir(exist_ok=True)
+        
+        # Determine output method
+        self.use_webrtc = webrtc_manager is not None
+        
+        if self.use_webrtc:
+            logger.info(f"AudioSender initialized with WebRTC streaming (low latency mode)")
+        else:
+            logger.info(f"AudioSender initialized with file upload (legacy mode)")
+    
+    def _preprocess_text_for_tts(self, text: str) -> str:
+        """
+        Preprocess text to reduce pauses at full stops.
+        Edge-TTS adds ~800ms pause at each full stop - we reduce this.
+        
+        Args:
+            text: Original text
+            
+        Returns:
+            Processed text with reduced pauses
+        """
+        if not self.reduce_pauses:
+            return text
+        
+        # Replace ". " with ", " to reduce pause duration
+        # Full stop triggers 800ms pause, comma triggers 300ms pause
+        # Keep final full stop to maintain natural ending
+        sentences = text.split('. ')
+        
+        if len(sentences) <= 1:
+            return text
+        
+        # Join with commas except the last sentence
+        processed = ', '.join(sentences[:-1])
+        
+        # Add back the last sentence with its full stop
+        if sentences[-1]:
+            processed += '. ' + sentences[-1]
+        
+        return processed
     
     async def generate_audio(self, text: str, output_path: Path) -> bool:
         """
@@ -67,69 +119,246 @@ class AudioSender:
         """
         Generate TTS audio and send to bot for playback in meeting.
         
+        Automatically chooses best method:
+        - WebRTC streaming if webrtc_manager is available (low latency)
+        - File upload if webrtc_manager is None (legacy/fallback)
+        
         Args:
             bot_id: Bot ID to send audio to
             text: Text to speak
             
         Returns:
-            True if audio sent successfully
+            True if all audio sent successfully
+        """
+        if self.use_webrtc and self.webrtc_manager:
+            return await self._send_via_webrtc(bot_id, text)
+        else:
+            return await self._send_via_file_upload(bot_id, text)
+    
+    async def _send_via_webrtc(self, bot_id: str, text: str) -> bool:
+        """
+        Send audio via WebRTC streaming (Output Media API).
+        Low latency (<1.5s), real-time streaming.
+        
+        Args:
+            bot_id: Bot ID
+            text: Text to speak
+            
+        Returns:
+            True if successful
         """
         import uuid
         import time
+        import re
         
         start_time = time.time()
         
-        # Generate unique filename
-        filename = f"tts_{uuid.uuid4().hex[:8]}"
-        mp3_path = self.temp_dir / f"{filename}.mp3"
+        # Preprocess text
+        text = self._preprocess_text_for_tts(text)
+        text = re.sub(r'\s+', ' ', text.strip())
+        
+        # For WebRTC, we stream sentence-by-sentence for lower perceived latency
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        
+        # Merge very short sentences
+        merged_sentences = []
+        buffer = ""
+        for sentence in sentences:
+            if len(buffer) > 0:
+                buffer += " " + sentence
+            else:
+                buffer = sentence
+            
+            if len(buffer) > 30 or sentence == sentences[-1]:
+                merged_sentences.append(buffer.strip())
+                buffer = ""
+        
+        if not merged_sentences:
+            return False
+        
+        all_success = True
+        total_bytes = 0
         
         try:
-            # Generate MP3 using Edge-TTS
-            success = await self.generate_audio(text, mp3_path)
-            if not success:
-                logger.error(f"Failed to generate TTS audio for text: {text[:50]}")
-                return False
+            # Ensure WebRTC connection is established
+            connected = await self.webrtc_manager.ensure_connected()
+            if not connected:
+                logger.error(f"Failed to connect WebRTC for bot {bot_id[:8]}")
+                # Fallback to file upload
+                logger.warning(f"Falling back to file upload for bot {bot_id[:8]}")
+                return await self._send_via_file_upload(bot_id, text)
             
-            # Verify file exists and has content
-            if not mp3_path.exists() or mp3_path.stat().st_size == 0:
-                logger.error(f"Generated audio file is empty or missing: {mp3_path}")
-                return False
-            
-            # Read audio file
-            with open(mp3_path, "rb") as f:
-                audio_data = f.read()
-            
-            # Send to bot (Recall.ai only supports MP3)
-            success = self.recall_service.send_audio_to_bot(
-                bot_id=bot_id,
-                audio_data=audio_data,
-                audio_codec="mp3"
-            )
+            for i, sentence in enumerate(merged_sentences):
+                if not sentence.strip():
+                    continue
+                
+                filename = f"tts_{uuid.uuid4().hex[:8]}"
+                mp3_path = self.temp_dir / f"{filename}.mp3"
+                
+                try:
+                    # Generate MP3
+                    success = await self.generate_audio(sentence, mp3_path)
+                    if not success:
+                        logger.error(f"Failed to generate TTS for sentence {i+1}")
+                        all_success = False
+                        continue
+                    
+                    # Read MP3
+                    with open(mp3_path, "rb") as f:
+                        mp3_data = f.read()
+                    
+                    total_bytes += len(mp3_data)
+                    
+                    # Stream via WebRTC
+                    success = await self.webrtc_manager.stream_audio_from_mp3(mp3_data)
+                    
+                    if not success:
+                        logger.error(f"Failed to stream sentence {i+1} via WebRTC")
+                        all_success = False
+                    
+                except Exception as e:
+                    logger.error(f"Error processing sentence {i+1}: {e}")
+                    all_success = False
+                
+                finally:
+                    # Cleanup
+                    try:
+                        mp3_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
             
             elapsed = time.time() - start_time
             
-            if success:
+            if all_success:
                 logger.info(
-                    f"Sent audio to bot {bot_id}: '{text[:50]}...' "
-                    f"({len(audio_data)} bytes, {elapsed:.2f}s)"
+                    f"✓ Streamed {len(merged_sentences)} sentences via WebRTC to bot {bot_id[:8]}: "
+                    f"'{text[:40]}...' ({total_bytes} bytes, {elapsed:.2f}s)"
                 )
             else:
-                logger.error(
-                    f"Failed to send audio to bot {bot_id} for text: {text[:50]}"
+                logger.warning(f"Partially streamed audio via WebRTC to bot {bot_id[:8]}")
+            
+            return all_success
+            
+        except Exception as e:
+            logger.error(f"WebRTC streaming failed for bot {bot_id}: {e}", exc_info=True)
+            return False
+    
+    async def _send_via_file_upload(self, bot_id: str, text: str) -> bool:
+        """
+        Send audio via file upload (output_audio API).
+        Legacy/fallback method. Higher latency (4-8s).
+        Uses sentence-level streaming for faster perceived latency.
+        
+        Args:
+            bot_id: Bot ID to send audio to
+            text: Text to speak
+            
+        Returns:
+            True if all audio sent successfully
+        """
+        import uuid
+        import time
+        import re
+        
+        start_time = time.time()
+        
+        # Preprocess text to reduce pauses
+        text = self._preprocess_text_for_tts(text)
+        
+        # Remove extra spaces and normalize punctuation
+        text = re.sub(r'\s+', ' ', text.strip())
+        
+        # Split on sentence boundaries but keep short sentences together
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        
+        # Merge very short sentences (< 10 chars) with next to reduce pauses
+        merged_sentences = []
+        buffer = ""
+        for sentence in sentences:
+            if len(buffer) > 0:
+                buffer += " " + sentence
+            else:
+                buffer = sentence
+            
+            # Send if buffer is substantial (> 30 chars) or it's the last sentence
+            if len(buffer) > 30 or sentence == sentences[-1]:
+                merged_sentences.append(buffer.strip())
+                buffer = ""
+        
+        if not merged_sentences:
+            return False
+        
+        all_success = True
+        total_bytes = 0
+        
+        try:
+            for i, sentence in enumerate(merged_sentences):
+                if not sentence.strip():
+                    continue
+                
+                # Generate unique filename for each sentence
+                filename = f"tts_{uuid.uuid4().hex[:8]}"
+                mp3_path = self.temp_dir / f"{filename}.mp3"
+                
+                try:
+                    # Generate MP3 for this sentence
+                    success = await self.generate_audio(sentence, mp3_path)
+                    if not success:
+                        logger.error(f"Failed to generate TTS for sentence {i+1}: {sentence[:30]}")
+                        all_success = False
+                        continue
+                    
+                    # Verify file exists and has content
+                    if not mp3_path.exists() or mp3_path.stat().st_size == 0:
+                        logger.error(f"Generated audio file is empty: {mp3_path}")
+                        all_success = False
+                        continue
+                    
+                    # Read audio file
+                    with open(mp3_path, "rb") as f:
+                        audio_data = f.read()
+                    
+                    total_bytes += len(audio_data)
+                    
+                    # Send to bot immediately (streaming approach)
+                    success = self.recall_service.send_audio_to_bot(
+                        bot_id=bot_id,
+                        audio_data=audio_data,
+                        audio_codec="mp3"
+                    )
+                    
+                    if not success:
+                        logger.error(f"Failed to send sentence {i+1} to bot: {sentence[:30]}")
+                        all_success = False
+                    
+                except Exception as e:
+                    logger.error(f"Error processing sentence {i+1}: {e}")
+                    all_success = False
+                
+                finally:
+                    # Cleanup temp file for this sentence
+                    try:
+                        mp3_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            
+            elapsed = time.time() - start_time
+            
+            if all_success:
+                logger.info(
+                    f"Sent {len(merged_sentences)} sentences to bot {bot_id[:8]}: '{text[:40]}...' "
+                    f"({total_bytes} bytes, {elapsed:.2f}s)"
+                )
+            else:
+                logger.warning(
+                    f"Partially sent audio to bot {bot_id[:8]} (some sentences failed)"
                 )
             
-            return success
+            return all_success
             
         except Exception as e:
             logger.error(f"Failed to send audio to bot: {e}", exc_info=True)
             return False
-            
-        finally:
-            # Cleanup temp files
-            try:
-                mp3_path.unlink(missing_ok=True)
-            except Exception as e:
-                logger.warning(f"Failed to cleanup temp file {mp3_path}: {e}")
     
     def send_text_to_bot_sync(self, bot_id: str, text: str) -> bool:
         """

@@ -16,7 +16,7 @@ class LLMBrain:
             },
             {
                 "role": "assistant",
-                "content": "I’ll keep this as an interview question and won’t share the direct answer. Could you explain the difference between JDK and JRE?"
+                "content": "I'll keep this as an interview question and won't share the direct answer. Could you explain the difference between JDK and JRE?"
             },
             {
                 "role": "user",
@@ -24,7 +24,7 @@ class LLMBrain:
             },
             {
                 "role": "assistant",
-                "content": "That is completely fine. Let’s move to the next question: what is the role of the JVM?"
+                "content": "That is completely fine. Let's move to the next question: what is the role of the JVM?"
             },
             {
                 "role": "user",
@@ -32,7 +32,7 @@ class LLMBrain:
             },
             {
                 "role": "assistant",
-                "content": "I won’t provide code here, but I can continue with interview questions. Could you describe polymorphism in simple words?"
+                "content": "I won't provide code here, but I can continue with interview questions. Could you describe polymorphism in simple words?"
             },
         ]
         self.turn_guardrail = (
@@ -163,7 +163,7 @@ class LLMBrain:
     def _safe_interviewer_fallback(self) -> str:
         """Fallback keeps role strict when model drifts into teaching/answering."""
         return (
-            "Thank you for your response. Let’s continue with the interview: "
+            "Thank you for your response. Let's continue with the interview: "
             "could you walk me through a recent project you worked on, your role, "
             "and the main challenge you solved?"
         )
@@ -192,10 +192,11 @@ class LLMBrain:
                 print("[AI]: ", end="", flush=True)
                 
                 self.state.interrupt_flag = False
-                self.state.is_ai_speaking = True
+                # P0 FIX: Don't set is_ai_speaking yet - wait until we actually send audio
                 
                 ai_text = ""
-                sentence_buffer = ""
+                # P0 FIX: Collect entire response before generating TTS
+                # This prevents sentence-by-sentence network latency (6 sentences × 3s = 18s delay)
 
                 try:
                     if GROQ_API_KEY:
@@ -209,18 +210,12 @@ class LLMBrain:
                             )
                             for chunk in stream:
                                 if self.state.interrupt_flag:
-                                    self.state.is_ai_speaking = False
                                     print("\n[AI Interrupted by User]")
                                     break
                                 word = chunk.choices[0].delta.content or ""
                                 print(word, end="", flush=True)
                                 ai_text += word
-                                sentence_buffer += word
-                                if any(p in word for p in ['.', '!', '?', '\n']):
-                                    clean = sentence_buffer.strip()
-                                    if len(clean) > 2:
-                                        self.state.tts_queue.put(clean)
-                                    sentence_buffer = ""
+                                # No longer sending per-sentence - collect full response
                         except Exception as groq_ex:
                             msg = str(groq_ex).lower()
                             is_rate_limited = ("429" in msg) or ("rate limit" in msg) or ("rate_limit" in msg)
@@ -237,18 +232,12 @@ class LLMBrain:
                             )
                             for chunk in response:
                                 if self.state.interrupt_flag:
-                                    self.state.is_ai_speaking = False
                                     print("\n[AI Interrupted by User]")
                                     break
                                 word = chunk['message']['content']
                                 print(word, end="", flush=True)
                                 ai_text += word
-                                sentence_buffer += word
-                                if any(p in word for p in ['.', '!', '?', '\n']):
-                                    clean = sentence_buffer.strip()
-                                    if len(clean) > 2:
-                                        self.state.tts_queue.put(clean)
-                                    sentence_buffer = ""
+                                # No longer sending per-sentence - collect full response
                     else:
                         request_messages = self._build_request_messages()
                         response = ollama.chat(
@@ -258,46 +247,45 @@ class LLMBrain:
                         )
                         for chunk in response:
                             if self.state.interrupt_flag:
-                                self.state.is_ai_speaking = False
                                 print("\n[AI Interrupted by User]")
                                 break
                             word = chunk['message']['content']
                             print(word, end="", flush=True)
                             ai_text += word
-                            sentence_buffer += word
-                            if any(p in word for p in ['.', '!', '?', '\n']):
-                                clean = sentence_buffer.strip()
-                                if len(clean) > 2:
-                                    self.state.tts_queue.put(clean)
-                                sentence_buffer = ""
+                            # No longer sending per-sentence - collect full response
 
                 except Exception as e:
                     print(f"\n[LLM Error]: {e}")
-                    self.state.is_ai_speaking = False
-                    enqueue_spoken_error("Sorry, I’m having trouble right now.")
+                    enqueue_spoken_error("Sorry, I'm having trouble right now.")
                     continue
-
-                if sentence_buffer.strip() and not self.state.interrupt_flag:
-                    self.state.tts_queue.put(sentence_buffer.strip())
 
                 print("\n")
+                
+                # P0 FIX: Send entire response as single audio payload
+                # This reduces latency from ~18s (6 sentences × 3s each) to ~5s (1 payload × 3s + TTS time)
                 final_text = ai_text.strip()
-                if final_text and self._is_forbidden_interviewer_output(final_text):
-                    safe_text = self._safe_interviewer_fallback()
-                    print("[AI Guard]: Replaced unsafe response with interviewer-safe fallback.")
-                    self.state.tts_queue.put(safe_text)
-                    self.state.tts_queue.put("<END_OF_TURN>")
-                    # Do not store fallback text in model history; keep context clean.
+                
+                if not final_text or self.state.interrupt_flag:
                     print("--- READY: START SPEAKING ---")
                     continue
-
-                self.state.tts_queue.put("<END_OF_TURN>")
-
-                if ai_text.strip() and not self.state.interrupt_flag:
-                    self.conversation_history.append({"role": "assistant", "content": ai_text})
-
+                
+                # Check for forbidden content
+                if self._is_forbidden_interviewer_output(final_text):
+                    safe_text = self._safe_interviewer_fallback()
+                    print("[AI Guard]: Replaced unsafe response with interviewer-safe fallback.")
+                    final_text = safe_text
+                    # Don't store fallback in history
+                else:
+                    # Store in conversation history
+                    self.conversation_history.append({"role": "assistant", "content": final_text})
+                
+                # Trim conversation history
                 if len(self.conversation_history) > (self.max_runtime_history_messages + 2):
                     self.conversation_history = self.conversation_history[-self.max_runtime_history_messages:]
+                
+                # Send complete response to TTS (single payload)
+                self.state.tts_queue.put(final_text)
+                self.state.tts_queue.put("<END_OF_TURN>")
 
                 print("--- READY: START SPEAKING ---")
 
@@ -305,4 +293,4 @@ class LLMBrain:
                 continue
             except Exception as e:
                 print(f"\n[LLM Error]: {e}")
-                print("--- READY: START SPEAKING --")
+                print("--- READY: START SPEAKING ---")

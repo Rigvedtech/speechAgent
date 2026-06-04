@@ -24,6 +24,7 @@ class BotConfig:
     websocket_url: Optional[str] = None
     greeting_audio_path: Optional[str] = None
     join_at: Optional[str] = None  # ISO 8601 format for scheduled join
+    use_output_media: bool = True  # Use Output Media API (WebRTC) for low latency
 
 
 class RecallBotService:
@@ -50,13 +51,26 @@ class RecallBotService:
     
     def create_bot(self, config: BotConfig) -> Dict[str, Any]:
         """
-        Create a bot to join a meeting.
+        Create a bot to join a meeting (Production Implementation with WebRTC).
+        
+        Output Method Selection:
+        ========================
+        - config.use_output_media = True: Uses Output Media API (WebRTC streaming, <1.5s latency)
+        - config.use_output_media = False: Uses output_audio API (file upload, 4-8s latency)
+        
+        IMPORTANT - Bot "Muted" State:
+        ==============================
+        The bot will show as "MUTED" in the meeting UI - THIS IS NORMAL.
+        - All Recall.ai bots join with microphone indicator OFF by default
+        - This is a platform design choice and cannot be changed via API
+        - The bot WILL speak when triggered via output_audio or output_media
+        - The mute icon is cosmetic and does not affect functionality
         
         Args:
             config: Bot configuration with meeting URL and settings
             
         Returns:
-            Dict containing bot_id, status, and other bot details
+            Dict containing bot_id, status, media_url (if using Output Media API)
             
         Raises:
             requests.HTTPError: If bot creation fails
@@ -66,16 +80,34 @@ class RecallBotService:
             "bot_name": config.bot_name,
             "recording_config": {
                 "audio_mixed_raw": {},  # Enable real-time audio streaming
-            },
-            # Required for using output_audio endpoint - add minimal silent MP3
-            # This is a 0.1s silent MP3 file in base64 (just enough to satisfy the requirement)
-            "automatic_audio_output": {
-                "data": {
-                    "kind": "mp3",
-                    "b64_data": "//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgP////////////////////////////////8AAAAATGF2YzU4LjM1AAAAAAAAAAAAAAAAJAAAAAAAAAAAAnEX3+CkAAAAAAD/+xDECgADSAMAAgBMAAABLAAAAHkA"
-                }
             }
         }
+        
+        # Choose audio output method
+        if config.use_output_media:
+            # OUTPUT MEDIA API (WebRTC) - Production-grade low latency (<1.5s)
+            logger.info(f"Creating bot with Output Media API (WebRTC streaming) for {config.meeting_url[:50]}...")
+            payload["output_media"] = {
+                # Omit camera field entirely (don't set to None or False)
+                "microphone": {
+                    "kind": "raw",
+                    "sample_rate": 16000,
+                    "channels": 1
+                }
+            }
+        else:
+            # LEGACY OUTPUT AUDIO API (file upload) - Fallback for compatibility
+            logger.info(f"Creating bot with output_audio API (file upload) for {config.meeting_url[:50]}...")
+            # REQUIRED for output_audio endpoint - add minimal silent MP3
+            # This is a 0.1s silent MP3 file in base64 (satisfies API requirement)
+            payload["automatic_audio_output"] = {
+                "in_call_recording": {
+                    "data": {
+                        "kind": "mp3",
+                        "b64_data": "//uQxAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAACcQCAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgP////////////////////////////////8AAAAATGF2YzU4LjM1AAAAAAAAAAAAAAAAJAAAAAAAAAAAAnEX3+CkAAAAAAD/+xDECgADSAMAAgBMAAABLAAAAHkA"
+                    }
+                }
+            }
         
         # Add WebSocket endpoint for real-time audio if provided
         if config.websocket_url:
@@ -85,12 +117,12 @@ class RecallBotService:
                 "events": ["audio_mixed_raw.data"]
             }]
         
-        # Override with custom greeting audio if provided
-        if config.greeting_audio_path and os.path.exists(config.greeting_audio_path):
+        # Override with custom greeting audio (only for output_audio API)
+        if not config.use_output_media and config.greeting_audio_path and os.path.exists(config.greeting_audio_path):
             with open(config.greeting_audio_path, "rb") as f:
                 import base64
                 audio_b64 = base64.b64encode(f.read()).decode()
-                payload["automatic_audio_output"]["data"] = {
+                payload["automatic_audio_output"]["in_call_recording"]["data"] = {
                     "kind": "mp3",
                     "b64_data": audio_b64
                 }
@@ -119,7 +151,17 @@ class RecallBotService:
             response.raise_for_status()
             
             bot_data = response.json()
-            logger.info(f"Bot created successfully. ID: {bot_data.get('id')}")
+            bot_id = bot_data.get('id')
+            
+            # Log media URL if using Output Media API
+            if config.use_output_media and 'media_url' in bot_data:
+                logger.info(
+                    f"Bot created with Output Media API. ID: {bot_id}, "
+                    f"Media URL: {bot_data.get('media_url')}"
+                )
+            else:
+                logger.info(f"Bot created successfully. ID: {bot_id}")
+            
             return bot_data
             
         except requests.HTTPError as e:
@@ -180,18 +222,24 @@ class RecallBotService:
         self,
         bot_id: str,
         audio_data: bytes,
-        audio_codec: str = "mp3"
+        audio_codec: str = "mp3",
+        verify_bot_status: bool = True
     ) -> bool:
         """
-        Send audio for bot to play in the meeting.
+        Send audio for bot to play in the meeting (production-grade with validation).
         
         Args:
             bot_id: Bot ID
             audio_data: Audio data in bytes (must be MP3 format)
             audio_codec: Audio format (only 'mp3' is supported by Recall.ai)
+            verify_bot_status: Check bot is in meeting before sending (default: True)
             
         Returns:
             True if audio sent successfully
+            
+        Note:
+            Bot will show as "muted" in the meeting UI - this is normal Recall.ai behavior.
+            Audio will play regardless of the mute icon when sent via this API.
         """
         import base64
         
@@ -199,6 +247,28 @@ class RecallBotService:
         if audio_codec.lower() != "mp3":
             logger.error(f"Unsupported audio codec '{audio_codec}'. Only 'mp3' is supported.")
             return False
+        
+        # Validate audio data
+        if not audio_data or len(audio_data) == 0:
+            logger.error(f"Empty audio data provided for bot {bot_id[:8]}")
+            return False
+        
+        # Production: Verify bot is in recording state before sending audio
+        if verify_bot_status:
+            try:
+                bot_status = self.get_bot_status(bot_id)
+                status_value = bot_status.get("status_changes", [{}])[-1].get("code", "unknown")
+                
+                # Only send audio if bot is in active recording state
+                if status_value not in ["in_call_recording", "recording"]:
+                    logger.warning(
+                        f"Bot {bot_id[:8]} not in recording state (status: {status_value}). "
+                        f"Audio may not play. Current state: {status_value}"
+                    )
+                    # Still attempt to send, but warn
+                    
+            except Exception as e:
+                logger.warning(f"Could not verify bot status for {bot_id[:8]}: {e}. Attempting to send anyway.")
         
         audio_b64 = base64.b64encode(audio_data).decode()
         
@@ -216,14 +286,31 @@ class RecallBotService:
                 timeout=30
             )
             response.raise_for_status()
-            logger.debug(f"Audio sent to bot {bot_id} ({len(audio_data)} bytes)")
+            logger.info(
+                f"✓ Audio sent successfully to bot {bot_id[:8]} ({len(audio_data)} bytes, {len(audio_b64)} b64 chars). "
+                f"Bot will play audio in meeting (even though it shows as 'muted')."
+            )
             return True
             
         except requests.HTTPError as e:
-            logger.error(f"Failed to send audio to bot {bot_id}: {e.response.text}")
+            error_detail = e.response.text
+            logger.error(
+                f"✗ HTTP {e.response.status_code} error sending audio to bot {bot_id[:8]}: {error_detail}"
+            )
+            
+            # Production: Provide actionable error messages
+            if "cannot_command_completed_bot" in error_detail:
+                logger.error(
+                    f"Bot {bot_id[:8]} has left the meeting or shut down. Cannot send audio. "
+                    f"Create a new bot to rejoin."
+                )
+            elif "kind" in error_detail.lower():
+                logger.error("API payload format error. Verify 'kind' and 'b64_data' fields are correct.")
+            
             return False
+            
         except Exception as e:
-            logger.error(f"Error sending audio to bot {bot_id}: {str(e)}")
+            logger.error(f"✗ Unexpected error sending audio to bot {bot_id[:8]}: {str(e)}", exc_info=True)
             return False
 
 

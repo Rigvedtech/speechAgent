@@ -1,11 +1,13 @@
 """
 Session Manager
 Manages multiple concurrent meeting sessions with independent STT/LLM/TTS pipelines.
+Supports WebRTC streaming (Output Media API) for low-latency audio output.
 """
 
 import logging
 import queue
 import threading
+import asyncio
 from typing import Dict, Optional
 from dataclasses import dataclass, field
 import numpy as np
@@ -15,6 +17,7 @@ from stt_engine import STTEngine
 from llm_brain import LLMBrain
 from recall_bot_service import RecallBotService
 from audio_sender import AudioSender
+from webrtc_stream_manager import WebRTCStreamManager
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +33,10 @@ class MeetingSession:
     stt_engine: Optional[STTEngine] = None
     llm_brain: Optional[LLMBrain] = None
     audio_sender: Optional[AudioSender] = None
+    webrtc_manager: Optional[WebRTCStreamManager] = None  # WebRTC connection for Output Media API
     processing_threads: list = field(default_factory=list)
     is_active: bool = True
+    use_webrtc: bool = False  # Flag to indicate if using WebRTC (Output Media API)
     
     def __post_init__(self):
         """Initialize processing components."""
@@ -55,14 +60,34 @@ class SessionManager:
         self.recall_service = recall_service
         self.sessions: Dict[str, MeetingSession] = {}
         self.sessions_lock = threading.Lock()
+        # DUPLICATE PREVENTION: Track meeting_url -> bot_id mapping
+        self.meeting_to_bot: Dict[str, str] = {}
     
-    def create_session(self, bot_id: str, meeting_url: str) -> MeetingSession:
+    def get_bot_for_meeting(self, meeting_url: str) -> Optional[str]:
         """
-        Create a new meeting session.
+        Check if a bot already exists for this meeting URL.
+        
+        Args:
+            meeting_url: Meeting URL to check
+            
+        Returns:
+            Bot ID if exists, "CREATING" if in progress, None otherwise
+        """
+        with self.sessions_lock:
+            bot_id = self.meeting_to_bot.get(meeting_url)
+            # Don't return "CREATING" placeholder as a valid bot ID
+            if bot_id == "CREATING":
+                return None
+            return bot_id
+    
+    def create_session(self, bot_id: str, meeting_url: str, bot_data: Optional[Dict] = None) -> MeetingSession:
+        """
+        Create a new meeting session with WebRTC support.
         
         Args:
             bot_id: Bot ID from Recall.ai
             meeting_url: Meeting URL bot joined
+            bot_data: Optional bot creation response data (contains media_url for WebRTC)
             
         Returns:
             MeetingSession instance
@@ -72,17 +97,59 @@ class SessionManager:
                 logger.warning(f"Session {bot_id} already exists")
                 return self.sessions[bot_id]
             
-            logger.info(f"Creating session for bot {bot_id}")
+            logger.info(f"Creating session for bot {bot_id} in meeting {meeting_url[:50]}...")
             session = MeetingSession(bot_id=bot_id, meeting_url=meeting_url)
             
-            # Initialize audio sender
-            session.audio_sender = AudioSender(self.recall_service)
+            # Check if bot supports WebRTC (Output Media API)
+            media_url = bot_data.get("media_url") if bot_data else None
+            
+            if media_url:
+                # Initialize WebRTC Stream Manager for Output Media API
+                logger.info(f"Initializing WebRTC streaming for bot {bot_id[:8]}")
+                session.webrtc_manager = WebRTCStreamManager(bot_id, media_url)
+                session.use_webrtc = True
+                
+                # Connect WebRTC in background (non-blocking)
+                def connect_webrtc():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        connected = loop.run_until_complete(session.webrtc_manager.connect())
+                        if connected:
+                            logger.info(f"✓ WebRTC connected for bot {bot_id[:8]}")
+                        else:
+                            logger.warning(f"✗ WebRTC connection failed for bot {bot_id[:8]}, will use file upload fallback")
+                    except Exception as e:
+                        logger.error(f"WebRTC connection error for bot {bot_id[:8]}: {e}")
+                    finally:
+                        loop.close()
+                
+                webrtc_thread = threading.Thread(target=connect_webrtc, daemon=True)
+                webrtc_thread.start()
+            else:
+                logger.info(f"Bot {bot_id[:8]} using legacy file upload (no media_url)")
+                session.use_webrtc = False
+            
+            # Initialize audio sender with WebRTC support
+            from api_server import TTS_RATE, TTS_REDUCE_PAUSES
+            session.audio_sender = AudioSender(
+                self.recall_service,
+                rate=TTS_RATE,
+                reduce_pauses=TTS_REDUCE_PAUSES,
+                webrtc_manager=session.webrtc_manager if session.use_webrtc else None
+            )
             
             # Start processing threads
             self._start_session_threads(session)
             
             self.sessions[bot_id] = session
-            logger.info(f"Session {bot_id} created and started")
+            # Update mapping from "CREATING" placeholder to actual bot_id
+            self.meeting_to_bot[meeting_url] = bot_id
+            
+            logger.info(
+                f"Session {bot_id} created for meeting "
+                f"(Mode: {'WebRTC streaming' if session.use_webrtc else 'File upload'})"
+            )
             
             return session
     
@@ -126,6 +193,7 @@ class SessionManager:
     def _tts_worker(self, session: MeetingSession):
         """
         Worker thread to send TTS audio to bot.
+        Production-grade error handling with automatic recovery.
         
         Args:
             session: MeetingSession to process TTS for
@@ -142,9 +210,13 @@ class SessionManager:
                 
                 # Check for special markers
                 if text == "<END_OF_TURN>":
+                    # Reduced post-send buffer for sentence streaming
+                    import time
+                    time.sleep(1.5)
+                    
                     session.state.is_ai_speaking = False
                     logger.debug(f"Bot {session.bot_id[:8]} finished speaking")
-                    consecutive_failures = 0  # Reset on successful operation
+                    consecutive_failures = 0
                     continue
                 
                 # Validate text
@@ -152,7 +224,7 @@ class SessionManager:
                     logger.warning(f"Bot {session.bot_id[:8]} received empty text, skipping")
                     continue
                 
-                # Generate and send audio to bot
+                # Set speaking flag BEFORE sending
                 session.state.is_ai_speaking = True
                 
                 if session.audio_sender:
@@ -162,37 +234,41 @@ class SessionManager:
                     )
                     
                     if success:
-                        consecutive_failures = 0  # Reset on success
-                        logger.debug(f"Bot {session.bot_id[:8]} successfully sent TTS: {text[:30]}...")
+                        consecutive_failures = 0
+                        logger.debug(f"Bot {session.bot_id[:8]} sent TTS: {text[:30]}...")
                     else:
                         consecutive_failures += 1
                         logger.error(
-                            f"Bot {session.bot_id[:8]} failed to send audio (attempt {consecutive_failures}/{max_consecutive_failures}): {text[:50]}..."
+                            f"Bot {session.bot_id[:8]} failed to send audio "
+                            f"(attempt {consecutive_failures}/{max_consecutive_failures})"
                         )
                         
-                        # Check if we should stop the session due to repeated failures
                         if consecutive_failures >= max_consecutive_failures:
                             logger.critical(
-                                f"Bot {session.bot_id[:8]} exceeded max consecutive TTS failures ({max_consecutive_failures}). "
-                                f"This may indicate the bot has left the meeting or the API is unavailable."
+                                f"Bot {session.bot_id[:8]} exceeded max TTS failures. "
+                                f"Bot may have left the meeting."
                             )
-                            # Don't stop the session automatically, just warn
                             consecutive_failures = 0  # Reset to avoid spam
+                        
+                        # Clear speaking flag on failure
+                        session.state.is_ai_speaking = False
                 else:
                     logger.error(f"Bot {session.bot_id[:8]} has no audio_sender configured")
+                    session.state.is_ai_speaking = False
                 
             except queue.Empty:
-                # Normal timeout, no action needed
-                consecutive_failures = 0  # Reset on idle
+                consecutive_failures = 0
                 continue
             except Exception as e:
                 consecutive_failures += 1
                 logger.error(
-                    f"Bot {session.bot_id[:8]} TTS worker error (attempt {consecutive_failures}/{max_consecutive_failures}): {e}",
+                    f"Bot {session.bot_id[:8]} TTS worker error: {e}",
                     exc_info=True
                 )
                 
-                # Brief pause on error to avoid tight error loops
+                session.state.is_ai_speaking = False
+                
+                # Brief pause on error
                 import time
                 time.sleep(0.5)
         
@@ -249,6 +325,7 @@ class SessionManager:
     def end_session(self, bot_id: str):
         """
         End a meeting session and cleanup resources.
+        Includes WebRTC disconnection if applicable.
         
         Args:
             bot_id: Bot ID to end session for
@@ -265,6 +342,25 @@ class SessionManager:
             # Mark as inactive
             session.is_active = False
             session.state.is_running = False
+            
+            # Disconnect WebRTC if applicable
+            if session.webrtc_manager and session.use_webrtc:
+                try:
+                    logger.info(f"Disconnecting WebRTC for bot {bot_id[:8]}")
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(session.webrtc_manager.disconnect())
+                    finally:
+                        loop.close()
+                except Exception as e:
+                    logger.error(f"Error disconnecting WebRTC for bot {bot_id[:8]}: {e}")
+            
+            # DUPLICATE PREVENTION: Remove meeting URL mapping
+            meeting_url = session.meeting_url
+            if meeting_url in self.meeting_to_bot and self.meeting_to_bot[meeting_url] == bot_id:
+                del self.meeting_to_bot[meeting_url]
+                logger.info(f"Removed meeting URL mapping for {meeting_url[:50]}...")
             
             # Delete bot from Recall.ai
             try:

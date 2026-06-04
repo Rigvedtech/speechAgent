@@ -36,7 +36,7 @@ def _env_float(key: str, default: float) -> float:
 # Audio (STT / VAD)
 SAMPLE_RATE = _env_int("SAMPLE_RATE", 16000)
 CHANNELS = _env_int("CHANNELS", 1)
-SILENCE_DURATION = _env_float("SILENCE_DURATION", 0.8)
+SILENCE_DURATION = _env_float("SILENCE_DURATION", 1.2)  # Increased from 0.8s to 1.2s to avoid splitting speech
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 COMPUTE_TYPE = "float16" if torch.cuda.is_available() else "int8"
@@ -57,7 +57,8 @@ else:
 
 # TTS (Edge)
 TTS_VOICE = _env_str("TTS_VOICE", "en-IN-PrabhatNeural")
-TTS_RATE = _env_str("TTS_RATE", "+0%")
+TTS_RATE = _env_str("TTS_RATE", "+35%")  # Speech rate: +0% to +100% (faster) or -0% to -50% (slower)
+TTS_REDUCE_PAUSES = _env_str("TTS_REDUCE_PAUSES", "true").lower() == "true"  # Reduce pauses at full stops
 
 # First spoken line after mic is ready (override in .env)
 _STARTUP_GREETING_DEFAULT = (

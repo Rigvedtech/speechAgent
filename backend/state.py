@@ -13,3 +13,8 @@ class AgentState:
         self.interrupt_flag = False
         self.is_ai_speaking = False
         self.is_running = True
+        # MANUAL START: Interview doesn't begin until /api/start is called
+        self.is_started = False
+        
+        # START TRIGGER: Interview doesn't begin until /api/start is called
+        self.is_started = False

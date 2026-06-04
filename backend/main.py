@@ -14,6 +14,9 @@ def main():
     # 1. Initialize Shared Global State
     state = AgentState()
     
+    # STANDALONE MODE: Auto-start interview (no manual /api/start needed)
+    state.is_started = True  # Allows STT to process audio immediately
+    
     # 2. Instantiate all core components
     stt_engine = STTEngine(state)
     llm_brain = LLMBrain(state)
