@@ -115,7 +115,7 @@ class AudioSender:
             logger.error(f"Failed to generate audio: {e}")
             return False
     
-    async def send_text_to_bot(self, bot_id: str, text: str) -> bool:
+    async def send_text_to_bot(self, bot_id: str, text: str, state = None) -> bool:
         """
         Generate TTS audio and send to bot for playback in meeting.
         
@@ -126,23 +126,26 @@ class AudioSender:
         Args:
             bot_id: Bot ID to send audio to
             text: Text to speak
+            state: Optional AgentState for interrupt checking
             
         Returns:
             True if all audio sent successfully
         """
         if self.use_webrtc and self.webrtc_manager:
-            return await self._send_via_webrtc(bot_id, text)
+            return await self._send_via_webrtc(bot_id, text, state)
         else:
-            return await self._send_via_file_upload(bot_id, text)
+            return await self._send_via_file_upload(bot_id, text, state)
     
-    async def _send_via_webrtc(self, bot_id: str, text: str) -> bool:
+    async def _send_via_webrtc(self, bot_id: str, text: str, state = None) -> bool:
         """
         Send audio via WebRTC streaming (Output Media API).
         Low latency (<1.5s), real-time streaming.
+        FIX 3: Add interrupt check inside the chunk send loop.
         
         Args:
             bot_id: Bot ID
             text: Text to speak
+            state: Optional AgentState for interrupt checking
             
         Returns:
             True if successful
@@ -186,9 +189,14 @@ class AudioSender:
                 logger.error(f"Failed to connect WebRTC for bot {bot_id[:8]}")
                 # Fallback to file upload
                 logger.warning(f"Falling back to file upload for bot {bot_id[:8]}")
-                return await self._send_via_file_upload(bot_id, text)
+                return await self._send_via_file_upload(bot_id, text, state)
             
             for i, sentence in enumerate(merged_sentences):
+                # FIX 3: Check for interrupt before processing each sentence
+                if state and state.interrupt_flag.is_set():
+                    logger.info(f"Bot {bot_id[:8]} interrupted during WebRTC send")
+                    break
+                    
                 if not sentence.strip():
                     continue
                 
@@ -209,8 +217,8 @@ class AudioSender:
                     
                     total_bytes += len(mp3_data)
                     
-                    # Stream via WebRTC
-                    success = await self.webrtc_manager.stream_audio_from_mp3(mp3_data)
+                    # Stream via WebRTC with interrupt checking
+                    success = await self.webrtc_manager.stream_audio_from_mp3(mp3_data, state)
                     
                     if not success:
                         logger.error(f"Failed to stream sentence {i+1} via WebRTC")
@@ -243,15 +251,17 @@ class AudioSender:
             logger.error(f"WebRTC streaming failed for bot {bot_id}: {e}", exc_info=True)
             return False
     
-    async def _send_via_file_upload(self, bot_id: str, text: str) -> bool:
+    async def _send_via_file_upload(self, bot_id: str, text: str, state = None) -> bool:
         """
         Send audio via file upload (output_audio API).
         Legacy/fallback method. Higher latency (4-8s).
         Uses sentence-level streaming for faster perceived latency.
+        FIX 3: Add interrupt check in loop.
         
         Args:
             bot_id: Bot ID to send audio to
             text: Text to speak
+            state: Optional AgentState for interrupt checking
             
         Returns:
             True if all audio sent successfully
@@ -293,6 +303,11 @@ class AudioSender:
         
         try:
             for i, sentence in enumerate(merged_sentences):
+                # FIX 3: Check for interrupt before processing each sentence
+                if state and state.interrupt_flag.is_set():
+                    logger.info(f"Bot {bot_id[:8]} interrupted during file upload")
+                    break
+                    
                 if not sentence.strip():
                     continue
                 
@@ -360,18 +375,8 @@ class AudioSender:
             logger.error(f"Failed to send audio to bot: {e}", exc_info=True)
             return False
     
-    def send_text_to_bot_sync(self, bot_id: str, text: str) -> bool:
-        """
-        Synchronous wrapper for send_text_to_bot.
-        
-        Args:
-            bot_id: Bot ID
-            text: Text to speak
-            
-        Returns:
-            True if successful
-        """
-        return asyncio.run(self.send_text_to_bot(bot_id, text))
+    # Remove old sync wrapper - no longer needed with persistent event loop
+    # Old: send_text_to_bot_sync()
 
 
 # Example usage

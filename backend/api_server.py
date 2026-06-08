@@ -35,6 +35,7 @@ session_manager = SessionManager(recall_service)
 # Get config from env
 BOT_NAME = os.getenv("BOT_NAME", "Prabhat")
 PUBLIC_WEBSOCKET_URL = os.getenv("PUBLIC_WEBSOCKET_URL")
+WEBSOCKET_PORT = int(os.getenv("WEBSOCKET_PORT", "8765"))
 
 # TTS Configuration
 TTS_RATE = os.getenv("TTS_RATE", "+35%")
@@ -198,7 +199,7 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
         if not session.is_active:
             raise HTTPException(status_code=400, detail="Bot session is not active")
         
-        if session.state.is_started:
+        if session.state.is_started.is_set():
             return {
                 "success": False,
                 "bot_id": bot_id,
@@ -220,7 +221,7 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
         )
         
         # Mark as started FIRST
-        session.state.is_started = True
+        session.state.is_started.set()
         
         # Send greeting instruction to LLM (not TTS directly)
         # LLM will generate natural greeting and send to TTS
@@ -335,7 +336,7 @@ async def list_active_sessions():
                 "bot_id": bot_id,
                 "meeting_url": session.meeting_url,
                 "is_active": session.is_active,
-                "is_started": session.state.is_started  # Show if interview started
+                "is_started": session.state.is_started.is_set()  # Show if interview started
             }
             for bot_id, session in sessions.items()
         ]
@@ -449,7 +450,7 @@ if __name__ == "__main__":
     def start_websocket():
         receiver = AudioReceiver(
             host="0.0.0.0",
-            port=8765,
+            port=WEBSOCKET_PORT,
             audio_callback=session_manager.handle_audio_chunk
         )
         receiver.run()
@@ -461,6 +462,7 @@ if __name__ == "__main__":
     logger.info("Recall.ai Bot API Started")
     logger.info("=" * 60)
     logger.info(f"API Server: http://0.0.0.0:8000")
+    logger.info(f"WebSocket: ws://0.0.0.0:{WEBSOCKET_PORT}")
     logger.info(f"Docs: http://0.0.0.0:8000/docs")
     logger.info(f"Bot Name: {BOT_NAME}")
     logger.info("=" * 60)

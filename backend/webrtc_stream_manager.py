@@ -145,13 +145,15 @@ class WebRTCStreamManager:
             logger.error(f"Failed to convert MP3 to PCM for bot {self.bot_id[:8]}: {e}")
             raise
     
-    async def stream_pcm_audio(self, pcm_data: bytes) -> bool:
+    async def stream_pcm_audio(self, pcm_data: bytes, state = None) -> bool:
         """
         Stream PCM audio in real-time chunks (20ms each).
         Simulates real-time audio by spacing chunks appropriately.
+        FIX 3: Add interrupt check inside the chunk send loop.
         
         Args:
             pcm_data: PCM audio data (16kHz, 16-bit, mono)
+            state: Optional AgentState for interrupt checking
             
         Returns:
             True if streaming successful
@@ -175,6 +177,11 @@ class WebRTCStreamManager:
             
             # Stream in 20ms chunks
             for i in range(0, len(pcm_data), self.CHUNK_SIZE):
+                # FIX 3: Check for interrupt at the top of each iteration
+                if state and state.interrupt_flag.is_set():
+                    logger.info(f"Bot {self.bot_id[:8]} interrupted during PCM streaming")
+                    break
+                    
                 chunk = pcm_data[i:i + self.CHUNK_SIZE]
                 
                 # Pad last chunk if needed (must be exactly CHUNK_SIZE)
@@ -210,12 +217,13 @@ class WebRTCStreamManager:
             self.is_streaming = False
             return False
     
-    async def stream_audio_from_mp3(self, mp3_data: bytes) -> bool:
+    async def stream_audio_from_mp3(self, mp3_data: bytes, state = None) -> bool:
         """
         High-level method: Convert MP3 to PCM and stream in real-time.
         
         Args:
             mp3_data: MP3 audio data
+            state: Optional AgentState for interrupt checking
             
         Returns:
             True if successful
@@ -224,8 +232,8 @@ class WebRTCStreamManager:
             # Convert MP3 to PCM
             pcm_data = self.convert_mp3_to_pcm(mp3_data)
             
-            # Stream PCM in real-time chunks
-            success = await self.stream_pcm_audio(pcm_data)
+            # Stream PCM in real-time chunks with interrupt checking
+            success = await self.stream_pcm_audio(pcm_data, state)
             
             return success
             

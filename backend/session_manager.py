@@ -192,14 +192,33 @@ class SessionManager:
     
     def _tts_worker(self, session: MeetingSession):
         """
-        Worker thread to send TTS audio to bot.
-        Production-grade error handling with automatic recovery.
+        Worker thread to send TTS audio to bot with persistent event loop.
+        FIX 2: Create ONE persistent event loop for all TTS work.
+        FIX 7: Drain tts_queue on interrupt.
         
         Args:
             session: MeetingSession to process TTS for
         """
         logger.info(f"TTS worker started for bot {session.bot_id}")
         
+        # FIX 2: Create persistent event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        try:
+            loop.run_until_complete(self._tts_worker_async(session, loop))
+        finally:
+            loop.close()
+            logger.info(f"TTS worker stopped for bot {session.bot_id[:8]}")
+    
+    async def _tts_worker_async(self, session: MeetingSession, loop: asyncio.AbstractEventLoop):
+        """
+        Async TTS worker loop with persistent event loop.
+        
+        Args:
+            session: MeetingSession to process TTS for
+            loop: Persistent event loop to use
+        """
         consecutive_failures = 0
         max_consecutive_failures = 5
         
@@ -208,13 +227,26 @@ class SessionManager:
                 # Get text from TTS queue (with timeout)
                 text = session.state.tts_queue.get(timeout=1.0)
                 
+                # FIX 7: Check for interrupt — drain queue if interrupted
+                if session.state.interrupt_flag.is_set():
+                    logger.info(f"Bot {session.bot_id[:8]} interrupted - draining TTS queue")
+                    # Drain remaining queued sentences — they are stale
+                    while not session.state.tts_queue.empty():
+                        try:
+                            session.state.tts_queue.get_nowait()
+                        except:
+                            break
+                    session.state.is_ai_speaking.clear()
+                    session.state.interrupt_flag.clear()
+                    continue
+                
                 # Check for special markers
                 if text == "<END_OF_TURN>":
                     # Reduced post-send buffer for sentence streaming
-                    import time
-                    time.sleep(1.5)
+                    await asyncio.sleep(1.5)
                     
-                    session.state.is_ai_speaking = False
+                    session.state.is_ai_speaking.clear()
+                    session.state.interrupt_flag.clear()  # Reset for next turn
                     logger.debug(f"Bot {session.bot_id[:8]} finished speaking")
                     consecutive_failures = 0
                     continue
@@ -225,12 +257,14 @@ class SessionManager:
                     continue
                 
                 # Set speaking flag BEFORE sending
-                session.state.is_ai_speaking = True
+                session.state.is_ai_speaking.set()
                 
                 if session.audio_sender:
-                    success = session.audio_sender.send_text_to_bot_sync(
+                    # FIX 2: Use await instead of asyncio.run(), pass state for interrupt checking
+                    success = await session.audio_sender.send_text_to_bot(
                         session.bot_id,
-                        text
+                        text,
+                        session.state  # Pass state for interrupt checking
                     )
                     
                     if success:
@@ -251,10 +285,10 @@ class SessionManager:
                             consecutive_failures = 0  # Reset to avoid spam
                         
                         # Clear speaking flag on failure
-                        session.state.is_ai_speaking = False
+                        session.state.is_ai_speaking.clear()
                 else:
                     logger.error(f"Bot {session.bot_id[:8]} has no audio_sender configured")
-                    session.state.is_ai_speaking = False
+                    session.state.is_ai_speaking.clear()
                 
             except queue.Empty:
                 consecutive_failures = 0
@@ -266,13 +300,10 @@ class SessionManager:
                     exc_info=True
                 )
                 
-                session.state.is_ai_speaking = False
+                session.state.is_ai_speaking.clear()
                 
                 # Brief pause on error
-                import time
-                time.sleep(0.5)
-        
-        logger.info(f"TTS worker stopped for bot {session.bot_id[:8]}")
+                await asyncio.sleep(0.5)
     
     def handle_audio_chunk(self, bot_id: str, audio_array: np.ndarray):
         """

@@ -74,7 +74,7 @@ class STTEngine:
                 chunk = chunk.flatten().astype(np.float32)
 
                 # SMART INTERRUPTION: Allow candidate to interrupt if speaking too long
-                if self.state.is_ai_speaking:
+                if self.state.is_ai_speaking.is_set():
                     # Check if candidate is speaking
                     if len(chunk) > 0:
                         vad_chunk = chunk
@@ -90,15 +90,20 @@ class STTEngine:
                             with torch.no_grad():
                                 speech_prob = self.vad_model(tensor_chunk, SAMPLE_RATE).item()
                             
-                            if speech_prob >= 0.5:
-                                # Candidate is speaking
+                            # High confidence speech - trigger interrupt
+                            if speech_prob > 0.7:
+                                self.state.interrupt_flag.set()
+                                # Continue processing this audio (don't drop it)
+                                # Fall through to process as normal speech
+                            elif speech_prob >= 0.5:
+                                # Medium confidence - accumulate duration
                                 self.candidate_speaking_duration += (len(chunk) / self.actual_samplerate)
                                 
                                 # If candidate speaks > 3 seconds continuously, interrupt AI
                                 if self.candidate_speaking_duration >= self.interruption_threshold:
                                     print(f"\n[INTERRUPTION DETECTED] Candidate spoke for {self.candidate_speaking_duration:.1f}s - Stopping AI")
-                                    self.state.interrupt_flag = True
-                                    self.state.is_ai_speaking = False
+                                    self.state.interrupt_flag.set()
+                                    self.state.is_ai_speaking.clear()
                                     self.candidate_speaking_duration = 0.0
                                     # Don't clear buffer - let this speech be processed
                                     continue
@@ -106,8 +111,8 @@ class STTEngine:
                                 # Silence - reset counter
                                 self.candidate_speaking_duration = max(0, self.candidate_speaking_duration - 0.1)
                         
-                        # Drop audio if AI still speaking and threshold not reached
-                        if self.state.is_ai_speaking:
+                        # Drop audio if AI still speaking and no strong interrupt detected
+                        if self.state.is_ai_speaking.is_set() and not self.state.interrupt_flag.is_set():
                             self.audio_buffer = []
                             self.is_recording = False
                             self.last_speech_time = 0.0
@@ -125,13 +130,13 @@ class STTEngine:
                     self.candidate_speaking_duration = 0.0
                 
                 # MANUAL START: Don't process audio until interview is started
-                if not self.state.is_started:
+                if not self.state.is_started.is_set():
                     self.audio_buffer = []
                     self.is_recording = False
                     continue
                 
                 # START TRIGGER: Don't process audio until interview starts
-                if not self.state.is_started:
+                if not self.state.is_started.is_set():
                     self.audio_buffer = []
                     self.is_recording = False
                     self.last_speech_time = 0.0
@@ -191,13 +196,13 @@ class STTEngine:
             return
         
         # START TRIGGER: Don't transcribe until interview starts
-        if not self.state.is_started:
+        if not self.state.is_started.is_set():
             self.audio_buffer = []
             self.is_recording = False
             self.last_speech_time = 0.0
             return
         
-        if self.state.is_ai_speaking:
+        if self.state.is_ai_speaking.is_set():
             self.audio_buffer = []
             self.is_recording = False
             self.last_speech_time = 0.0
@@ -205,7 +210,7 @@ class STTEngine:
 
         audio_data = np.concatenate(self.audio_buffer).flatten().astype(np.float32)
         
-        # P1 FIX: Adaptive endpointing - learn from user's speaking patterns
+        # FIX 5: Adaptive endpointing with reduced thresholds (0.8s - 1.5s)
         # Track utterance length to adjust silence threshold dynamically
         utterance_duration = len(audio_data) / SAMPLE_RATE
         self.recent_utterance_lengths.append(utterance_duration)
@@ -215,18 +220,18 @@ class STTEngine:
             self.recent_utterance_lengths.pop(0)
         
         # Adjust silence duration based on speaking pattern:
-        # - Short utterances (< 2s): user is giving brief answers → shorter silence (1.5s)
-        # - Medium utterances (2-5s): normal conversation → default silence (2.0s)
-        # - Long utterances (> 5s): user is elaborating → longer silence (3.0s) to avoid cutoff
+        # - Short utterances (< 2s): user is giving brief answers → shorter silence (0.8s)
+        # - Medium utterances (2-5s): normal conversation → default silence (1.0s)
+        # - Long utterances (> 5s): user is elaborating → longer silence (1.5s) to avoid cutoff
         if len(self.recent_utterance_lengths) >= 3:
             avg_duration = sum(self.recent_utterance_lengths) / len(self.recent_utterance_lengths)
             
             if avg_duration < 2.0:
-                self.adaptive_silence_duration = 1.5  # Quick back-and-forth
+                self.adaptive_silence_duration = 0.8  # Quick back-and-forth (was 1.5s)
             elif avg_duration > 5.0:
-                self.adaptive_silence_duration = 3.0  # Long explanations (increased from 2.5s)
+                self.adaptive_silence_duration = 1.5  # Long explanations (was 3.0s)
             else:
-                self.adaptive_silence_duration = self.base_silence_duration  # Default
+                self.adaptive_silence_duration = 1.0  # Default (was 2.0s)
         
         self.audio_buffer = [] 
         self.vad_model.reset_states() 

@@ -191,12 +191,12 @@ class LLMBrain:
                 self.conversation_history.append({"role": "user", "content": user_text})
                 print("[AI]: ", end="", flush=True)
                 
-                self.state.interrupt_flag = False
-                # P0 FIX: Don't set is_ai_speaking yet - wait until we actually send audio
+                self.state.interrupt_flag.clear()  # Clear any previous interrupt
+                # Don't set is_ai_speaking yet - wait until we actually send audio
                 
-                ai_text = ""
-                # P0 FIX: Collect entire response before generating TTS
-                # This prevents sentence-by-sentence network latency (6 sentences × 3s = 18s delay)
+                # FIX 4: Stream sentences to TTS as they complete
+                sentence_buffer = ""
+                full_text = ""
 
                 try:
                     if GROQ_API_KEY:
@@ -209,13 +209,25 @@ class LLMBrain:
                                 max_tokens=150,
                             )
                             for chunk in stream:
-                                if self.state.interrupt_flag:
+                                # Check for interrupt — stop generation if user started speaking
+                                if self.state.interrupt_flag.is_set():
                                     print("\n[AI Interrupted by User]")
                                     break
+                                    
                                 word = chunk.choices[0].delta.content or ""
+                                if not word:
+                                    continue
+                                    
                                 print(word, end="", flush=True)
-                                ai_text += word
-                                # No longer sending per-sentence - collect full response
+                                full_text += word
+                                sentence_buffer += word
+                                
+                                # Send to TTS as soon as a sentence boundary is reached
+                                if any(sentence_buffer.rstrip().endswith(p) for p in ['.', '!', '?', '...']) \
+                                        and len(sentence_buffer.strip()) > 15:
+                                    self.state.tts_queue.put(sentence_buffer.strip())
+                                    sentence_buffer = ""
+                                    
                         except Exception as groq_ex:
                             msg = str(groq_ex).lower()
                             is_rate_limited = ("429" in msg) or ("rate limit" in msg) or ("rate_limit" in msg)
@@ -231,13 +243,23 @@ class LLMBrain:
                                 stream=True
                             )
                             for chunk in response:
-                                if self.state.interrupt_flag:
+                                if self.state.interrupt_flag.is_set():
                                     print("\n[AI Interrupted by User]")
                                     break
+                                    
                                 word = chunk['message']['content']
+                                if not word:
+                                    continue
+                                    
                                 print(word, end="", flush=True)
-                                ai_text += word
-                                # No longer sending per-sentence - collect full response
+                                full_text += word
+                                sentence_buffer += word
+                                
+                                # Send to TTS as soon as a sentence boundary is reached
+                                if any(sentence_buffer.rstrip().endswith(p) for p in ['.', '!', '?', '...']) \
+                                        and len(sentence_buffer.strip()) > 15:
+                                    self.state.tts_queue.put(sentence_buffer.strip())
+                                    sentence_buffer = ""
                     else:
                         request_messages = self._build_request_messages()
                         response = ollama.chat(
@@ -246,13 +268,23 @@ class LLMBrain:
                             stream=True
                         )
                         for chunk in response:
-                            if self.state.interrupt_flag:
+                            if self.state.interrupt_flag.is_set():
                                 print("\n[AI Interrupted by User]")
                                 break
+                                
                             word = chunk['message']['content']
+                            if not word:
+                                continue
+                                
                             print(word, end="", flush=True)
-                            ai_text += word
-                            # No longer sending per-sentence - collect full response
+                            full_text += word
+                            sentence_buffer += word
+                            
+                            # Send to TTS as soon as a sentence boundary is reached
+                            if any(sentence_buffer.rstrip().endswith(p) for p in ['.', '!', '?', '...']) \
+                                    and len(sentence_buffer.strip()) > 15:
+                                self.state.tts_queue.put(sentence_buffer.strip())
+                                sentence_buffer = ""
 
                 except Exception as e:
                     print(f"\n[LLM Error]: {e}")
@@ -261,11 +293,13 @@ class LLMBrain:
 
                 print("\n")
                 
-                # P0 FIX: Send entire response as single audio payload
-                # This reduces latency from ~18s (6 sentences × 3s each) to ~5s (1 payload × 3s + TTS time)
-                final_text = ai_text.strip()
+                # Send any remaining text after stream ends
+                if sentence_buffer.strip() and not self.state.interrupt_flag.is_set():
+                    self.state.tts_queue.put(sentence_buffer.strip())
                 
-                if not final_text or self.state.interrupt_flag:
+                final_text = full_text.strip()
+                
+                if not final_text or self.state.interrupt_flag.is_set():
                     print("--- READY: START SPEAKING ---")
                     continue
                 
@@ -283,8 +317,7 @@ class LLMBrain:
                 if len(self.conversation_history) > (self.max_runtime_history_messages + 2):
                     self.conversation_history = self.conversation_history[-self.max_runtime_history_messages:]
                 
-                # Send complete response to TTS (single payload)
-                self.state.tts_queue.put(final_text)
+                # Signal end of turn
                 self.state.tts_queue.put("<END_OF_TURN>")
 
                 print("--- READY: START SPEAKING ---")

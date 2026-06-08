@@ -10,11 +10,9 @@ class AgentState:
         # Set by TTS player when an <END_OF_TURN> finishes playback.
         self.tts_turn_done_event = threading.Event()
         
-        self.interrupt_flag = False
-        self.is_ai_speaking = False
+        # Thread-safe event flags (replacing bare bools)
+        self.interrupt_flag = threading.Event()
+        self.is_ai_speaking = threading.Event()
         self.is_running = True
         # MANUAL START: Interview doesn't begin until /api/start is called
-        self.is_started = False
-        
-        # START TRIGGER: Interview doesn't begin until /api/start is called
-        self.is_started = False
+        self.is_started = threading.Event()
