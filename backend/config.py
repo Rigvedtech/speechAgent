@@ -55,14 +55,66 @@ else:
     print("[LLM] Backend: Local Ollama (set GROQ_API_KEY in .env for faster responses)")
     GROQ_API_KEY = ""
 
-# TTS (Edge)
+# TTS (Edge - Fallback)
 TTS_VOICE = _env_str("TTS_VOICE", "en-IN-PrabhatNeural")
 TTS_RATE = _env_str("TTS_RATE", "+35%")  # Speech rate: +0% to +100% (faster) or -0% to -50% (slower)
 TTS_REDUCE_PAUSES = _env_str("TTS_REDUCE_PAUSES", "true").lower() == "true"  # Reduce pauses at full stops
 
+# === SARVAM AI CONFIGURATION ===
+# API Key
+SARVAM_API_KEY = _env_str("SARVAM_API_KEY", "")
+
+# STT Configuration (Saaras V3)
+SARVAM_STT_MODEL = _env_str("SARVAM_STT_MODEL", "saaras:v3")
+SARVAM_STT_LANGUAGE = _env_str("SARVAM_STT_LANGUAGE", "en-IN")
+SARVAM_STT_MODE = _env_str("SARVAM_STT_MODE", "transcribe")  # transcribe, translate, verbatim, translit, codemix
+SARVAM_STT_HIGH_VAD = _env_str("SARVAM_STT_HIGH_VAD", "true").lower() == "true"
+SARVAM_STT_ENABLED = _env_str("SARVAM_STT_ENABLED", "true").lower() == "true"
+
+# TTS Configuration (Bulbul V3)
+SARVAM_TTS_MODEL = _env_str("SARVAM_TTS_MODEL", "bulbul:v3")
+SARVAM_TTS_SPEAKER = _env_str("SARVAM_TTS_SPEAKER", "shubh")  # Default to shubh as requested
+SARVAM_TTS_LANGUAGE = _env_str("SARVAM_TTS_LANGUAGE", "en-IN")
+SARVAM_TTS_SAMPLE_RATE = _env_int("SARVAM_TTS_SAMPLE_RATE", 24000)  # bulbul:v3 default: 24000
+SARVAM_TTS_PACE = _env_float("SARVAM_TTS_PACE", 1.2)  # 0.5 to 2.0, higher = faster
+SARVAM_TTS_TEMPERATURE = _env_float("SARVAM_TTS_TEMPERATURE", 0.6)  # 0.01 to 1.0, higher = more variation
+SARVAM_TTS_ENABLED = _env_str("SARVAM_TTS_ENABLED", "true").lower() == "true"
+
+# Recall.ai output mode (WebRTC requires media_url from API; file upload is more reliable)
+RECALL_USE_OUTPUT_MEDIA = _env_str("RECALL_USE_OUTPUT_MEDIA", "false").lower() == "true"
+
+# Fallback Configuration
+STT_FALLBACK_ENABLED = _env_str("STT_FALLBACK_ENABLED", "true").lower() == "true"
+TTS_FALLBACK_ENABLED = _env_str("TTS_FALLBACK_ENABLED", "true").lower() == "true"
+
+# Retry Configuration
+SARVAM_MAX_RETRIES = _env_int("SARVAM_MAX_RETRIES", 3)
+SARVAM_RETRY_BASE_SECONDS = _env_float("SARVAM_RETRY_BASE_SECONDS", 1.0)
+
+# Log Sarvam status
+if SARVAM_API_KEY and SARVAM_API_KEY != "your_api_key_here" and SARVAM_API_KEY != "":
+    if SARVAM_STT_ENABLED:
+        print(f"[STT] Backend: Sarvam AI Saaras V3 (primary) + Faster Whisper (fallback)")
+    else:
+        print(f"[STT] Backend: Faster Whisper (Sarvam disabled)")
+    
+    if SARVAM_TTS_ENABLED:
+        print(f"[TTS] Backend: Sarvam AI Bulbul V3 - Speaker: {SARVAM_TTS_SPEAKER} (primary) + Edge-TTS (fallback)")
+    else:
+        print(f"[TTS] Backend: Edge-TTS (Sarvam disabled)")
+else:
+    print("[Sarvam AI] API key not configured - using fallback engines only")
+    SARVAM_STT_ENABLED = False
+    SARVAM_TTS_ENABLED = False
+
 # First spoken line after mic is ready (override in .env)
 _STARTUP_GREETING_DEFAULT = (
-    "Hello, I’m Prabhat, and I’ll be your interviewer today. "
-    "Let’s begin when you’re ready. Please introduce yourself briefly."
+    "Hello, I'm Prabhat, and I'll be your interviewer today. "
+    "Let's begin when you're ready. Please introduce yourself briefly."
 )
 STARTUP_GREETING = _env_str("STARTUP_GREETING", _STARTUP_GREETING_DEFAULT)
+
+# Main asyncio event loop — set once by api_server.py's startup hook.
+# Stored here (not in api_server.py) so all modules share the same reference
+# regardless of whether api_server is run as __main__ or imported as a module.
+main_event_loop = None

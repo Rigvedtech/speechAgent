@@ -4,10 +4,14 @@ Use with Postman to join/leave meetings.
 """
 
 import os
+import asyncio
 import logging
-from typing import Dict, Optional
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from pathlib import Path
+from typing import Optional
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import uvicorn
@@ -15,6 +19,8 @@ import uvicorn
 from recall_bot_service import RecallBotService, BotConfig
 from session_manager import SessionManager
 from audio_receiver import AudioReceiver
+import config as app_config
+import ws_hub
 
 load_dotenv()
 
@@ -27,6 +33,29 @@ logger = logging.getLogger(__name__)
 
 # Initialize FastAPI
 app = FastAPI(title="Recall.ai Bot API", version="1.0.0")
+
+# Serve audio-worklet-processor.js and other static assets
+STATIC_DIR = Path(__file__).parent / "static"
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+@app.on_event("startup")
+async def _capture_main_loop():
+    """
+    Store the running event loop in config.main_event_loop so TTS worker threads
+    can schedule broadcasts via asyncio.run_coroutine_threadsafe.
+
+    Stored in config (not here) to avoid the Python 'double module' problem:
+    when api_server.py is run as __main__, any module that later does
+    `from api_server import ...` gets a SECOND copy of this module with its own
+    globals — meaning a module-level _main_loop here would never be visible to
+    importers.  config.py is always imported under the same key in sys.modules.
+    """
+    import config as _cfg
+    _cfg.main_event_loop = asyncio.get_running_loop()
+    logger.info("[startup] Main event loop captured in config.main_event_loop")
+
+# All WebSocket hub state and broadcast helpers live in ws_hub.py
+# (avoids the Python __main__ double-module problem — see ws_hub.py for details)
 
 # Initialize services
 recall_service = RecallBotService()
@@ -69,7 +98,70 @@ class StatusResponse(BaseModel):
     is_active: bool
 
 
-# API Endpoints
+# ─── Output Media Webpage ────────────────────────────────────────────────────
+
+@app.get("/voice-agent", response_class=HTMLResponse)
+async def voice_agent_page():
+    """
+    Recall.ai loads this URL inside its headless Chromium bot.
+    Pass ?bot_id=<uuid>&name=<display_name> in the URL.
+    """
+    html_path = STATIC_DIR / "output-media.html"
+    return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+
+
+# ─── Audio-stream WebSocket endpoint ────────────────────────────────────────
+
+@app.websocket("/ws/audio-stream/{page_session_id}")
+async def audio_stream_ws(websocket: WebSocket, page_session_id: str):
+    """
+    Recall.ai's output-media page connects here to receive PCM audio.
+    The path param is the page_session_id embedded in the page URL at bot creation.
+
+    Protocol:
+      Server → Client (binary)  : raw Int16 PCM, 24 kHz mono (Sarvam bulbul:v3)
+      Server → Client (text)    : JSON control {type: "start_speaking" | "stop_speaking" | "ping"}
+      Client → Server (text)    : JSON {type: "pong"} heartbeat reply
+    """
+    await websocket.accept()
+
+    # Resolve page_session_id → bot_id via ws_hub (shared module, no double-copy issue)
+    bot_id = ws_hub.resolve_bot_id(page_session_id)
+    logger.info(f"[audio-stream] Page connected — session={page_session_id[:8]}… bot={bot_id[:8]}…")
+
+    await ws_hub.add_client(bot_id, websocket)
+
+    import json as _json
+    try:
+        while True:
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=25)
+                try:
+                    msg = _json.loads(data)
+                    if msg.get('type') == 'playback_done':
+                        # Browser ring buffer drained — audio has finished playing.
+                        # Unblock STT immediately so the user's next words are heard.
+                        session = session_manager.get_session(bot_id)
+                        if session:
+                            session.state.is_ai_speaking.clear()
+                            logger.info(
+                                f"[audio-stream] playback_done — STT unblocked for bot {bot_id[:8]}…"
+                            )
+                    # pong and unknown messages are silently ignored
+                except Exception:
+                    pass
+            except asyncio.TimeoutError:
+                await websocket.send_text(_json.dumps({"type": "ping"}))
+    except WebSocketDisconnect:
+        logger.info(f"[audio-stream] Page disconnected — session={page_session_id[:8]}…")
+    except Exception as e:
+        logger.warning(f"[audio-stream] Error — session={page_session_id[:8]}…: {e}")
+    finally:
+        await ws_hub.remove_client(bot_id, websocket)
+        logger.info(f"[audio-stream] Cleaned up — session={page_session_id[:8]}…")
+
+
+# ─── API Endpoints ────────────────────────────────────────────────────────────
 
 @app.post("/api/join", response_model=JoinMeetingResponse)
 async def join_meeting(request: JoinMeetingRequest):
@@ -126,18 +218,51 @@ async def join_meeting(request: JoinMeetingRequest):
     
     # Create bot OUTSIDE the lock (network call can be slow)
     try:
+        import uuid as _uuid
+
+        # ── Build the Output Media webpage URL ─────────────────────────────
+        # We generate a page_session_id BEFORE calling Recall so we can embed
+        # it in the URL without needing the bot_id upfront.
+        # Recall opens this URL in headless Chrome; the page connects to
+        # /ws/audio-stream/<page_session_id> which the server maps to the bot.
+        public_base = os.getenv("PUBLIC_NGROK_URL", "").rstrip("/")
+        page_session_id = str(_uuid.uuid4())
+        output_media_page_url: Optional[str] = None
+
+        if app_config.RECALL_USE_OUTPUT_MEDIA and public_base:
+            import urllib.parse
+            output_media_page_url = (
+                f"{public_base}/voice-agent"
+                f"?page_session_id={page_session_id}"
+                f"&name={urllib.parse.quote(bot_name)}"
+            )
+            logger.info(f"Output Media page URL: {output_media_page_url}")
+        elif app_config.RECALL_USE_OUTPUT_MEDIA:
+            logger.warning(
+                "RECALL_USE_OUTPUT_MEDIA=true but PUBLIC_NGROK_URL is not set — "
+                "falling back to file-upload. Add PUBLIC_NGROK_URL to .env."
+            )
+
         config = BotConfig(
             meeting_url=request.meeting_url,
             bot_name=bot_name,
             websocket_url=PUBLIC_WEBSOCKET_URL,
-            use_output_media=True  # Enable WebRTC Output Media API for low latency
+            use_output_media=app_config.RECALL_USE_OUTPUT_MEDIA,
+            output_media_url=output_media_page_url,
         )
-        
+
         bot_data = recall_service.create_bot(config)
         bot_id = bot_data["id"]
-        
-        # Create session with bot_data (contains media_url for WebRTC)
-        session_manager.create_session(bot_id, request.meeting_url, bot_data=bot_data)
+
+        # Register page_session_id → bot_id in the shared ws_hub (no double-module issue)
+        use_webpage = bool(output_media_page_url)
+        if use_webpage:
+            ws_hub.register_page_session(page_session_id, bot_id)
+
+        # Create session with bot_data
+        session_manager.create_session(
+            bot_id, request.meeting_url, bot_data=bot_data, use_webpage=use_webpage
+        )
         
         # Log output method
         if bot_data.get("media_url"):

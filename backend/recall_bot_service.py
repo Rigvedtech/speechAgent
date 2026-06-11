@@ -5,6 +5,9 @@ Handles bot lifecycle: create, manage, delete bots for meeting integration.
 
 import os
 import logging
+import threading
+import time
+from io import BytesIO
 from typing import Dict, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,7 +27,8 @@ class BotConfig:
     websocket_url: Optional[str] = None
     greeting_audio_path: Optional[str] = None
     join_at: Optional[str] = None  # ISO 8601 format for scheduled join
-    use_output_media: bool = True  # Use Output Media API (WebRTC) for low latency
+    use_output_media: bool = True   # Use Output Media API (webpage) for low latency
+    output_media_url: Optional[str] = None  # Public URL of /voice-agent page (e.g. https://ngrok/voice-agent)
 
 
 class RecallBotService:
@@ -48,6 +52,9 @@ class RecallBotService:
             "Content-Type": "application/json",
             "Accept": "application/json"
         }
+        # Recall output_audio plays immediately with no queue — serialize playback per bot
+        self._playback_lock = threading.Lock()
+        self._playback_until: Dict[str, float] = {}
     
     def create_bot(self, config: BotConfig) -> Dict[str, Any]:
         """
@@ -84,18 +91,32 @@ class RecallBotService:
         }
         
         # Choose audio output method
-        if config.use_output_media:
-            # OUTPUT MEDIA API (WebRTC) - Production-grade low latency (<1.5s)
-            logger.info(f"Creating bot with Output Media API (WebRTC streaming) for {config.meeting_url[:50]}...")
+        if config.use_output_media and config.output_media_url:
+            # OUTPUT MEDIA API — webpage mode (Recall.ai documented approach)
+            # Recall opens output_media_url in headless Chromium; the page plays
+            # PCM audio via AudioWorklet → captured as bot's microphone.
+            # See: https://docs.recall.ai/docs/stream-media
+            logger.info(
+                f"Creating bot with Output Media (webpage) for {config.meeting_url[:50]}... "
+                f"page={config.output_media_url}"
+            )
             payload["output_media"] = {
-                # Omit camera field entirely (don't set to None or False)
-                "microphone": {
-                    "kind": "raw",
-                    "sample_rate": 16000,
-                    "channels": 1
+                "camera": {
+                    "kind": "webpage",
+                    "config": {
+                        "url": config.output_media_url
+                    }
                 }
             }
-        else:
+        elif config.use_output_media and not config.output_media_url:
+            logger.warning(
+                "RECALL_USE_OUTPUT_MEDIA=true but no PUBLIC_NGROK_URL is set — "
+                "falling back to file-upload output_audio. "
+                "Set PUBLIC_NGROK_URL in .env to enable the webpage output path."
+            )
+            config.use_output_media = False  # treat as disabled for this bot
+
+        if not config.use_output_media:
             # LEGACY OUTPUT AUDIO API (file upload) - Fallback for compatibility
             logger.info(f"Creating bot with output_audio API (file upload) for {config.meeting_url[:50]}...")
             # REQUIRED for output_audio endpoint - add minimal silent MP3
@@ -218,12 +239,39 @@ class RecallBotService:
             logger.error(f"Failed to delete bot: {e.response.text}")
             return False
     
+    @staticmethod
+    def _mp3_duration_seconds(audio_data: bytes) -> float:
+        """Estimate MP3 duration for playback serialization."""
+        try:
+            from pydub import AudioSegment
+            segment = AudioSegment.from_mp3(BytesIO(audio_data))
+            return max(len(segment) / 1000.0, 0.1)
+        except Exception:
+            # 128kbps CBR fallback
+            return max(len(audio_data) * 8 / 128000, 0.5)
+
+    def _wait_for_playback_slot(self, bot_id: str):
+        """Block until the bot's previous audio clip should have finished playing."""
+        with self._playback_lock:
+            now = time.monotonic()
+            ready_at = self._playback_until.get(bot_id, 0.0)
+            if now < ready_at:
+                wait_s = ready_at - now
+                logger.debug(f"Waiting {wait_s:.2f}s for bot {bot_id[:8]} playback slot")
+                time.sleep(wait_s)
+
+    def _reserve_playback_slot(self, bot_id: str, duration_s: float):
+        """Reserve the playback window after sending audio."""
+        with self._playback_lock:
+            self._playback_until[bot_id] = time.monotonic() + duration_s + 0.15
+
     def send_audio_to_bot(
         self,
         bot_id: str,
         audio_data: bytes,
         audio_codec: str = "mp3",
-        verify_bot_status: bool = True
+        verify_bot_status: bool = True,
+        wait_for_playback: bool = True
     ) -> bool:
         """
         Send audio for bot to play in the meeting (production-grade with validation).
@@ -270,7 +318,11 @@ class RecallBotService:
             except Exception as e:
                 logger.warning(f"Could not verify bot status for {bot_id[:8]}: {e}. Attempting to send anyway.")
         
+        if wait_for_playback:
+            self._wait_for_playback_slot(bot_id)
+
         audio_b64 = base64.b64encode(audio_data).decode()
+        duration_s = self._mp3_duration_seconds(audio_data)
         
         # Recall.ai API requires only 'kind' and 'b64_data' fields
         payload = {
@@ -286,8 +338,13 @@ class RecallBotService:
                 timeout=30
             )
             response.raise_for_status()
+            if wait_for_playback:
+                self._reserve_playback_slot(bot_id, duration_s)
+                # Block until this clip should finish — Recall has no playback-done callback
+                time.sleep(duration_s)
             logger.info(
-                f"✓ Audio sent successfully to bot {bot_id[:8]} ({len(audio_data)} bytes, {len(audio_b64)} b64 chars). "
+                f"✓ Audio sent successfully to bot {bot_id[:8]} "
+                f"({len(audio_data)} bytes, ~{duration_s:.1f}s). "
                 f"Bot will play audio in meeting (even though it shows as 'muted')."
             )
             return True

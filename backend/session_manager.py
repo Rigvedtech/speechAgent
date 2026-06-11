@@ -16,8 +16,9 @@ from state import AgentState
 from stt_engine import STTEngine
 from llm_brain import LLMBrain
 from recall_bot_service import RecallBotService
-from audio_sender import AudioSender
+from integrated_audio_sender import IntegratedAudioSender
 from webrtc_stream_manager import WebRTCStreamManager
+import config
 
 logger = logging.getLogger(__name__)
 
@@ -32,15 +33,21 @@ class MeetingSession:
     state: AgentState = field(default_factory=AgentState)
     stt_engine: Optional[STTEngine] = None
     llm_brain: Optional[LLMBrain] = None
-    audio_sender: Optional[AudioSender] = None
-    webrtc_manager: Optional[WebRTCStreamManager] = None  # WebRTC connection for Output Media API
+    audio_sender: Optional[IntegratedAudioSender] = None
+    webrtc_manager: Optional[WebRTCStreamManager] = None  # Legacy WebRTC (unused with webpage mode)
     processing_threads: list = field(default_factory=list)
     is_active: bool = True
-    use_webrtc: bool = False  # Flag to indicate if using WebRTC (Output Media API)
-    
+    use_webrtc: bool = False   # Legacy flag (raw PCM WebRTC — superseded by use_webpage)
+    use_webpage: bool = False  # Output Media webpage mode — PCM streamed via /ws/audio-stream
+    # Fallback task that clears is_ai_speaking if browser never sends playback_done
+    _speaking_fallback_task: Optional[asyncio.Task] = None
+    # Sarvam STT engine (primary) — None when Sarvam is disabled or unavailable
+    sarvam_stt_engine: Optional[object] = None
+
     def __post_init__(self):
-        """Initialize processing components."""
-        self.stt_engine = STTEngine(self.state)
+        """Initialize processing components that don't need Sarvam config."""
+        # STTEngine is created later in SessionManager.create_session() once we
+        # know whether Sarvam STT is available (requires API key + config).
         self.llm_brain = LLMBrain(self.state)
 
 
@@ -80,7 +87,13 @@ class SessionManager:
                 return None
             return bot_id
     
-    def create_session(self, bot_id: str, meeting_url: str, bot_data: Optional[Dict] = None) -> MeetingSession:
+    def create_session(
+        self,
+        bot_id: str,
+        meeting_url: str,
+        bot_data: Optional[Dict] = None,
+        use_webpage: bool = False,
+    ) -> MeetingSession:
         """
         Create a new meeting session with WebRTC support.
         
@@ -103,40 +116,108 @@ class SessionManager:
             # Check if bot supports WebRTC (Output Media API)
             media_url = bot_data.get("media_url") if bot_data else None
             
-            if media_url:
-                # Initialize WebRTC Stream Manager for Output Media API
-                logger.info(f"Initializing WebRTC streaming for bot {bot_id[:8]}")
-                session.webrtc_manager = WebRTCStreamManager(bot_id, media_url)
-                session.use_webrtc = True
-                
-                # Connect WebRTC in background (non-blocking)
-                def connect_webrtc():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        connected = loop.run_until_complete(session.webrtc_manager.connect())
-                        if connected:
-                            logger.info(f"✓ WebRTC connected for bot {bot_id[:8]}")
-                        else:
-                            logger.warning(f"✗ WebRTC connection failed for bot {bot_id[:8]}, will use file upload fallback")
-                    except Exception as e:
-                        logger.error(f"WebRTC connection error for bot {bot_id[:8]}: {e}")
-                    finally:
-                        loop.close()
-                
-                webrtc_thread = threading.Thread(target=connect_webrtc, daemon=True)
-                webrtc_thread.start()
+            # ── Output Media webpage mode (primary low-latency path) ──────────
+            if use_webpage:
+                session.use_webpage = True
+                logger.info(f"Bot {bot_id[:8]} using Output Media webpage streaming")
             else:
-                logger.info(f"Bot {bot_id[:8]} using legacy file upload (no media_url)")
-                session.use_webrtc = False
-            
-            # Initialize audio sender with WebRTC support
+                # ── Legacy WebRTC raw PCM mode (kept for reference, rarely active) ─
+                media_url = bot_data.get("media_url") if bot_data else None
+                if media_url:
+                    logger.info(f"Initializing legacy WebRTC streaming for bot {bot_id[:8]}")
+                    session.webrtc_manager = WebRTCStreamManager(bot_id, media_url)
+                    session.use_webrtc = True
+
+                    def connect_webrtc():
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        try:
+                            connected = loop.run_until_complete(session.webrtc_manager.connect())
+                            if connected:
+                                logger.info(f"✓ WebRTC connected for bot {bot_id[:8]}")
+                            else:
+                                logger.warning(f"✗ WebRTC failed for bot {bot_id[:8]}, using file upload")
+                        except Exception as e:
+                            logger.error(f"WebRTC error for bot {bot_id[:8]}: {e}")
+                        finally:
+                            loop.close()
+
+                    threading.Thread(target=connect_webrtc, daemon=True).start()
+                else:
+                    logger.info(f"Bot {bot_id[:8]} using file-upload output_audio (fallback)")
+                    session.use_webrtc = False
+
+            # ── Build Sarvam STT engine (primary) + STTEngine (Whisper fallback) ─
+            sarvam_stt = None
+            if config.SARVAM_STT_ENABLED and config.SARVAM_API_KEY:
+                try:
+                    from sarvam_stt_engine import SarvamSTTEngine, SarvamSTTConfig
+                    sarvam_stt_cfg = SarvamSTTConfig(
+                        api_key=config.SARVAM_API_KEY,
+                        model=config.SARVAM_STT_MODEL,
+                        language_code=config.SARVAM_STT_LANGUAGE,
+                        mode=config.SARVAM_STT_MODE,
+                        sample_rate=16000,          # Recall.ai audio is always 16 kHz
+                        high_vad_sensitivity=config.SARVAM_STT_HIGH_VAD,
+                        flush_signal=True,
+                    )
+                    sarvam_stt = SarvamSTTEngine(sarvam_stt_cfg)
+                    session.sarvam_stt_engine = sarvam_stt
+                    logger.info(f"Bot {bot_id[:8]} Sarvam STT engine created (model={config.SARVAM_STT_MODEL})")
+                except Exception as e:
+                    logger.error(f"Failed to create Sarvam STT engine: {e} — will use Whisper only")
+                    sarvam_stt = None
+
+            # STTEngine: Sarvam as primary when available, Whisper always present as fallback
+            session.stt_engine = STTEngine(session.state, sarvam_engine=sarvam_stt)
+
+            # Start Sarvam STT background loop (connects immediately so first turn is fast)
+            if sarvam_stt is not None:
+                threading.Thread(
+                    target=sarvam_stt.start_session_loop,
+                    name=f"SarvamSTT-Init-{bot_id[:8]}",
+                    daemon=True,
+                ).start()
+                logger.info(f"Bot {bot_id[:8]} Sarvam STT session loop starting in background")
+
+            # ── Build audio sender ────────────────────────────────────────────
             from api_server import TTS_RATE, TTS_REDUCE_PAUSES
-            session.audio_sender = AudioSender(
+            from ws_hub import broadcast_pcm_sync, send_control_sync
+
+            sarvam_config = None
+            if config.SARVAM_TTS_ENABLED:
+                sarvam_config = {
+                    "model": config.SARVAM_TTS_MODEL,
+                    "language_code": config.SARVAM_TTS_LANGUAGE,
+                    "sample_rate": config.SARVAM_TTS_SAMPLE_RATE,
+                    "pace": config.SARVAM_TTS_PACE,
+                    "temperature": config.SARVAM_TTS_TEMPERATURE,
+                    "max_retries": config.SARVAM_MAX_RETRIES
+                }
+
+            # Wrap broadcast functions with this bot's ID so audio_sender
+            # doesn't need to know about the WS hub internals.
+            _bot_id = bot_id  # capture for closure
+            webpage_pcm_broadcaster = (
+                (lambda pcm, _bid=_bot_id: broadcast_pcm_sync(_bid, pcm))
+                if session.use_webpage else None
+            )
+            webpage_ctrl_sender = (
+                (lambda msg, _bid=_bot_id: send_control_sync(_bid, msg))
+                if session.use_webpage else None
+            )
+
+            session.audio_sender = IntegratedAudioSender(
                 self.recall_service,
                 rate=TTS_RATE,
                 reduce_pauses=TTS_REDUCE_PAUSES,
-                webrtc_manager=session.webrtc_manager if session.use_webrtc else None
+                webrtc_manager=session.webrtc_manager if session.use_webrtc else None,
+                use_sarvam=config.SARVAM_TTS_ENABLED,
+                sarvam_api_key=config.SARVAM_API_KEY,
+                sarvam_speaker=config.SARVAM_TTS_SPEAKER,
+                sarvam_config=sarvam_config,
+                webpage_broadcaster=webpage_pcm_broadcaster,
+                webpage_ctrl_sender=webpage_ctrl_sender,
             )
             
             # Start processing threads
@@ -221,33 +302,105 @@ class SessionManager:
         """
         consecutive_failures = 0
         max_consecutive_failures = 5
+        # Webpage / WebRTC modes: stream each sentence immediately for low latency.
+        # File upload mode: batch the whole turn into one clip (avoids overlap).
+        batch_turns = not (session.use_webrtc or session.use_webpage)
+        turn_sentences: list[str] = []
         
+        # Pre-connect Sarvam TTS WebSocket before first sentence (avoids delay on greet)
+        if session.audio_sender:
+            await session.audio_sender.ensure_sarvam_connected()
+        
+        _running_loop = asyncio.get_running_loop()
+
         while session.is_active and session.state.is_running:
             try:
-                # Get text from TTS queue (with timeout)
-                text = session.state.tts_queue.get(timeout=1.0)
+                # Use run_in_executor so the asyncio event loop is NOT blocked while
+                # waiting for the next TTS sentence.  This lets the Sarvam TTS keepalive
+                # task fire every 20 s, preventing the ~1.1 s reconnect penalty each turn.
+                text = await _running_loop.run_in_executor(
+                    None, session.state.tts_queue.get, True, 1.0
+                )
                 
                 # FIX 7: Check for interrupt — drain queue if interrupted
                 if session.state.interrupt_flag.is_set():
                     logger.info(f"Bot {session.bot_id[:8]} interrupted - draining TTS queue")
+                    turn_sentences.clear()
                     # Drain remaining queued sentences — they are stale
                     while not session.state.tts_queue.empty():
                         try:
                             session.state.tts_queue.get_nowait()
                         except:
                             break
+                    # Cancel pending playback-done fallback (no longer relevant)
+                    if session._speaking_fallback_task:
+                        session._speaking_fallback_task.cancel()
+                        session._speaking_fallback_task = None
+                    # Tell the browser to flush its ring buffer immediately
+                    if (session.use_webpage
+                            and session.audio_sender
+                            and session.audio_sender.webpage_ctrl_sender):
+                        session.audio_sender.webpage_ctrl_sender({"type": "flush"})
                     session.state.is_ai_speaking.clear()
                     session.state.interrupt_flag.clear()
                     continue
                 
                 # Check for special markers
                 if text == "<END_OF_TURN>":
-                    # Reduced post-send buffer for sentence streaming
-                    await asyncio.sleep(1.5)
-                    
-                    session.state.is_ai_speaking.clear()
+                    if batch_turns and turn_sentences and session.audio_sender:
+                        full_text = " ".join(turn_sentences)
+                        turn_sentences.clear()
+                        session.state.is_ai_speaking.set()
+                        logger.info(
+                            f"Bot {session.bot_id[:8]} speaking full turn "
+                            f"({len(full_text)} chars, file upload batch mode)"
+                        )
+                        success = await session.audio_sender.send_text_to_bot(
+                            session.bot_id,
+                            full_text,
+                            session.state
+                        )
+                        if not success:
+                            consecutive_failures += 1
+                            session.state.is_ai_speaking.clear()
+                        else:
+                            consecutive_failures = 0
+                    else:
+                        turn_sentences.clear()
+
+                    # Cancel any leftover fallback from a previous turn
+                    if session._speaking_fallback_task:
+                        session._speaking_fallback_task.cancel()
+                        session._speaking_fallback_task = None
+
+                    if session.use_webpage:
+                        # Webpage mode: browser sends playback_done when buffer drains.
+                        # The WS handler (api_server.py) clears is_ai_speaking at that point.
+                        # This fallback task clears it after 30 s if the browser never responds
+                        # (e.g. disconnected, browser crash) so STT is never permanently blocked.
+                        session._speaking_fallback_task = asyncio.ensure_future(
+                            self._speaking_fallback(session, timeout=30.0)
+                        )
+                    else:
+                        # File-upload / batch mode: no browser feedback — clear after brief delay
+                        await asyncio.sleep(0.3)
+                        session.state.is_ai_speaking.clear()
+
+                    # Proactively ensure Sarvam TTS is still connected while the bot is
+                    # idle (between turns).  The keepalive task handles this when the
+                    # event loop is free, but an explicit ensure_connected() here is a
+                    # belt-and-suspenders check that costs nothing if already alive.
+                    if (session.use_webpage
+                            and session.audio_sender
+                            and getattr(session.audio_sender, 'sarvam_engine', None)
+                            and not session.audio_sender.sarvam_engine.is_connected):
+                        asyncio.ensure_future(
+                            session.audio_sender.sarvam_engine.ensure_connected()
+                        )
+                        logger.debug(f"Bot {session.bot_id[:8]} proactive Sarvam TTS reconnect triggered")
+
                     session.state.interrupt_flag.clear()  # Reset for next turn
-                    logger.debug(f"Bot {session.bot_id[:8]} finished speaking")
+                    logger.debug(f"Bot {session.bot_id[:8]} finished speaking (waiting for playback_done)")
                     consecutive_failures = 0
                     continue
                 
@@ -255,16 +408,19 @@ class SessionManager:
                 if not text or len(text.strip()) == 0:
                     logger.warning(f"Bot {session.bot_id[:8]} received empty text, skipping")
                     continue
+
+                if batch_turns:
+                    turn_sentences.append(text.strip())
+                    continue
                 
-                # Set speaking flag BEFORE sending
+                # WebRTC mode: stream each sentence immediately for lower latency
                 session.state.is_ai_speaking.set()
                 
                 if session.audio_sender:
-                    # FIX 2: Use await instead of asyncio.run(), pass state for interrupt checking
                     success = await session.audio_sender.send_text_to_bot(
                         session.bot_id,
                         text,
-                        session.state  # Pass state for interrupt checking
+                        session.state
                     )
                     
                     if success:
@@ -284,7 +440,6 @@ class SessionManager:
                             )
                             consecutive_failures = 0  # Reset to avoid spam
                         
-                        # Clear speaking flag on failure
                         session.state.is_ai_speaking.clear()
                 else:
                     logger.error(f"Bot {session.bot_id[:8]} has no audio_sender configured")
@@ -305,6 +460,24 @@ class SessionManager:
                 # Brief pause on error
                 await asyncio.sleep(0.5)
     
+    async def _speaking_fallback(self, session: MeetingSession, timeout: float = 30.0):
+        """
+        Safety net: if the browser never sends playback_done (e.g. disconnected,
+        browser crash), clear is_ai_speaking after `timeout` seconds so the STT
+        is never permanently blocked.  Normally cancelled via task.cancel() when
+        playback_done arrives or when the user interrupts.
+        """
+        try:
+            await asyncio.sleep(timeout)
+            if session.state.is_ai_speaking.is_set():
+                session.state.is_ai_speaking.clear()
+                logger.warning(
+                    f"Bot {session.bot_id[:8]} playback_done never received — "
+                    f"STT unblocked by {timeout}s fallback"
+                )
+        except asyncio.CancelledError:
+            pass  # cancelled by interrupt or by playback_done handler — normal path
+
     def handle_audio_chunk(self, bot_id: str, audio_array: np.ndarray):
         """
         Handle incoming audio chunk from Recall.ai.
@@ -374,6 +547,14 @@ class SessionManager:
             session.is_active = False
             session.state.is_running = False
             
+            # Stop Sarvam STT background loop
+            if session.sarvam_stt_engine is not None:
+                try:
+                    session.sarvam_stt_engine.stop_session_loop()
+                    logger.info(f"Sarvam STT loop stopped for bot {bot_id[:8]}")
+                except Exception as e:
+                    logger.error(f"Error stopping Sarvam STT for bot {bot_id[:8]}: {e}")
+
             # Disconnect WebRTC if applicable
             if session.webrtc_manager and session.use_webrtc:
                 try:

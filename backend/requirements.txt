@@ -10,7 +10,8 @@ pygame-ce
 groq
 python-dotenv
 fastapi
-uvicorn
+uvicorn[standard]
+aiofiles  # Required for FastAPI StaticFiles
 google-genai>=1.14.0
 
 # Recall.ai Integration
@@ -20,3 +21,7 @@ aiohttp>=3.9.0
 
 # WebRTC Output Media API
 pydub>=0.25.1  # For MP3 to PCM audio conversion
+
+# Sarvam AI Integration (Optional - only if using Sarvam STT/TTS)
+# websockets already included above
+# No additional dependencies needed - uses existing websockets library
