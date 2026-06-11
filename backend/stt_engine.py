@@ -1,6 +1,7 @@
 import sys
 import queue
 import re
+import time
 import torch
 import numpy as np
 import collections
@@ -177,6 +178,10 @@ class STTEngine:
 
         Primary:  Sarvam AI Saaras V3  (api_server / Recall mode — sarvam_engine is set)
         Fallback: faster-whisper        (always available; sole engine in main.py mode)
+
+        Deduplication: if Recall.ai already fired a final transcript for this
+        utterance (state.last_recall_transcript_time was set within the last 4 s)
+        we skip local transcription entirely — the LLM queue already has the text.
         """
         if not self.audio_buffer:
             return
@@ -191,6 +196,23 @@ class STTEngine:
             self.audio_buffer = []
             self.is_recording = False
             self.last_speech_time = 0.0
+            return
+
+        # ── Recall.ai deduplication guard ────────────────────────────────────
+        # Recall's is_final transcript fires ~200-400 ms after candidate stops.
+        # Our VAD silence timer fires 0.8-1.5 s later.  If Recall already sent
+        # the transcript to the LLM queue we must NOT run Whisper/Sarvam again.
+        # 4 s window is generous — covers the longest silence threshold (1.5 s)
+        # plus Whisper processing time (~3 s for long answers).
+        recall_age = time.monotonic() - self.state.last_recall_transcript_time
+        if recall_age < 4.0:
+            print(
+                f"\r[STT] Recall.ai handled this utterance "
+                f"({recall_age:.2f}s ago) — skipping local transcription",
+                end="", flush=True,
+            )
+            self.audio_buffer = []
+            self.vad_model.reset_states()
             return
 
         audio_data = np.concatenate(self.audio_buffer).flatten().astype(np.float32)

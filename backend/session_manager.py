@@ -6,6 +6,8 @@ Supports WebRTC streaming (Output Media API) for low-latency audio output.
 
 import logging
 import queue
+import re
+import time
 import threading
 import asyncio
 from typing import Dict, Optional
@@ -513,6 +515,79 @@ class SessionManager:
         except queue.Full:
             logger.warning(f"Audio queue full for bot {bot_id[:8]}, dropping chunk (may indicate processing backlog)")
     
+    # Backchannel patterns shared with stt_engine — single source of truth here.
+    _BACKCHANNEL_RE = re.compile(
+        r'^(yeah|yes|yep|yup|okay|ok|mhm|mmhmm|uh-huh|mm-hmm|right|sure|'
+        r'got it|yeah yeah|ok ok|yes yes)[\.!\?]*$',
+        re.IGNORECASE,
+    )
+    _FILLER_RE = re.compile(r'\b(um|uh|hmm|ah|uhm)\b[\.,]?', re.IGNORECASE)
+
+    def handle_recall_transcript(
+        self,
+        bot_id: str,
+        text: str,
+        is_final: bool,
+        is_bot_speaker: bool,
+    ):
+        """
+        Called by AudioReceiver when Recall.ai fires a transcript.data event.
+
+        Only *final* segments from *human* speakers are routed to the LLM.
+        We also record the timestamp so stt_engine.transcribe_buffer() knows
+        Recall already handled this utterance and can skip Whisper/Sarvam.
+
+        This runs on the asyncio thread that drives AudioReceiver — it is
+        intentionally lightweight (no blocking I/O).
+        """
+        # Partial transcripts arrive continuously while the candidate talks.
+        # We log them for debugging but do not act on them.
+        if not is_final:
+            logger.debug(f"[RECALL PARTIAL] bot={bot_id[:8]} '{text[:60]}'")
+            return
+
+        # The bot's own speech is also transcribed — ignore it to avoid
+        # the agent responding to itself.
+        if is_bot_speaker:
+            logger.debug(f"[RECALL BOT SPEECH IGNORED] bot={bot_id[:8]} '{text[:40]}'")
+            return
+
+        with self.sessions_lock:
+            session = self.sessions.get(bot_id)
+
+        if not session or not session.is_active:
+            return
+        if not session.state.is_started.is_set():
+            return
+        if session.state.is_ai_speaking.is_set():
+            # Candidate is speaking while bot is — this is an interrupt.
+            # The VAD pipeline already handles interrupt_flag; transcript
+            # routing during bot speech would cause double-queuing.
+            logger.debug(
+                f"[RECALL TRANSCRIPT SKIPPED — bot speaking] "
+                f"bot={bot_id[:8]} '{text[:40]}'"
+            )
+            return
+
+        # Clean filler words
+        text = self._FILLER_RE.sub('', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        if not text or len(text) < 3:
+            return
+
+        # Drop pure backchannels
+        if self._BACKCHANNEL_RE.match(text):
+            logger.info(f"[RECALL BACKCHANNEL FILTERED] '{text}'")
+            return
+
+        # Mark the time so stt_engine.transcribe_buffer() can detect the
+        # duplicate and skip running Whisper / Sarvam on the same audio.
+        session.state.last_recall_transcript_time = time.monotonic()
+
+        logger.info(f"\n[RECALL TRANSCRIPT] '{text}'")
+        session.state.llm_queue.put(text)
+
     def get_session(self, bot_id: str) -> Optional[MeetingSession]:
         """
         Get session by bot ID.

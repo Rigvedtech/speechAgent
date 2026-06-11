@@ -16,13 +16,14 @@ logger = logging.getLogger(__name__)
 
 
 class AudioReceiver:
-    """WebSocket server to receive real-time audio from Recall.ai."""
+    """WebSocket server to receive real-time audio and transcripts from Recall.ai."""
     
     def __init__(
         self,
         host: str = "0.0.0.0",
         port: int = 8765,
-        audio_callback: Optional[Callable] = None
+        audio_callback: Optional[Callable] = None,
+        transcript_callback: Optional[Callable] = None,
     ):
         """
         Initialize audio receiver WebSocket server.
@@ -30,12 +31,16 @@ class AudioReceiver:
         Args:
             host: Server host address
             port: Server port
-            audio_callback: Function called when audio chunk received
+            audio_callback: Invoked per PCM audio chunk.
                            Signature: callback(bot_id: str, audio_array: np.ndarray)
+            transcript_callback: Invoked per transcript segment from Recall.ai.
+                           Signature: callback(bot_id: str, text: str,
+                                               is_final: bool, is_bot_speaker: bool)
         """
         self.host = host
         self.port = port
         self.audio_callback = audio_callback
+        self.transcript_callback = transcript_callback
         self.active_connections: Dict[str, WebSocketServerProtocol] = {}
         self.bot_sessions: Dict[str, dict] = {}  # bot_id -> session info
     
@@ -64,13 +69,14 @@ class AudioReceiver:
                             bot_id = data["data"]["bot"].get("id")
                             logger.info(f"Connection {connection_id} associated with bot {bot_id}")
                         
-                        # Handle audio data event
-                        if data.get("event") == "audio_mixed_raw.data":
+                        # Route events by type
+                        event_type = data.get("event")
+                        if event_type == "audio_mixed_raw.data":
                             await self._process_audio_message(data, bot_id)
-                        
-                        # Handle other events (transcript, participant events, etc.)
-                        elif data.get("event"):
-                            logger.debug(f"Received event: {data['event']}")
+                        elif event_type == "transcript.data":
+                            await self._process_transcript_message(data, bot_id)
+                        elif event_type:
+                            logger.debug(f"Received event: {event_type}")
                     
                     else:
                         logger.warning(f"Received non-JSON message: {type(message)}")
@@ -134,7 +140,57 @@ class AudioReceiver:
             logger.error(f"Missing expected field in audio message: {e}")
         except Exception as e:
             logger.error(f"Failed to process audio: {e}", exc_info=True)
-    
+
+    async def _process_transcript_message(self, data: dict, bot_id: Optional[str]):
+        """
+        Parse a transcript.data event from Recall.ai and invoke transcript_callback.
+
+        Recall.ai fires partial segments continuously while the speaker talks and
+        then one final segment (is_final=True) once their VAD decides the turn is
+        complete.  We only care about final segments for routing to the LLM, but
+        we pass the flag through so callers can decide.
+
+        Event shape:
+            data["data"]["data"] = {
+                "speaker": {"id": str, "name": str, "is_bot": bool},
+                "words":   [{"text": str, ...}, ...],
+                "is_final": bool,
+                "lang": str,
+            }
+        """
+        if not self.transcript_callback or not bot_id:
+            return
+
+        try:
+            payload = data["data"]["data"]
+            speaker = payload.get("speaker", {})
+            is_bot_speaker = bool(speaker.get("is_bot", False))
+            is_final = bool(payload.get("is_final", False))
+            words = payload.get("words", [])
+            text = " ".join(w.get("text", "") for w in words).strip()
+
+            if not text:
+                return
+
+            logger.debug(
+                f"[RECALL TRANSCRIPT] bot={bot_id[:8]} is_final={is_final} "
+                f"is_bot={is_bot_speaker} text='{text[:60]}'"
+            )
+
+            try:
+                self.transcript_callback(bot_id, text, is_final, is_bot_speaker)
+            except Exception as e:
+                logger.error(f"Error in transcript callback: {e}", exc_info=True)
+
+        except (KeyError, TypeError) as e:
+            # Log the raw event once so we can debug the actual schema if it differs
+            logger.warning(
+                f"Could not parse transcript.data event (key={e}). "
+                f"Raw payload: {str(data)[:300]}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to process transcript: {e}", exc_info=True)
+
     async def start(self):
         """Start the WebSocket server."""
         logger.info(f"Starting audio receiver on ws://{self.host}:{self.port}")

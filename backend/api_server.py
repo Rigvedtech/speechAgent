@@ -576,7 +576,8 @@ if __name__ == "__main__":
         receiver = AudioReceiver(
             host="0.0.0.0",
             port=WEBSOCKET_PORT,
-            audio_callback=session_manager.handle_audio_chunk
+            audio_callback=session_manager.handle_audio_chunk,
+            transcript_callback=session_manager.handle_recall_transcript,
         )
         receiver.run()
     

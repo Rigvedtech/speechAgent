@@ -16,3 +16,8 @@ class AgentState:
         self.is_running = True
         # MANUAL START: Interview doesn't begin until /api/start is called
         self.is_started = threading.Event()
+
+        # Timestamp (monotonic seconds) set when Recall.ai fires a final
+        # transcript for this session.  stt_engine.transcribe_buffer() checks
+        # this to avoid double-sending the same utterance to the LLM queue.
+        self.last_recall_transcript_time: float = 0.0

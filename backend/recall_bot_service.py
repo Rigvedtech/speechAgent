@@ -86,7 +86,16 @@ class RecallBotService:
             "meeting_url": config.meeting_url,
             "bot_name": config.bot_name,
             "recording_config": {
-                "audio_mixed_raw": {},  # Enable real-time audio streaming
+                "audio_mixed_raw": {},  # Real-time PCM audio for STT/VAD pipeline
+                # Enable Recall's built-in transcription.
+                # When meeting captions are available this fires is_final transcripts
+                # 200-400 ms after the speaker stops — bypassing our local Whisper.
+                # Falls back gracefully (Whisper runs) if no captions are active.
+                "transcript": {
+                    "provider": {
+                        "meeting_captions": {}
+                    }
+                },
             }
         }
         
@@ -135,7 +144,7 @@ class RecallBotService:
             payload["recording_config"]["realtime_endpoints"] = [{
                 "type": "websocket",
                 "url": config.websocket_url,
-                "events": ["audio_mixed_raw.data"]
+                "events": ["audio_mixed_raw.data", "transcript.data"],
             }]
         
         # Override with custom greeting audio (only for output_audio API)

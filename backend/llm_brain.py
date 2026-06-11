@@ -206,7 +206,7 @@ class LLMBrain:
                                 model=GROQ_MODEL,
                                 messages=request_messages,
                                 stream=True,
-                                max_tokens=150,
+                                max_tokens=90,
                             )
                             for chunk in stream:
                                 # Check for interrupt — stop generation if user started speaking
