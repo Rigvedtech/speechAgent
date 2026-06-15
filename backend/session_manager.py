@@ -597,6 +597,12 @@ class SessionManager:
             return
         if not session.state.is_started.is_set():
             return
+        if session.state.interview_ended.is_set():
+            logger.debug(
+                f"[RECALL TRANSCRIPT SKIPPED — interview ended] "
+                f"bot={bot_id[:8]} '{text[:40]}'"
+            )
+            return
         if session.state.is_ai_speaking.is_set():
             # Candidate is speaking while bot is — this is an interrupt.
             # The VAD pipeline already handles interrupt_flag; transcript

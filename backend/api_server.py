@@ -7,12 +7,12 @@ import os
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from dotenv import load_dotenv
 import uvicorn
 
@@ -314,30 +314,42 @@ async def join_meeting(request: JoinMeetingRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class QuestionBankItem(BaseModel):
+    id: str
+    difficulty: str
+    source: str
+    question: str
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def coerce_id_to_str(cls, v):
+        if v is None:
+            raise ValueError("id is required")
+        return str(v).strip()
+
+
 class StartInterviewRequest(BaseModel):
+    candidate_name: str
+    jdText: str
+    cvText: str
+    questions: List[QuestionBankItem]
     greeting_message: Optional[str] = None
 
 
 @app.post("/api/start/{bot_id}")
 async def start_interview(bot_id: str, request: StartInterviewRequest = None):
     """
-    Start the interview by triggering initial greeting.
-    Bot will introduce itself and ask candidate to introduce themselves.
-    
-    Path Parameter:
-    - bot_id: Bot ID
-    
-    Request Body (optional):
+    Start the interview with injected JD, resume, and question bank.
+
+    Request Body:
     {
-        "greeting_message": "Custom greeting..."  (optional)
-    }
-    
-    Response:
-    {
-        "success": true,
-        "bot_id": "abc-123",
-        "message": "Interview started",
-        "greeting": "Hello, I am Prabhat..."
+        "candidate_name": "Pranay",
+        "jdText": "...",
+        "cvText": "...",
+        "questions": [
+            {"id": "q1", "difficulty": "Low", "source": "jd", "question": "..."}
+        ],
+        "greeting_message": "optional custom greeting instruction"
     }
     """
     try:
@@ -351,11 +363,50 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
             raise HTTPException(status_code=400, detail="Bot session is not active")
         
         if session.state.is_started.is_set():
-            return {
-                "success": False,
-                "bot_id": bot_id,
-                "message": "Interview already started"
-            }
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "success": False,
+                    "bot_id": bot_id,
+                    "message": "Interview already started",
+                },
+            )
+
+        if request is None:
+            raise HTTPException(
+                status_code=400,
+                detail="Request body required: candidate_name, jdText, cvText, questions",
+            )
+
+        candidate_name = (request.candidate_name or "").strip()
+        jd_text = (request.jdText or "").strip()
+        cv_text = (request.cvText or "").strip()
+
+        if not candidate_name:
+            raise HTTPException(status_code=400, detail="candidate_name is required")
+        if not jd_text:
+            raise HTTPException(status_code=400, detail="jdText is required")
+        if not cv_text:
+            raise HTTPException(status_code=400, detail="cvText is required")
+        if not request.questions:
+            raise HTTPException(status_code=400, detail="questions list cannot be empty")
+
+        from interview_engine import InterviewOrchestrator, parse_bank_questions
+
+        try:
+            bank = parse_bank_questions([q.model_dump() for q in request.questions])
+            orchestrator = InterviewOrchestrator.create(
+                bot_id=bot_id,
+                candidate_name=candidate_name,
+                jd_text=jd_text,
+                cv_text=cv_text,
+                bank=bank,
+            )
+        except ValueError as ve:
+            raise HTTPException(status_code=400, detail=str(ve))
+
+        session.state.interview_orchestrator = orchestrator
+        session.state.interview_ended.clear()
 
         # Bot must be admitted to the meeting before interview starts
         try:
@@ -403,13 +454,11 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
                 },
             )
         
-        # Get candidate name from document.py
-        import document as interview_documents
-        candidate_name = getattr(interview_documents, "candidate_name", "").strip() or "the candidate"
+        # Get candidate name from injected session data
+        candidate_name = orchestrator.candidate_name
         
-        # DYNAMIC GREETING: Let LLM generate greeting naturally with context
-        # Instead of hardcoded greeting, provide LLM with instruction to greet
-        greeting_instruction = (
+        # Bootstrap greeting — LLM generates natural intro; orchestrator moves to await_intro after
+        greeting_instruction = request.greeting_message or (
             f"You are an AI interviewer named {BOT_NAME}. "
             f"The candidate's name is {candidate_name}. "
             f"This is the start of a screening interview. "
@@ -424,13 +473,21 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
         # LLM will generate natural greeting and send to TTS
         session.state.llm_queue.put(greeting_instruction)
         
-        logger.info(f"Interview started for bot {bot_id}, LLM will generate greeting")
+        logger.info(
+            "Interview started for bot %s candidate=%s planned_questions=%d",
+            bot_id,
+            candidate_name,
+            len(orchestrator.planned_questions),
+        )
         
         return {
             "success": True,
             "bot_id": bot_id,
             "message": "Interview started - LLM generating greeting",
-            "greeting": "LLM will generate personalized greeting"
+            "candidate_name": candidate_name,
+            "questions_planned": len(orchestrator.planned_questions),
+            "planned_question_ids": [q.id for q in orchestrator.planned_questions],
+            "phase": orchestrator.phase.value,
         }
         
     except HTTPException:
@@ -438,6 +495,34 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
     except Exception as e:
         logger.error(f"Failed to start interview: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/interview/{bot_id}/report")
+async def get_interview_report(bot_id: str):
+    """
+    Get structured interview report card (scores, develop/fix areas).
+    Available once interview has started; best after interview ends.
+    """
+    session = session_manager.get_session(bot_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+
+    orch = session.state.interview_orchestrator
+    if not orch:
+        raise HTTPException(
+            status_code=400,
+            detail="Interview not started — call POST /api/start first",
+        )
+
+    report = orch.build_report()
+    logger.info(
+        "[REPORT] bot=%s scored=%d overall_avg=%s stopped=%s",
+        bot_id[:8],
+        report.get("questions_scored"),
+        report.get("overall_average"),
+        report.get("stopped_reason"),
+    )
+    return {"success": True, "report": report}
 
 
 @app.delete("/api/leave/{bot_id}", response_model=LeaveResponse)
@@ -533,7 +618,18 @@ async def list_active_sessions():
                 "bot_id": bot_id,
                 "meeting_url": session.meeting_url,
                 "is_active": session.is_active,
-                "is_started": session.state.is_started.is_set()  # Show if interview started
+                "is_started": session.state.is_started.is_set(),
+                "interview_ended": session.state.interview_ended.is_set(),
+                "interview_phase": (
+                    session.state.interview_orchestrator.phase.value
+                    if session.state.interview_orchestrator
+                    else None
+                ),
+                "questions_scored": (
+                    len(session.state.interview_orchestrator.answer_records)
+                    if session.state.interview_orchestrator
+                    else 0
+                ),
             }
             for bot_id, session in sessions.items()
         ]

@@ -1,9 +1,18 @@
 import queue
 import re
+import json
+import logging
 from config import GROQ_API_KEY, GROQ_MODEL, GROQ_TEMPERATURE, GROQ_MAX_TOKENS, OLLAMA_MODEL
 import document as interview_documents
 from state import AgentState
 from system_prompt import SYSTEM_PROMPT
+from interview_engine import (
+    EVALUATOR_SYSTEM_PROMPT,
+    EvaluationResult,
+    InterviewPhase,
+)
+
+logger = logging.getLogger(__name__)
 
 _SENTENCE_ENDINGS = ('.', '!', '?', '...')
 
@@ -90,7 +99,14 @@ class LLMBrain:
         self.max_runtime_history_messages = 12
 
     def _interview_document_messages(self):
-        """JD + resume + grounding rules (only if at least one document is non-empty)."""
+        """JD + resume + grounding rules (session injection or document.py fallback)."""
+        orch = self.state.interview_orchestrator
+        if orch is not None:
+            content = orch.document_context_for_llm()
+            if content.strip():
+                return [{"role": "system", "content": content}]
+            return []
+
         candidate_name = (getattr(interview_documents, "candidate_name", "") or "").strip()
         jd = (interview_documents.jd or "").strip()
         resume = (interview_documents.resume or "").strip()
@@ -365,6 +381,116 @@ class LLMBrain:
         self.state.tts_queue.put("<END_OF_TURN>")
         print("--- READY: START SPEAKING ---")
 
+    def _evaluate_answer(self, answer_text: str, question) -> EvaluationResult:
+        """Score candidate answer via structured LLM JSON response."""
+        orch = self.state.interview_orchestrator
+        if not orch or not question:
+            return EvaluationResult()
+
+        user_content = (
+            f"{orch.evaluator_context(question)}\n\n"
+            f"Candidate answer:\n{answer_text.strip()}"
+        )
+        messages = [
+            {"role": "system", "content": EVALUATOR_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
+
+        raw = ""
+        if GROQ_API_KEY:
+            try:
+                from groq import Groq
+                client = Groq(api_key=GROQ_API_KEY)
+                completion = client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=messages,
+                    max_tokens=200,
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                )
+                raw = (completion.choices[0].message.content or "").strip()
+            except Exception as ex:
+                logger.warning("[EVALUATOR] Groq failed: %s", ex)
+
+        if not raw:
+            try:
+                import ollama
+                response = ollama.chat(
+                    model=OLLAMA_MODEL,
+                    messages=messages,
+                    stream=False,
+                )
+                raw = (response.get("message", {}).get("content") or "").strip()
+            except Exception as ex:
+                logger.warning("[EVALUATOR] Ollama failed: %s", ex)
+
+        if raw:
+            try:
+                # Strip markdown fences if model adds them
+                cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.IGNORECASE)
+                data = json.loads(cleaned)
+                return EvaluationResult.from_dict(data)
+            except (json.JSONDecodeError, TypeError, ValueError) as ex:
+                logger.warning("[EVALUATOR] JSON parse failed: %s raw=%r", ex, raw[:200])
+
+        return EvaluationResult(score=5, confident=False, relevant=True)
+
+    def _emit_orchestrated_turn(self, decision) -> None:
+        """Send orchestrator-authored spoken line directly to TTS."""
+        spoken = (decision.spoken_text or "").strip()
+        if spoken:
+            self.state.tts_queue.put(spoken)
+            self.conversation_history.append({"role": "assistant", "content": spoken})
+
+        if len(self.conversation_history) > (self.max_runtime_history_messages + 2):
+            self.conversation_history = self.conversation_history[-self.max_runtime_history_messages:]
+
+        self.state.tts_queue.put("<END_OF_TURN>")
+        print("--- READY: START SPEAKING ---")
+
+        if not decision.should_continue:
+            self.state.interview_ended.set()
+            orch = self.state.interview_orchestrator
+            if orch:
+                orch.mark_ended()
+                logger.info(
+                    "[INTERVIEW REPORT READY] bot=%s reason=%s",
+                    orch.bot_id[:8] if orch.bot_id else "?",
+                    decision.stopped_reason.value,
+                )
+
+    def _handle_orchestrated_turn(self, user_text: str) -> bool:
+        """
+        Process turn through interview orchestrator when active.
+        Returns True if handled (caller should skip default LLM stream).
+        """
+        orch = self.state.interview_orchestrator
+        if orch is None or self.state.interview_ended.is_set():
+            return False
+
+        if orch.is_bootstrap_message(user_text):
+            return False
+
+        if orch.phase == InterviewPhase.AWAIT_INTRO:
+            decision = orch.on_intro_answer()
+            self._emit_orchestrated_turn(decision)
+            return True
+
+        if orch.phase == InterviewPhase.CORE:
+            question = orch.get_current_question()
+            if not question:
+                return False
+            evaluation = self._evaluate_answer(user_text, question)
+            decision = orch.process_answer(user_text, evaluation)
+            self._emit_orchestrated_turn(decision)
+            return True
+
+        if orch.phase in (InterviewPhase.CLOSING, InterviewPhase.ENDED):
+            logger.info("[INTERVIEW] Ignoring speech — interview already closing/ended")
+            return True
+
+        return False
+
     def start(self):
         """Worker loop for LLM response generation."""
         if GROQ_API_KEY:
@@ -383,12 +509,19 @@ class LLMBrain:
         while self.state.is_running:
             try:
                 user_text = self.state.llm_queue.get(timeout=1.0)
+                if self.state.interview_ended.is_set():
+                    continue
+
                 print(f"\n[You]: {user_text}")
 
                 wrapped_user = self._wrap_candidate_speech(user_text)
                 self.conversation_history.append({"role": "user", "content": wrapped_user})
                 if self._looks_like_jailbreak(user_text):
                     print("[AI Guard]: Jailbreak pattern detected in candidate speech.")
+
+                # Structured interview path (scoring + question bank)
+                if self._handle_orchestrated_turn(user_text):
+                    continue
 
                 print("[AI]: ", end="", flush=True)
 
@@ -475,6 +608,11 @@ class LLMBrain:
 
                 print("\n")
                 self._finalize_turn(full_text, sentence_buffer, sent_to_tts)
+
+                # After bootstrap greeting, move to await_intro phase
+                orch = self.state.interview_orchestrator
+                if orch and orch.is_bootstrap_message(user_text):
+                    orch.on_greeting_sent()
 
             except queue.Empty:
                 continue

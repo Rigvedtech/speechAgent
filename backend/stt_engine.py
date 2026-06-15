@@ -293,4 +293,6 @@ class STTEngine:
                 return
 
         if len(full_text) > 2:
+            if getattr(self.state, "interview_ended", None) and self.state.interview_ended.is_set():
+                return
             self.state.llm_queue.put(full_text)

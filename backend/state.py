@@ -21,3 +21,7 @@ class AgentState:
         # transcript for this session.  stt_engine.transcribe_buffer() checks
         # this to avoid double-sending the same utterance to the LLM queue.
         self.last_recall_transcript_time: float = 0.0
+
+        # Structured interview orchestrator (set on /api/start).
+        self.interview_orchestrator = None
+        self.interview_ended = threading.Event()

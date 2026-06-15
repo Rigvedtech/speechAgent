@@ -116,6 +116,16 @@ _STARTUP_GREETING_DEFAULT = (
 )
 STARTUP_GREETING = _env_str("STARTUP_GREETING", _STARTUP_GREETING_DEFAULT)
 
+# Interview orchestration
+MAX_QUESTIONS = _env_int("MAX_QUESTIONS", 10)
+MAX_ANSWER_SEC = _env_int("MAX_ANSWER_SEC", 120)
+MAX_OFF_TOPIC_REDIRECTS = _env_int("MAX_OFF_TOPIC_REDIRECTS", 2)
+MAX_STRIKES = _env_int("MAX_STRIKES", 3)
+MAX_INTERVIEW_MINUTES = _env_int("MAX_INTERVIEW_MINUTES", 30)
+CONTINUE_AVG_THRESHOLD = _env_float("CONTINUE_AVG_THRESHOLD", 7.0)
+ROLLING_WINDOW = _env_int("ROLLING_WINDOW", 4)
+ABUSE_MAX_WARNINGS = _env_int("ABUSE_MAX_WARNINGS", 1)
+
 # Main asyncio event loop — set once by api_server.py's startup hook.
 # Stored here (not in api_server.py) so all modules share the same reference
 # regardless of whether api_server is run as __main__ or imported as a module.
