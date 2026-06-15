@@ -135,6 +135,26 @@ class IntegratedAudioSender:
             logger.error(f"MP3→PCM conversion failed: {e}")
             return b""
 
+    @staticmethod
+    def _try_decode_mp3(mp3_bytes: bytes, target_rate: int = 24000) -> Optional[bytes]:
+        """
+        Attempt to decode a *partial* MP3 buffer.  Returns None if ffmpeg
+        cannot find enough sync frames — caller should keep accumulating.
+        Returns an empty-bytes sentinel (b"") on a genuine decode error.
+        """
+        try:
+            from pydub import AudioSegment
+            audio = AudioSegment.from_mp3(io.BytesIO(mp3_bytes))
+            audio = (
+                audio
+                .set_channels(1)
+                .set_sample_width(2)
+                .set_frame_rate(target_rate)
+            )
+            return audio.raw_data
+        except Exception:
+            return None  # Partial / un-decodable — keep accumulating
+
     async def ensure_sarvam_connected(self) -> bool:
         """Pre-connect Sarvam WebSocket so first sentence has no connect delay."""
         if not self.use_sarvam or not self.sarvam_engine or self.using_fallback:
@@ -167,8 +187,15 @@ class IntegratedAudioSender:
         # Try Sarvam TTS first if enabled
         if self.use_sarvam and self.sarvam_engine and not self.using_fallback:
             try:
-                success = await self._send_via_sarvam(bot_id, text, state)
-                
+                # Webpage mode: use streaming path so first audio hits the browser
+                # as soon as Sarvam sends ~4 KB (~256 ms) instead of waiting for
+                # the full sentence.  All other output paths use the original
+                # batch method (file upload / WebRTC don't benefit from streaming).
+                if self.use_webpage and self.webpage_broadcaster:
+                    success = await self._send_via_sarvam_streaming(bot_id, text, state)
+                else:
+                    success = await self._send_via_sarvam(bot_id, text, state)
+
                 if success:
                     elapsed = (time.time() - start_time) * 1000
                     logger.info(f"✓ Sarvam TTS pipeline completed in {elapsed:.0f}ms")
@@ -266,6 +293,100 @@ class IntegratedAudioSender:
                 logger.info(f"✓ Sent {len(audio_mp3)} bytes MP3 via file upload (Sarvam TTS)")
             return success
     
+    async def _send_via_sarvam_streaming(self, bot_id: str, text: str, state=None) -> bool:
+        """
+        Stream Sarvam TTS to the Output Media webpage page incrementally.
+
+        Instead of collecting the full sentence MP3 (~1-4 s) before sending,
+        we decode and forward each accumulated chunk the moment we have enough
+        bytes for a reliable ffmpeg decode (~4 KB ≈ 256 ms of audio at 128 kbps).
+
+        Latency improvement per turn:
+          Short sentence (12 KB MP3, 900 ms from Sarvam): 300 ms → first audio
+          Long  sentence (50 KB MP3, 2.4 s from Sarvam):  300 ms → first audio
+        """
+        import re
+
+        if state and state.interrupt_flag.is_set():
+            return False
+
+        text = re.sub(r'\s+', ' ', text.strip())
+        if not text:
+            return False
+
+        connected = await self.sarvam_engine.ensure_connected()
+        if not connected:
+            logger.error("Failed to connect Sarvam TTS for streaming")
+            return False
+
+        # DO NOT send start_speaking here — the browser AudioWorklet's buffer is
+        # empty at this point.  If we set isSpeaking=true before any PCM arrives,
+        # the worklet immediately drains (nothing to play) and fires a premature
+        # playback_done, unblocking STT 3-4 s too early.
+        # We send start_speaking only when the first PCM chunk is about to stream.
+
+        # At 128 kbps, 4096 bytes ≈ 256 ms of audio — enough for ffmpeg to find
+        # MP3 frame sync words and produce clean PCM.  Anything smaller risks
+        # partial frames that produce clicks or silence.
+        DECODE_THRESHOLD = 4096
+        # Discard decoded PCM that is suspiciously short (ffmpeg decoded garbage).
+        # 50 ms at 24 kHz / 16-bit = 2400 bytes.
+        MIN_PCM_OUTPUT = 2400
+        PCM_CHUNK = 4096
+
+        mp3_buffer        = bytearray()
+        total_pcm         = 0
+        start_speaking_sent = False  # sent on first real PCM, not before
+
+        def _broadcast_pcm(pcm: bytes):
+            """Send PCM to browser, emitting start_speaking on the very first call."""
+            nonlocal start_speaking_sent, total_pcm
+            if not start_speaking_sent:
+                if self.webpage_ctrl_sender:
+                    self.webpage_ctrl_sender({"type": "start_speaking"})
+                start_speaking_sent = True
+            total_pcm += len(pcm)
+            for i in range(0, len(pcm), PCM_CHUNK):
+                self.webpage_broadcaster(pcm[i:i + PCM_CHUNK])
+
+        try:
+            async for mp3_chunk in self.sarvam_engine.speak_streaming_mp3(text, state):
+                if state and state.interrupt_flag.is_set():
+                    break
+
+                mp3_buffer.extend(mp3_chunk)
+
+                if len(mp3_buffer) >= DECODE_THRESHOLD:
+                    pcm = self._try_decode_mp3(bytes(mp3_buffer))
+                    if pcm and len(pcm) >= MIN_PCM_OUTPUT:
+                        _broadcast_pcm(pcm)
+                        logger.debug(
+                            f"[TTS Streaming] Early flush: {len(pcm)} PCM bytes"
+                        )
+                        mp3_buffer.clear()
+                    # If decode returns None (partial frames), keep accumulating
+
+            # Final flush — remaining bytes that didn't reach DECODE_THRESHOLD
+            # or couldn't be decoded early.
+            if mp3_buffer and not (state and state.interrupt_flag.is_set()):
+                pcm = self._mp3_to_pcm_int16(bytes(mp3_buffer))
+                if pcm:
+                    _broadcast_pcm(pcm)
+
+        except Exception as e:
+            logger.error(f"Sarvam TTS streaming error: {e}", exc_info=True)
+            # Fall through: return success based on whether any audio was sent
+        
+        if total_pcm > 0:
+            logger.info(
+                f"✓ Streamed {total_pcm} PCM bytes via WebSocket to Output Media page "
+                f"(Sarvam TTS streaming)"
+            )
+            return True
+
+        logger.warning("Sarvam TTS streaming produced no audio")
+        return False
+
     async def _send_via_edge_tts(self, bot_id: str, text: str, state=None) -> bool:
         """
         Send audio using Edge-TTS (fallback).

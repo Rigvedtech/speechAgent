@@ -18,6 +18,88 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# Recall bot lifecycle phases (derived from status_changes[-1].code)
+LOBBY_STATUS_CODES = frozenset({
+    "in_waiting_room",
+    "waiting_room",
+    "joining_call",
+    "connecting",
+})
+IN_MEETING_STATUS_CODES = frozenset({
+    "in_call",
+    "in_call_recording",
+    "in_call_not_recording",
+    "recording",
+})
+ENDED_STATUS_CODES = frozenset({
+    "done",
+    "fatal",
+    "call_ended",
+    "left",
+    "failed",
+    "analysis_done",
+})
+
+
+def normalize_meeting_url(url: str) -> str:
+    """
+    Canonical meeting URL for deduplication.
+    Same Teams link with different encoding/trailing slash maps to one key.
+    """
+    from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote
+
+    url = (url or "").strip()
+    parsed = urlparse(url)
+    path = unquote(parsed.path or "")
+    if len(path) > 1 and path.endswith("/"):
+        path = path.rstrip("/")
+    query = urlencode(sorted(parse_qsl(parsed.query, keep_blank_values=True)))
+    return urlunparse((
+        (parsed.scheme or "https").lower(),
+        parsed.netloc.lower(),
+        path,
+        "",
+        query,
+        "",
+    ))
+
+
+def get_latest_status_code(bot_status: Dict[str, Any]) -> str:
+    """Latest Recall status code from status_changes or top-level status."""
+    changes = bot_status.get("status_changes") or []
+    if changes:
+        latest = changes[-1]
+        return (latest.get("code") or latest.get("sub_code") or "unknown").lower()
+    return (bot_status.get("status") or "unknown").lower()
+
+
+def classify_bot_status(status_code: str) -> str:
+    """
+    Map Recall status code to a coarse phase:
+      lobby | joining | in_meeting | ended | unknown
+    """
+    code = (status_code or "unknown").lower()
+    if code in ENDED_STATUS_CODES or "ended" in code or code == "done":
+        return "ended"
+    if code in LOBBY_STATUS_CODES or "waiting" in code:
+        return "lobby"
+    if code in IN_MEETING_STATUS_CODES or code.startswith("in_call"):
+        return "in_meeting"
+    if code in ("joining", "ready", "starting", "joining_call"):
+        return "joining"
+    return "unknown"
+
+
+def bot_phase_message(phase: str) -> str:
+    """User-facing message for duplicate-join conflicts."""
+    if phase == "lobby":
+        return "Another bot is already in the lobby for this meeting."
+    if phase == "in_meeting":
+        return "Another bot is already in the meeting."
+    if phase == "joining":
+        return "Another bot is already joining this meeting."
+    return "Another bot is already active for this meeting."
+
 
 @dataclass
 class BotConfig:
@@ -223,6 +305,14 @@ class RecallBotService:
         except requests.HTTPError as e:
             logger.error(f"Failed to get bot status: {e.response.text}")
             raise
+
+    def get_bot_phase(self, bot_id: str) -> tuple[str, str]:
+        """
+        Returns (phase, status_code) where phase is lobby|joining|in_meeting|ended|unknown.
+        """
+        status_data = self.get_bot_status(bot_id)
+        code = get_latest_status_code(status_data)
+        return classify_bot_status(code), code
     
     def delete_bot(self, bot_id: str) -> bool:
         """

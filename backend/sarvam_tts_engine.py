@@ -508,6 +508,130 @@ class SarvamTTSEngine:
             logger.error(f"Error in Sarvam TTS speak: {e}", exc_info=True)
             return None
     
+    async def _speak_once_streaming(self, text: str, state=None):
+        """
+        Async generator — yields raw MP3 byte chunks as Sarvam sends them.
+
+        This is the streaming sibling of _speak_once().  Instead of collecting
+        all audio and returning it as one blob, we yield each WebSocket audio
+        message's bytes the instant it arrives so the caller can decode and send
+        to the browser without waiting for the whole sentence.
+        """
+        if state and state.interrupt_flag.is_set():
+            return
+
+        chunks = self._split_text(text)
+
+        for i, chunk_text in enumerate(chunks):
+            if state and state.interrupt_flag.is_set():
+                return
+
+            text_message = {"type": "text", "data": {"text": chunk_text}}
+            logger.info(
+                f"[SARVAM TTS] Speaking ({i+1}/{len(chunks)}): "
+                f"'{chunk_text[:50]}{'...' if len(chunk_text) > 50 else ''}'"
+            )
+            chunk_start = time.time()
+            await self.ws.send(json.dumps(text_message))
+            await self.ws.send(json.dumps({"type": "flush"}))
+
+            first_chunk_time = None
+
+            while True:
+                if state and state.interrupt_flag.is_set():
+                    return
+
+                recv_timeout = 1.0 if first_chunk_time else 3.0
+
+                try:
+                    response = await asyncio.wait_for(
+                        self.ws.recv(), timeout=recv_timeout
+                    )
+
+                    if isinstance(response, str):
+                        data = json.loads(response)
+                        msg_type = data.get("type")
+
+                        if msg_type == "audio":
+                            audio_b64 = data.get("data", {}).get("audio")
+                            if audio_b64:
+                                now = time.time()
+                                if first_chunk_time is None:
+                                    first_chunk_time = now
+                                    logger.info(
+                                        f"TTS first chunk latency: "
+                                        f"{(now - chunk_start)*1000:.0f}ms"
+                                    )
+                                yield base64.b64decode(audio_b64)
+
+                        elif msg_type == "event":
+                            if data.get("data", {}).get("event_type") == "final":
+                                break
+
+                        elif msg_type == "end":
+                            break
+
+                        elif msg_type == "error":
+                            error_msg = (
+                                data.get("data", {}).get("message") or str(data)
+                            )
+                            logger.error(f"Sarvam TTS error: {error_msg}")
+                            return
+
+                        elif msg_type in ("config_ack", "ack"):
+                            continue
+
+                    elif isinstance(response, bytes):
+                        now = time.time()
+                        if first_chunk_time is None:
+                            first_chunk_time = now
+                            logger.info(
+                                f"TTS first chunk latency: "
+                                f"{(now - chunk_start)*1000:.0f}ms"
+                            )
+                        yield response
+
+                except asyncio.TimeoutError:
+                    if first_chunk_time is None:
+                        logger.warning(
+                            "Timeout waiting for first Sarvam TTS audio chunk"
+                        )
+                    break
+
+            elapsed = (time.time() - chunk_start) * 1000
+            logger.info(
+                f"✓ Sarvam TTS chunk {i+1}/{len(chunks)} completed in {elapsed:.0f}ms"
+            )
+
+    async def speak_streaming_mp3(self, text: str, state=None):
+        """
+        Public async generator: yields raw MP3 byte chunks as they arrive from
+        Sarvam.  Each yielded bytes object is one audio WebSocket message —
+        caller decodes and streams to the browser without waiting for the full
+        sentence.  Retries once on ConnectionClosed (mirrors speak()).
+        """
+        for attempt in range(2):
+            if not await self.ensure_connected():
+                return
+            try:
+                async for chunk in self._speak_once_streaming(text, state):
+                    yield chunk
+                return  # Completed successfully — exit retry loop
+            except websockets.exceptions.ConnectionClosed:
+                self.is_connected = False
+                if attempt == 0:
+                    logger.info(
+                        "Sarvam TTS connection closed during streaming, "
+                        "reconnecting once..."
+                    )
+                    await self._close_ws()
+                    continue
+                logger.error("Sarvam TTS streaming failed after reconnect")
+                return
+            except Exception as e:
+                logger.error(f"Sarvam TTS streaming error: {e}", exc_info=True)
+                return
+
     async def cancel(self):
         """Cancel current TTS operation (close and reconnect)."""
         logger.info("Cancelling Sarvam TTS operation")

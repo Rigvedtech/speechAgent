@@ -17,7 +17,7 @@ import numpy as np
 from state import AgentState
 from stt_engine import STTEngine
 from llm_brain import LLMBrain
-from recall_bot_service import RecallBotService
+from recall_bot_service import RecallBotService, normalize_meeting_url
 from integrated_audio_sender import IntegratedAudioSender
 from webrtc_stream_manager import WebRTCStreamManager
 import config
@@ -80,14 +80,51 @@ class SessionManager:
             meeting_url: Meeting URL to check
             
         Returns:
-            Bot ID if exists, "CREATING" if in progress, None otherwise
+            Bot ID if exists, None if none or still creating
         """
+        key = normalize_meeting_url(meeting_url)
         with self.sessions_lock:
-            bot_id = self.meeting_to_bot.get(meeting_url)
-            # Don't return "CREATING" placeholder as a valid bot ID
+            bot_id = self.meeting_to_bot.get(key)
             if bot_id == "CREATING":
                 return None
             return bot_id
+
+    def get_meeting_bot_entry(self, meeting_url: str) -> Optional[str]:
+        """Return mapped bot id or 'CREATING' placeholder for this meeting."""
+        key = normalize_meeting_url(meeting_url)
+        with self.sessions_lock:
+            return self.meeting_to_bot.get(key)
+
+    def reserve_meeting(self, meeting_url: str) -> str:
+        """Mark meeting as CREATING. Returns normalized URL key."""
+        key = normalize_meeting_url(meeting_url)
+        with self.sessions_lock:
+            self.meeting_to_bot[key] = "CREATING"
+        return key
+
+    def release_meeting_reservation(self, meeting_url: str):
+        """Remove CREATING placeholder if join failed."""
+        key = normalize_meeting_url(meeting_url)
+        with self.sessions_lock:
+            if self.meeting_to_bot.get(key) == "CREATING":
+                del self.meeting_to_bot[key]
+
+    def cleanup_stale_bot(self, bot_id: str, meeting_url: str):
+        """
+        Remove local session/mapping when Recall reports the bot has ended.
+        Does not call Recall delete — bot is already gone on their side.
+        """
+        key = normalize_meeting_url(meeting_url)
+        with self.sessions_lock:
+            session = self.sessions.get(bot_id)
+            if session:
+                session.is_active = False
+                session.state.is_running = False
+                del self.sessions[bot_id]
+                logger.info(f"Removed stale local session for bot {bot_id[:8]}")
+            if self.meeting_to_bot.get(key) == bot_id:
+                del self.meeting_to_bot[key]
+                logger.info(f"Cleared stale meeting mapping for {key[:50]}...")
     
     def create_session(
         self,
@@ -227,7 +264,8 @@ class SessionManager:
             
             self.sessions[bot_id] = session
             # Update mapping from "CREATING" placeholder to actual bot_id
-            self.meeting_to_bot[meeting_url] = bot_id
+            meeting_key = normalize_meeting_url(meeting_url)
+            self.meeting_to_bot[meeting_key] = bot_id
             
             logger.info(
                 f"Session {bot_id} created for meeting "
@@ -644,10 +682,10 @@ class SessionManager:
                     logger.error(f"Error disconnecting WebRTC for bot {bot_id[:8]}: {e}")
             
             # DUPLICATE PREVENTION: Remove meeting URL mapping
-            meeting_url = session.meeting_url
-            if meeting_url in self.meeting_to_bot and self.meeting_to_bot[meeting_url] == bot_id:
-                del self.meeting_to_bot[meeting_url]
-                logger.info(f"Removed meeting URL mapping for {meeting_url[:50]}...")
+            meeting_key = normalize_meeting_url(session.meeting_url)
+            if self.meeting_to_bot.get(meeting_key) == bot_id:
+                del self.meeting_to_bot[meeting_key]
+                logger.info(f"Removed meeting URL mapping for {meeting_key[:50]}...")
             
             # Delete bot from Recall.ai
             try:

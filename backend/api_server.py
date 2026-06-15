@@ -16,7 +16,12 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import uvicorn
 
-from recall_bot_service import RecallBotService, BotConfig
+from recall_bot_service import (
+    RecallBotService,
+    BotConfig,
+    normalize_meeting_url,
+    bot_phase_message,
+)
 from session_manager import SessionManager
 from audio_receiver import AudioReceiver
 import config as app_config
@@ -83,6 +88,7 @@ class JoinMeetingResponse(BaseModel):
     bot_name: str
     meeting_url: str
     status: str
+    message: Optional[str] = None
 
 
 class LeaveResponse(BaseModel):
@@ -167,64 +173,87 @@ async def audio_stream_ws(websocket: WebSocket, page_session_id: str):
 async def join_meeting(request: JoinMeetingRequest):
     """
     Join a Teams/Zoom/Google Meet meeting.
-    DUPLICATE PREVENTION: Returns existing bot if one already exists for this meeting.
-    Thread-safe to prevent race conditions from double-clicks.
-    
-    Request Body:
-    {
-        "meeting_url": "https://teams.microsoft.com/...",
-        "bot_name": "Prabhat"  (optional, defaults from env)
-    }
-    
-    Response:
-    {
-        "success": true,
-        "bot_id": "abc-123",
-        "bot_name": "Prabhat",
-        "meeting_url": "...",
-        "status": "joining" or "already_in_meeting"
-    }
+    One bot per meeting URL — duplicate joins return 409 with a clear message.
     """
     bot_name = request.bot_name or BOT_NAME
-    
-    # RACE CONDITION FIX: Lock entire check-and-create process
-    # This prevents double-clicks from creating duplicate bots
+    meeting_url = request.meeting_url.strip()
+    if not meeting_url:
+        raise HTTPException(status_code=400, detail="meeting_url is required")
+
+    meeting_key = normalize_meeting_url(meeting_url)
+
+    # ── Phase 1: check local map under lock ───────────────────────────────
+    existing_bot_id: Optional[str] = None
     with session_manager.sessions_lock:
+        existing = session_manager.meeting_to_bot.get(meeting_key)
+        if existing == "CREATING":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "A bot is already being created for this meeting. Please wait.",
+                    "phase": "joining",
+                },
+            )
+        if existing:
+            existing_bot_id = existing
+
+    # ── Phase 2: verify existing bot with Recall (outside lock) ───────────
+    if existing_bot_id:
         try:
-            # Check if bot already exists for this meeting
-            existing_bot_id = session_manager.meeting_to_bot.get(request.meeting_url)
-            
-            if existing_bot_id:
-                logger.warning(
-                    f"Bot already exists for meeting. Returning existing bot ID: {existing_bot_id}"
-                )
-                return JoinMeetingResponse(
-                    success=True,
-                    bot_id=existing_bot_id,
-                    bot_name=bot_name,
-                    meeting_url=request.meeting_url,
-                    status="already_in_meeting"
-                )
-            
-            logger.info(f"Creating bot '{bot_name}' for meeting: {request.meeting_url[:50]}...")
-            
-            # Reserve this meeting URL immediately (before creating bot)
-            # This prevents race condition where second request checks before first finishes
-            session_manager.meeting_to_bot[request.meeting_url] = "CREATING"
-            
+            phase, status_code = recall_service.get_bot_phase(existing_bot_id)
         except Exception as e:
-            logger.error(f"Failed in pre-creation check: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=str(e))
-    
-    # Create bot OUTSIDE the lock (network call can be slow)
+            logger.warning(f"Could not verify existing bot {existing_bot_id[:8]}: {e}")
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Another bot is already registered for this meeting.",
+                    "bot_id": existing_bot_id,
+                    "phase": "unknown",
+                },
+            )
+
+        if phase == "ended":
+            session_manager.cleanup_stale_bot(existing_bot_id, meeting_url)
+        else:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": bot_phase_message(phase),
+                    "bot_id": existing_bot_id,
+                    "phase": phase,
+                    "recall_status": status_code,
+                },
+            )
+
+    # ── Phase 3: atomically reserve slot (double-check after stale cleanup) ─
+    with session_manager.sessions_lock:
+        existing = session_manager.meeting_to_bot.get(meeting_key)
+        if existing == "CREATING":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "A bot is already being created for this meeting. Please wait.",
+                    "phase": "joining",
+                },
+            )
+        if existing:
+            # Another request won the race after our stale cleanup
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Another bot is already active for this meeting.",
+                    "bot_id": existing,
+                    "phase": "unknown",
+                },
+            )
+        session_manager.meeting_to_bot[meeting_key] = "CREATING"
+
+    # ── Phase 4: create bot (Recall API — slow, outside lock) ───────────────
     try:
         import uuid as _uuid
 
-        # ── Build the Output Media webpage URL ─────────────────────────────
-        # We generate a page_session_id BEFORE calling Recall so we can embed
-        # it in the URL without needing the bot_id upfront.
-        # Recall opens this URL in headless Chrome; the page connects to
-        # /ws/audio-stream/<page_session_id> which the server maps to the bot.
+        logger.info(f"Creating bot '{bot_name}' for meeting: {meeting_url[:50]}...")
+
         public_base = os.getenv("PUBLIC_NGROK_URL", "").rstrip("/")
         page_session_id = str(_uuid.uuid4())
         output_media_page_url: Optional[str] = None
@@ -244,7 +273,7 @@ async def join_meeting(request: JoinMeetingRequest):
             )
 
         config = BotConfig(
-            meeting_url=request.meeting_url,
+            meeting_url=meeting_url,
             bot_name=bot_name,
             websocket_url=PUBLIC_WEBSOCKET_URL,
             use_output_media=app_config.RECALL_USE_OUTPUT_MEDIA,
@@ -254,36 +283,33 @@ async def join_meeting(request: JoinMeetingRequest):
         bot_data = recall_service.create_bot(config)
         bot_id = bot_data["id"]
 
-        # Register page_session_id → bot_id in the shared ws_hub (no double-module issue)
         use_webpage = bool(output_media_page_url)
         if use_webpage:
             ws_hub.register_page_session(page_session_id, bot_id)
 
-        # Create session with bot_data
         session_manager.create_session(
-            bot_id, request.meeting_url, bot_data=bot_data, use_webpage=use_webpage
+            bot_id, meeting_url, bot_data=bot_data, use_webpage=use_webpage
         )
-        
-        # Log output method
+
         if bot_data.get("media_url"):
             logger.info(f"Bot '{bot_name}' created with WebRTC streaming. ID: {bot_id}")
         else:
             logger.info(f"Bot '{bot_name}' created with file upload. ID: {bot_id}")
-        
+
         return JoinMeetingResponse(
             success=True,
             bot_id=bot_id,
             bot_name=bot_name,
-            meeting_url=request.meeting_url,
-            status="joining"
+            meeting_url=meeting_url,
+            status="joining",
+            message="Bot created and joining the meeting.",
         )
-        
+
+    except HTTPException:
+        session_manager.release_meeting_reservation(meeting_url)
+        raise
     except Exception as e:
-        # Clean up the "CREATING" placeholder on failure
-        with session_manager.sessions_lock:
-            if session_manager.meeting_to_bot.get(request.meeting_url) == "CREATING":
-                del session_manager.meeting_to_bot[request.meeting_url]
-        
+        session_manager.release_meeting_reservation(meeting_url)
         logger.error(f"Failed to create bot: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -330,6 +356,52 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
                 "bot_id": bot_id,
                 "message": "Interview already started"
             }
+
+        # Bot must be admitted to the meeting before interview starts
+        try:
+            phase, status_code = recall_service.get_bot_phase(bot_id)
+        except Exception as e:
+            logger.error(f"Failed to verify bot status before start: {e}")
+            raise HTTPException(
+                status_code=503,
+                detail={
+                    "message": "Could not verify bot meeting status. Try again shortly.",
+                    "bot_id": bot_id,
+                },
+            )
+
+        if phase == "ended":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": "Bot is no longer in the meeting. Create a new bot with /api/join.",
+                    "bot_id": bot_id,
+                    "phase": phase,
+                    "recall_status": status_code,
+                },
+            )
+
+        if phase in ("lobby", "joining"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Bot has not entered the meeting yet. Admit the bot from the lobby first.",
+                    "bot_id": bot_id,
+                    "phase": phase,
+                    "recall_status": status_code,
+                },
+            )
+
+        if phase != "in_meeting":
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": f"Bot is not ready to start (status: {status_code}). Wait until it joins the meeting.",
+                    "bot_id": bot_id,
+                    "phase": phase,
+                    "recall_status": status_code,
+                },
+            )
         
         # Get candidate name from document.py
         import document as interview_documents
