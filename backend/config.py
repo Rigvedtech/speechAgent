@@ -47,6 +47,8 @@ MODEL_SIZE = _env_str("MODEL_SIZE", "small.en")
 # LLM
 OLLAMA_MODEL = _env_str("OLLAMA_MODEL", "llama3.2:3b")
 GROQ_MODEL = _env_str("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_TEMPERATURE = _env_float("GROQ_TEMPERATURE", 0.3)
+GROQ_MAX_TOKENS = _env_int("GROQ_MAX_TOKENS", 90)
 GROQ_API_KEY = _env_str("GROQ_API_KEY", "")
 
 if GROQ_API_KEY and GROQ_API_KEY != "your_api_key_here":
