@@ -70,6 +70,7 @@ class SarvamTTSEngine:
         self.retry_count = 0
         self.should_stop = False
         self._keepalive_task: Optional[asyncio.Task] = None
+        self._streaming_task: Optional[asyncio.Task] = None
         self._connected_at: float = 0.0
         
         logger.info(
@@ -130,13 +131,25 @@ class SarvamTTSEngine:
         await self._stop_keepalive()
         self._keepalive_task = asyncio.create_task(self._keepalive_loop())
 
+    async def _stop_streaming_task(self):
+        """Cancel any in-flight TTS synthesis task."""
+        if self._streaming_task and not self._streaming_task.done():
+            self._streaming_task.cancel()
+            try:
+                await self._streaming_task
+            except asyncio.CancelledError:
+                pass
+        self._streaming_task = None
+
     async def _close_ws(self):
         """Close WebSocket and reset connection state."""
+        await self._stop_streaming_task()
         await self._stop_keepalive()
         self.is_connected = False
         if self.ws and not self._is_ws_closed():
             try:
                 await self.ws.close()
+                await asyncio.sleep(0)
             except Exception:
                 pass
         self.ws = None
@@ -339,7 +352,15 @@ class SarvamTTSEngine:
             if not await self.ensure_connected():
                 return None
 
-            result = await self._speak_once(text, state)
+            self._streaming_task = asyncio.create_task(self._speak_once(text, state))
+            try:
+                result = await self._streaming_task
+            except asyncio.CancelledError:
+                logger.info("Sarvam TTS speak cancelled")
+                return None
+            finally:
+                self._streaming_task = None
+
             if result is not None:
                 return result
 

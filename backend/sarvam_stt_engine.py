@@ -4,12 +4,9 @@ Production-grade WebSocket-based speech-to-text with automatic fallback.
 
 Usage (Recall/session mode):
     engine = SarvamSTTEngine(config)
-    engine.start_session_loop()          # connect once, keepalive in background
+    engine.start_session_loop()          # connect once, reader in background
     transcript = engine.transcribe_sync(audio_float32)  # call from STT thread
     engine.stop_session_loop()           # on session teardown
-
-Usage (standalone streaming):
-    engine.start_listener_thread(audio_queue, state)
 """
 
 import asyncio
@@ -18,7 +15,8 @@ import time
 import json
 import base64
 import threading
-from typing import Optional, Callable
+from typing import Optional, Callable, Tuple
+from urllib.parse import urlencode
 from dataclasses import dataclass
 
 try:
@@ -48,32 +46,26 @@ class SarvamSTTConfig:
     flush_signal: bool = True
     max_retries: int = 3
     retry_base_seconds: float = 1.0
+    collect_deadline_seconds: float = 10.0
+    trailing_silence_seconds: float = 0.9
+    wait_after_end_speech_seconds: float = 0.6
 
 
 class SarvamSTTEngine:
     """
     WebSocket-based STT engine using Sarvam AI Saaras V3.
-    
-    Features:
-    - Persistent WebSocket connection for low latency
-    - Automatic reconnection with exponential backoff
-    - Real-time streaming transcription
-    - Production-grade error handling
+
+    Connection params go on the WebSocket URL (per Sarvam AsyncAPI).
+    Audio is sent as nested JSON; flush uses {"type": "flush"}.
+    A background reader drains server messages so the socket stays healthy.
     """
-    
+
     WEBSOCKET_URL = "wss://api.sarvam.ai/speech-to-text/ws"
-    
+
     def __init__(self, config: SarvamSTTConfig, on_transcript: Optional[Callable[[str, bool], None]] = None):
-        """
-        Initialize Sarvam STT engine.
-        
-        Args:
-            config: SarvamSTTConfig instance
-            on_transcript: Optional callback(text, is_final) — used in streaming mode
-        """
         if not websockets:
             raise ImportError("websockets package required for Sarvam STT. Install with: pip install websockets")
-        
+
         self.config = config
         self.on_transcript = on_transcript
         self.ws: Optional[WebSocketClientProtocol] = None
@@ -82,78 +74,183 @@ class SarvamSTTEngine:
         self.retry_count = 0
         self.should_stop = False
 
-        # Background event loop — used by session mode (start_session_loop / transcribe_sync)
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
-        self._keepalive_task: Optional[asyncio.Task] = None
-        
+        self._reader_task: Optional[asyncio.Task] = None
+        self._batch_task: Optional[asyncio.Task] = None
+        self._batch_cancel: Optional[asyncio.Event] = None
+        self._ws_lock: Optional[asyncio.Lock] = None
+        self._msg_queue: Optional[asyncio.Queue] = None
+        self._utterance_active = False
+
         logger.info(
             f"Sarvam STT initialized: model={config.model}, "
             f"language={config.language_code}, mode={config.mode}, "
             f"sample_rate={config.sample_rate}Hz"
         )
-    
+
+    def _build_ws_url(self) -> str:
+        """Sarvam STT expects connection config as query parameters."""
+        params = {
+            "model": self.config.model,
+            "language-code": self.config.language_code,
+            "mode": self.config.mode,
+            "sample_rate": str(self.config.sample_rate),
+            "high_vad_sensitivity": "true" if self.config.high_vad_sensitivity else "false",
+            "flush_signal": "true" if self.config.flush_signal else "false",
+            "vad_signals": "true",
+            "input_audio_codec": "pcm_s16le",
+        }
+        return f"{self.WEBSOCKET_URL}?{urlencode(params)}"
+
+    def _build_audio_message(self, pcm_bytes: bytes, sample_rate: int) -> dict:
+        """Sarvam AsyncAPI: audio nested under audio.data with sample_rate + encoding."""
+        return {
+            "audio": {
+                "data": base64.b64encode(pcm_bytes).decode("utf-8"),
+                "sample_rate": str(sample_rate),
+                "encoding": "audio/wav",
+            }
+        }
+
+    def _parse_message(self, raw: str) -> Tuple[Optional[str], bool, str, Optional[str]]:
+        """
+        Parse Sarvam STT WebSocket response.
+
+        Returns:
+            (transcript_or_none, is_final, kind, signal_type)
+        """
+        data = json.loads(raw)
+        msg_type = data.get("type")
+
+        if msg_type == "data":
+            inner = data.get("data") or {}
+            if isinstance(inner, dict):
+                transcript = (inner.get("transcript") or inner.get("translation") or "").strip()
+                if transcript:
+                    return transcript, True, "data", None
+            return None, False, "data", None
+
+        if msg_type == "events":
+            inner = data.get("data") or {}
+            signal = inner.get("signal_type") if isinstance(inner, dict) else None
+            logger.debug(f"Sarvam STT VAD event: {signal}")
+            return None, False, "events", signal
+
+        if msg_type == "error":
+            inner = data.get("data") or {}
+            err = inner.get("error") if isinstance(inner, dict) else data.get("error")
+            code = inner.get("code") if isinstance(inner, dict) else data.get("code")
+            logger.error(f"Sarvam STT API error ({code}): {err}")
+            return None, False, "error", None
+
+        # Legacy flat format fallback
+        transcript = (data.get("transcript") or "").strip()
+        if transcript:
+            return transcript, bool(data.get("is_final", True)), "data", None
+
+        return None, False, "unknown", None
+
     def _is_ws_closed(self) -> bool:
-        """Check if WebSocket is closed (compatible with websockets 10.0+)."""
+        """Check if WebSocket is closed (websockets 10+)."""
         if not self.ws:
             return True
-        # In websockets 10.0+, check the state attribute
         try:
             from websockets.protocol import State
-            return self.ws.state != State.OPEN
+            if self.ws.state != State.OPEN:
+                return True
         except (AttributeError, ImportError):
-            # Fallback: assume closed if we can't check
+            pass
+        if getattr(self.ws, "close_code", None) is not None:
             return True
-    
+        return False
+
+    async def _stop_reader(self):
+        if self._reader_task and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except asyncio.CancelledError:
+                pass
+        self._reader_task = None
+
+    async def _reader_loop(self):
+        """Continuously read server messages into the queue."""
+        while not self.should_stop:
+            try:
+                if self._is_ws_closed():
+                    await asyncio.sleep(0.15)
+                    continue
+                raw = await self.ws.recv()
+                if not isinstance(raw, str):
+                    continue
+                transcript, is_final, kind, signal = self._parse_message(raw)
+                if self._msg_queue is not None:
+                    await self._msg_queue.put((transcript, is_final, kind, signal))
+                if transcript and self.on_transcript:
+                    self.on_transcript(transcript, is_final)
+                if kind == "error":
+                    self.is_connected = False
+            except websockets.exceptions.ConnectionClosed:
+                self.is_connected = False
+                logger.debug("Sarvam STT reader: connection closed")
+                await asyncio.sleep(0.25)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning(f"Sarvam STT reader error: {e}")
+                await asyncio.sleep(0.1)
+
+    async def _start_reader(self):
+        await self._stop_reader()
+        if self._loop and self.is_connected:
+            self._reader_task = asyncio.ensure_future(self._reader_loop())
+
+    async def _drain_stale_messages(self):
+        if not self._msg_queue:
+            return
+        while True:
+            try:
+                self._msg_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
     async def connect(self) -> bool:
-        """
-        Establish WebSocket connection to Sarvam AI.
-        
-        Returns:
-            True if connected successfully
-        """
+        """Establish WebSocket connection to Sarvam AI."""
         async with self.connection_lock:
             if self.is_connected and not self._is_ws_closed():
                 return True
-            
+
+            await self._stop_reader()
+
             try:
+                ws_url = self._build_ws_url()
                 logger.info(f"Connecting to Sarvam STT at {self.WEBSOCKET_URL}")
                 start_time = time.time()
-                
-                # Connect with timeout
-                # Note: In websockets 10.0+, use additional_headers instead of extra_headers
-                # Sarvam API uses lowercase header name
+
                 self.ws = await asyncio.wait_for(
                     websockets.connect(
-                        self.WEBSOCKET_URL,
-                        additional_headers={
-                            "api-subscription-key": self.config.api_key
-                        },
+                        ws_url,
+                        additional_headers={"api-subscription-key": self.config.api_key},
                         ping_interval=20,
-                        ping_timeout=10
+                        ping_timeout=10,
+                        max_size=10 * 1024 * 1024,
                     ),
-                    timeout=10.0
+                    timeout=10.0,
                 )
-                
-                # Send initial configuration
-                config_message = {
-                    "model": self.config.model,
-                    "language_code": self.config.language_code,
-                    "mode": self.config.mode,
-                    "sample_rate": self.config.sample_rate,
-                    "high_vad_sensitivity": self.config.high_vad_sensitivity,
-                    "flush_signal": self.config.flush_signal
-                }
-                
-                await self.ws.send(json.dumps(config_message))
-                
+
                 elapsed = (time.time() - start_time) * 1000
                 logger.info(f"✓ Sarvam STT connected successfully ({elapsed:.0f}ms)")
-                
+
                 self.is_connected = True
                 self.retry_count = 0
+
+                if self._msg_queue is None and self._loop:
+                    self._msg_queue = asyncio.Queue()
+
+                await self._start_reader()
                 return True
-                
+
             except asyncio.TimeoutError:
                 logger.error("Sarvam STT connection timeout (10s)")
                 self.is_connected = False
@@ -162,96 +259,44 @@ class SarvamSTTEngine:
                 logger.error(f"Sarvam STT connection failed: {e}")
                 self.is_connected = False
                 return False
-    
+
     async def reconnect(self) -> bool:
-        """
-        Attempt to reconnect with exponential backoff.
-        
-        Returns:
-            True if reconnected successfully
-        """
+        """Attempt to reconnect with exponential backoff."""
+        await self._cancel_batch_task()
         if self.retry_count >= self.config.max_retries:
             logger.error(
                 f"Sarvam STT max retries ({self.config.max_retries}) exceeded. "
                 f"Fallback should be activated."
             )
             return False
-        
+
         self.retry_count += 1
         wait_time = self.config.retry_base_seconds * (2 ** (self.retry_count - 1))
-        
         logger.warning(
             f"Sarvam STT reconnecting (attempt {self.retry_count}/{self.config.max_retries}) "
             f"after {wait_time:.1f}s..."
         )
-        
         await asyncio.sleep(wait_time)
         return await self.connect()
-    
+
     async def ensure_connected(self) -> bool:
-        """Ensure a live WebSocket connection, reconnecting immediately if stale."""
+        """Ensure a live WebSocket connection."""
         if self.is_connected and not self._is_ws_closed():
             return True
         self.is_connected = False
         self.retry_count = 0
         return await self.connect()
 
-    # ── Background-loop helpers (session mode) ────────────────────────────────
-
-    async def _keepalive_loop(self):
-        """
-        Send 100 ms of silence every 20 s to prevent Sarvam's ~60 s idle disconnect.
-        Reconnects automatically if the connection is found closed.
-        """
-        SILENCE_100MS = b'\x00' * (self.config.sample_rate * 2 // 10)  # 100 ms S16LE
-        try:
-            while not self.should_stop:
-                await asyncio.sleep(20)
-                if self.should_stop:
-                    break
-                if self._is_ws_closed():
-                    logger.info("Sarvam STT connection lost — reconnecting in keepalive")
-                    await self.connect()
-                    continue
-                try:
-                    b64 = base64.b64encode(SILENCE_100MS).decode()
-                    await self.ws.send(json.dumps({
-                        "audio": b64,
-                        "encoding": "pcm_s16le",
-                        "sample_rate": self.config.sample_rate,
-                    }))
-                    # Drain any spurious partial-transcript from the silence
-                    try:
-                        await asyncio.wait_for(self.ws.recv(), timeout=0.5)
-                    except asyncio.TimeoutError:
-                        pass
-                    logger.debug("Sarvam STT keepalive sent")
-                except Exception as e:
-                    logger.warning(f"Sarvam STT keepalive failed: {e}")
-                    self.is_connected = False
-        except asyncio.CancelledError:
-            pass
-
-    async def _connect_with_keepalive(self) -> bool:
-        """Connect and immediately start the keepalive task."""
-        connected = await self.connect()
-        if connected and self._loop:
-            if self._keepalive_task and not self._keepalive_task.done():
-                self._keepalive_task.cancel()
-            self._keepalive_task = asyncio.ensure_future(self._keepalive_loop())
-        return connected
-
     def _run_background_loop(self):
         """Thread target: run the asyncio event loop forever."""
         asyncio.set_event_loop(self._loop)
+        self._ws_lock = asyncio.Lock()
+        self._msg_queue = asyncio.Queue()
+        self._batch_cancel = asyncio.Event()
         self._loop.run_forever()
 
     def start_session_loop(self):
-        """
-        Start the persistent background event loop and connect once.
-        Call this after creating the engine for a new bot session.
-        The loop stays alive for the entire session, keeping the WS warm.
-        """
+        """Start persistent background loop and connect once."""
         self._loop = asyncio.new_event_loop()
         self._loop_thread = threading.Thread(
             target=self._run_background_loop,
@@ -260,10 +305,7 @@ class SarvamSTTEngine:
         )
         self._loop_thread.start()
 
-        # Block until connected (max 12 s) so the first transcription is fast
-        future = asyncio.run_coroutine_threadsafe(
-            self._connect_with_keepalive(), self._loop
-        )
+        future = asyncio.run_coroutine_threadsafe(self.connect(), self._loop)
         try:
             connected = future.result(timeout=12)
             if connected:
@@ -273,18 +315,65 @@ class SarvamSTTEngine:
         except Exception as e:
             logger.warning(f"Sarvam STT session loop start error: {e}")
 
+    async def _cancel_batch_task(self):
+        """Cancel any in-flight batch transcription."""
+        if self._batch_cancel:
+            self._batch_cancel.set()
+        if self._batch_task and not self._batch_task.done():
+            self._batch_task.cancel()
+            try:
+                await self._batch_task
+            except asyncio.CancelledError:
+                pass
+        self._batch_task = None
+        if self._batch_cancel:
+            self._batch_cancel.clear()
+        await self._drain_stale_messages()
+
+    async def _shutdown(self):
+        """Gracefully cancel tasks and close the WebSocket."""
+        self.should_stop = True
+        await self._cancel_batch_task()
+        await self._stop_reader()
+
+        if self.ws and not self._is_ws_closed():
+            try:
+                await self.ws.close()
+                await asyncio.sleep(0)
+                logger.info("Sarvam STT disconnected")
+            except Exception as e:
+                logger.error(f"Error disconnecting Sarvam STT: {e}")
+
+        self.is_connected = False
+        self.ws = None
+
+        pending = [
+            t for t in asyncio.all_tasks()
+            if t is not asyncio.current_task() and not t.done()
+        ]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
     def stop_session_loop(self):
         """Cleanly stop the background event loop and disconnect."""
         self.should_stop = True
         if self._loop and self._loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(self.disconnect(), self._loop)
+            future = asyncio.run_coroutine_threadsafe(self._shutdown(), self._loop)
             try:
-                future.result(timeout=3)
+                future.result(timeout=5)
             except Exception:
                 pass
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._loop_thread:
-            self._loop_thread.join(timeout=3)
+            self._loop_thread.join(timeout=5)
+
+    def _float32_to_pcm_bytes(self, audio_float32) -> bytes:
+        if np is None:
+            raise RuntimeError("numpy required for Sarvam STT")
+        audio_int16 = (audio_float32 * 32767.0).clip(-32768, 32767).astype(np.int16)
+        return audio_int16.tobytes()
 
     def transcribe_sync(
         self,
@@ -293,96 +382,152 @@ class SarvamSTTEngine:
         timeout: float = 8.0,
     ) -> Optional[str]:
         """
-        Synchronous transcription entry-point — safe to call from any thread.
-        Converts float32 audio → S16LE PCM, sends to Sarvam, flushes, and
-        blocks until the final transcript arrives (or timeout).
-
-        Args:
-            audio_float32: numpy float32 array, normalised to [-1, 1]
-            sample_rate:   audio sample rate in Hz (default 16000)
-            timeout:       max seconds to wait for transcript
-
-        Returns:
-            Transcript string, or None on failure (caller should fall back to Whisper)
+        Synchronous transcription — send full utterance, flush, await transcript.
+        Safe to call from any thread.
         """
         if not self._loop or not self._loop.is_running():
             logger.warning("Sarvam STT session loop not running — skipping")
             return None
-        if np is None:
-            logger.error("numpy not available for Sarvam STT float→int16 conversion")
+        try:
+            audio_bytes = self._float32_to_pcm_bytes(audio_float32)
+        except Exception as e:
+            logger.error(f"Sarvam STT float→int16 conversion error: {e}")
             return None
 
-        # float32 → int16 PCM (S16LE)
-        audio_int16 = (audio_float32 * 32767.0).clip(-32768, 32767).astype(np.int16)
-        audio_bytes = audio_int16.tobytes()
-
         future = asyncio.run_coroutine_threadsafe(
-            self._transcribe_batch(audio_bytes, sample_rate), self._loop
+            self._run_transcribe_batch(audio_bytes, sample_rate), self._loop
         )
         try:
             return future.result(timeout=timeout)
         except Exception as e:
             logger.warning(f"Sarvam STT transcribe_sync error: {e}")
+            if self._loop and self._loop.is_running():
+                asyncio.run_coroutine_threadsafe(self._cancel_batch_task(), self._loop)
             return None
 
-    async def _transcribe_batch(self, audio_bytes: bytes, sample_rate: int) -> Optional[str]:
-        """
-        Send accumulated PCM audio in chunks, send flush, await final transcript.
+    async def _run_transcribe_batch(self, audio_bytes: bytes, sample_rate: int) -> Optional[str]:
+        """Wrap batch transcription in a tracked task for cancellation."""
+        await self._cancel_batch_task()
+        self._batch_task = asyncio.create_task(
+            self._transcribe_batch(audio_bytes, sample_rate)
+        )
+        try:
+            return await self._batch_task
+        finally:
+            self._batch_task = None
 
-        The connection may be shared across utterances.  Each flush signals Sarvam
-        to finalise the current utterance; the connection is then ready for the next.
-        """
+    async def _send_pcm_chunk(self, pcm_bytes: bytes, sample_rate: int) -> bool:
+        if not self._ws_lock:
+            return False
+        try:
+            msg = self._build_audio_message(pcm_bytes, sample_rate)
+            async with self._ws_lock:
+                if self._is_ws_closed():
+                    return False
+                await self.ws.send(json.dumps(msg))
+            return True
+        except websockets.exceptions.ConnectionClosed:
+            self.is_connected = False
+            return False
+        except Exception as e:
+            logger.warning(f"Sarvam STT send chunk error: {e}")
+            self.is_connected = False
+            return False
+
+    async def _collect_transcript_until_final(
+        self,
+        deadline_seconds: float = 10.0,
+    ) -> Optional[str]:
+        """Accumulate transcript segments until END_SPEECH or deadline."""
+        if not self._msg_queue:
+            return None
+
+        parts: list[str] = []
+        deadline = time.monotonic() + max(1.0, deadline_seconds)
+        saw_end_speech = False
+        last_data_at = 0.0
+
+        while time.monotonic() < deadline:
+            if self._batch_cancel and self._batch_cancel.is_set():
+                logger.debug("Sarvam STT collect cancelled")
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                transcript, is_final, kind, signal = await asyncio.wait_for(
+                    self._msg_queue.get(), timeout=min(remaining, 2.0)
+                )
+                now = time.monotonic()
+                if kind == "events" and signal == "END_SPEECH":
+                    saw_end_speech = True
+                    if parts and (now - last_data_at) >= self.config.wait_after_end_speech_seconds:
+                        break
+                if transcript:
+                    # Sarvam may occasionally re-emit identical text chunks.
+                    if not parts or transcript != parts[-1]:
+                        parts.append(transcript)
+                    last_data_at = now
+                    logger.debug(f"Sarvam STT segment: '{transcript}'")
+                if saw_end_speech and parts and (now - last_data_at) >= self.config.wait_after_end_speech_seconds:
+                    break
+                # Allow trailing chunks after the latest transcript before finalizing.
+                if parts and (now - last_data_at) >= self.config.trailing_silence_seconds:
+                    break
+            except asyncio.TimeoutError:
+                if parts and (time.monotonic() - last_data_at) >= self.config.trailing_silence_seconds:
+                    break
+
+        full_text = " ".join(parts).strip()
+        if full_text:
+            logger.info(f"[Sarvam STT] Final transcript: '{full_text}'")
+        return full_text or None
+
+    async def _transcribe_batch(self, audio_bytes: bytes, sample_rate: int) -> Optional[str]:
+        """Send utterance in 100ms chunks, flush, await final transcript."""
         if not await self.ensure_connected():
             logger.error("Sarvam STT not connected for batch transcription")
             return None
 
+        await self._drain_stale_messages()
+        self._utterance_active = True
+
         try:
-            # Send audio in 100 ms chunks (Sarvam recommendation)
-            CHUNK_BYTES = sample_rate * 2 // 10  # 100 ms at sample_rate, 16-bit
+            CHUNK_BYTES = sample_rate * 2 // 10  # 100 ms, 16-bit mono
             sent_chunks = 0
+
             for offset in range(0, len(audio_bytes), CHUNK_BYTES):
+                if self._batch_cancel and self._batch_cancel.is_set():
+                    logger.debug("Sarvam STT batch cancelled mid-send")
+                    return None
                 chunk = audio_bytes[offset : offset + CHUNK_BYTES]
-                b64 = base64.b64encode(chunk).decode('utf-8')
-                await self.ws.send(json.dumps({
-                    "audio": b64,
-                    "encoding": "pcm_s16le",
-                    "sample_rate": sample_rate,
-                }))
+                if not await self._send_pcm_chunk(chunk, sample_rate):
+                    if not await self.reconnect():
+                        return None
+                    if not await self._send_pcm_chunk(chunk, sample_rate):
+                        return None
                 sent_chunks += 1
+                # Small yield so reader can process incoming messages
+                await asyncio.sleep(0)
 
-            # Flush — tells Sarvam to finalise this utterance
-            await self.ws.send(json.dumps({"flush": True}))
-            logger.debug(f"Sarvam STT: sent {sent_chunks} chunks + flush ({len(audio_bytes)} bytes)")
+            if not self._ws_lock:
+                return None
 
-            # Collect responses until is_final or timeout
-            best_transcript = ""
-            deadline = time.monotonic() + 5.0
+            async with self._ws_lock:
+                if self._is_ws_closed():
+                    return None
+                await self.ws.send(json.dumps({"type": "flush"}))
 
-            while time.monotonic() < deadline:
-                remaining = max(0.1, deadline - time.monotonic())
-                try:
-                    raw = await asyncio.wait_for(self.ws.recv(), timeout=min(remaining, 2.0))
-                    data = json.loads(raw)
-                    transcript = (data.get("transcript") or "").strip()
-                    is_final = bool(data.get("is_final", False))
+            logger.debug(
+                f"Sarvam STT: sent {sent_chunks} chunks + flush ({len(audio_bytes)} bytes)"
+            )
+            return await self._collect_transcript_until_final(
+                deadline_seconds=self.config.collect_deadline_seconds
+            )
 
-                    if transcript:
-                        best_transcript = transcript
-                        if self.on_transcript:
-                            self.on_transcript(transcript, is_final)
-
-                    if is_final:
-                        logger.info(f"[Sarvam STT] Final transcript: '{best_transcript}'")
-                        return best_transcript or None
-
-                except asyncio.TimeoutError:
-                    # No more messages within the window — return best result so far
-                    break
-
-            if best_transcript:
-                logger.info(f"[Sarvam STT] Returning best transcript (no is_final): '{best_transcript}'")
-            return best_transcript or None
-
+        except asyncio.CancelledError:
+            logger.debug("Sarvam STT _transcribe_batch cancelled")
+            raise
         except websockets.exceptions.ConnectionClosed:
             logger.warning("Sarvam STT connection closed during _transcribe_batch")
             self.is_connected = False
@@ -390,194 +535,9 @@ class SarvamSTTEngine:
         except Exception as e:
             logger.error(f"Sarvam STT _transcribe_batch error: {e}", exc_info=True)
             return None
+        finally:
+            self._utterance_active = False
 
-    async def send_audio_chunk(self, audio_pcm: bytes) -> bool:
-        """
-        Send raw PCM audio chunk to Sarvam for transcription.
-        
-        Args:
-            audio_pcm: Raw PCM audio bytes (16kHz, mono, 16-bit)
-            
-        Returns:
-            True if sent successfully
-        """
-        if not self.is_connected or self._is_ws_closed():
-            logger.debug("Sarvam STT not connected, attempting reconnect...")
-            if not await self.reconnect():
-                return False
-        
-        try:
-            # Sarvam requires base64-encoded audio
-            audio_b64 = base64.b64encode(audio_pcm).decode('utf-8')
-            
-            audio_message = {
-                "audio": audio_b64,
-                "encoding": "pcm_s16le",  # 16-bit PCM little-endian
-                "sample_rate": self.config.sample_rate
-            }
-            
-            start_time = time.time()
-            await self.ws.send(json.dumps(audio_message))
-            
-            elapsed = (time.time() - start_time) * 1000
-            logger.debug(
-                f"Sent {len(audio_pcm)} bytes to Sarvam STT "
-                f"({len(audio_b64)} b64 chars, {elapsed:.1f}ms)"
-            )
-            
-            return True
-            
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("Sarvam STT connection closed, will reconnect")
-            self.is_connected = False
-            return False
-        except Exception as e:
-            logger.error(f"Error sending audio to Sarvam STT: {e}")
-            return False
-    
-    async def receive_transcript(self) -> Optional[dict]:
-        """
-        Receive transcript from Sarvam AI.
-        
-        Returns:
-            Dict with transcript data or None if connection failed
-        """
-        if not self.is_connected or self._is_ws_closed():
-            return None
-        
-        try:
-            response = await asyncio.wait_for(self.ws.recv(), timeout=5.0)
-            data = json.loads(response)
-            
-            # Log transcript received
-            if "transcript" in data:
-                is_final = data.get("is_final", False)
-                transcript = data["transcript"]
-                
-                logger.info(
-                    f"[SARVAM TRANSCRIPT{' (FINAL)' if is_final else ' (INTERIM)'}]: {transcript}"
-                )
-                
-                if self.on_transcript:
-                    self.on_transcript(transcript, is_final)
-            
-            return data
-            
-        except asyncio.TimeoutError:
-            logger.debug("Sarvam STT receive timeout (no response in 5s)")
-            return None
-        except websockets.exceptions.ConnectionClosed:
-            logger.warning("Sarvam STT connection closed during receive")
-            self.is_connected = False
-            return None
-        except Exception as e:
-            logger.error(f"Error receiving from Sarvam STT: {e}")
-            return None
-    
-    async def flush(self):
-        """Signal Sarvam to process any buffered audio immediately."""
-        if self.is_connected and not self._is_ws_closed():
-            try:
-                await self.ws.send(json.dumps({"flush": True}))
-                logger.debug("Sent flush signal to Sarvam STT")
-            except Exception as e:
-                logger.error(f"Error flushing Sarvam STT: {e}")
-    
     async def disconnect(self):
         """Cleanly disconnect from Sarvam AI."""
-        self.should_stop = True
-        
-        if not self._is_ws_closed():
-            try:
-                await self.ws.close()
-                logger.info("Sarvam STT disconnected")
-            except Exception as e:
-                logger.error(f"Error disconnecting Sarvam STT: {e}")
-        
-        self.is_connected = False
-    
-    def start_listener_thread(self, audio_queue, state):
-        """
-        Start background thread to process audio from queue and send to Sarvam.
-        
-        Args:
-            audio_queue: Queue containing numpy audio arrays
-            state: AgentState for coordination
-        """
-        def listener():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            try:
-                loop.run_until_complete(self._listen_loop(audio_queue, state))
-            finally:
-                loop.close()
-        
-        thread = threading.Thread(target=listener, daemon=True, name="Sarvam-STT-Listener")
-        thread.start()
-        logger.info("Started Sarvam STT listener thread")
-        return thread
-    
-    async def _listen_loop(self, audio_queue, state):
-        """Async loop to process audio queue and send to Sarvam."""
-        # Connect initially
-        if not await self.connect():
-            logger.error("Failed to connect Sarvam STT, listener will not start")
-            return
-        
-        while not self.should_stop and state.is_running:
-            try:
-                # Get audio from queue (non-blocking)
-                try:
-                    audio_chunk = audio_queue.get(timeout=0.1)
-                except:
-                    continue
-                
-                # Convert numpy array to bytes if needed
-                if hasattr(audio_chunk, 'tobytes'):
-                    audio_bytes = audio_chunk.tobytes()
-                else:
-                    audio_bytes = audio_chunk
-                
-                # Send to Sarvam
-                success = await self.send_audio_chunk(audio_bytes)
-                
-                if not success:
-                    logger.warning("Failed to send audio to Sarvam STT")
-                
-            except Exception as e:
-                logger.error(f"Error in Sarvam STT listen loop: {e}")
-                await asyncio.sleep(1.0)
-
-
-# Example usage
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    
-    async def main():
-        def on_transcript(text: str, is_final: bool):
-            print(f"{'[FINAL]' if is_final else '[INTERIM]'} {text}")
-        
-        config = SarvamSTTConfig(
-            api_key="your-api-key-here",
-            model="saaras:v3",
-            language_code="en-IN"
-        )
-        
-        engine = SarvamSTTEngine(config, on_transcript=on_transcript)
-        
-        # Connect
-        if await engine.connect():
-            print("Connected successfully")
-            
-            # Test with dummy audio
-            dummy_audio = b'\x00' * 3200  # 100ms of silence at 16kHz
-            await engine.send_audio_chunk(dummy_audio)
-            
-            # Wait for response
-            await asyncio.sleep(2)
-            
-            # Disconnect
-            await engine.disconnect()
-    
-    asyncio.run(main())
+        await self._shutdown()

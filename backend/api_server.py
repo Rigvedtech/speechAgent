@@ -457,33 +457,43 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
         # Get candidate name from injected session data
         candidate_name = orchestrator.candidate_name
         
-        # Bootstrap greeting — LLM generates natural intro; orchestrator moves to await_intro after
-        greeting_instruction = request.greeting_message or (
-            f"You are an AI interviewer named {BOT_NAME}. "
-            f"The candidate's name is {candidate_name}. "
-            f"This is the start of a screening interview. "
-            f"Greet the candidate warmly by name, introduce yourself as the interviewer, "
-            f"and ask them to briefly introduce themselves."
-        )
-        
-        # Mark as started FIRST
-        session.state.is_started.set()
-        
-        # Send greeting instruction to LLM (not TTS directly)
-        # LLM will generate natural greeting and send to TTS
-        session.state.llm_queue.put(greeting_instruction)
-        
+        # Fixed professional greeting — bypasses LLM to guarantee consistent interview tone
+        # Custom greeting_message (from API caller) goes via LLM as before
+        if request.greeting_message:
+            greeting_instruction = request.greeting_message
+
+            session.state.is_started.set()
+            session.state.llm_queue.put(greeting_instruction)
+        else:
+            greeting_text = (
+                f"Hello {candidate_name}, welcome. "
+                f"I'm {BOT_NAME}, your interviewer today. "
+                f"Before we begin, could you please introduce yourself briefly?"
+            )
+
+            session.state.is_started.set()
+            session.state.tts_queue.put(greeting_text)
+            session.state.tts_queue.put("<END_OF_TURN>")
+
+            # Advance orchestrator phase directly (no LLM bootstrap needed)
+            orchestrator.on_greeting_sent()
+
+            logger.info(
+                "[INTERVIEW GREETING] bot=%s fixed greeting sent to TTS",
+                bot_id[:8],
+            )
+
         logger.info(
             "Interview started for bot %s candidate=%s planned_questions=%d",
             bot_id,
             candidate_name,
             len(orchestrator.planned_questions),
         )
-        
+
         return {
             "success": True,
             "bot_id": bot_id,
-            "message": "Interview started - LLM generating greeting",
+            "message": "Interview started",
             "candidate_name": candidate_name,
             "questions_planned": len(orchestrator.planned_questions),
             "planned_question_ids": [q.id for q in orchestrator.planned_questions],

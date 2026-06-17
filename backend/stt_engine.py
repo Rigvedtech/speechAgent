@@ -2,13 +2,37 @@ import sys
 import queue
 import re
 import time
+import threading
 import torch
 import numpy as np
 import collections
+from typing import Optional, Tuple
 from faster_whisper import WhisperModel
 
-from config import MODEL_SIZE, DEVICE, COMPUTE_TYPE, SAMPLE_RATE, CHANNELS, SILENCE_DURATION
+from config import (
+    MODEL_SIZE,
+    DEVICE,
+    COMPUTE_TYPE,
+    SAMPLE_RATE,
+    CHANNELS,
+    SILENCE_DURATION,
+    STT_FALLBACK_ENABLED,
+    USER_BARGE_IN_ENABLED,
+    BOT_INTERRUPT_MIN_SPEECH_SEC,
+    BOT_INTERRUPT_CHECK_INTERVAL_SEC,
+    BOT_INTERRUPT_MIN_PARTIAL_SEC,
+    SARVAM_LOCAL_SILENCE_SEC,
+    WHISPER_LOCAL_SILENCE_SEC,
+    SARVAM_QUALITY_MIN_UTTERANCE_SEC,
+    SARVAM_QUALITY_MIN_CHARS,
+    TURN_MERGE_ENABLED,
+    TURN_MERGE_WINDOW_SEC,
+    TURN_MERGE_MIN_AUDIO_SEC,
+    TURN_MERGE_MIN_CHARS,
+    NAME_NORMALIZE_ENABLED,
+)
 from state import AgentState
+from transcript_utils import normalize_candidate_name
 
 
 class STTEngine:
@@ -18,28 +42,44 @@ class STTEngine:
             state:         Shared AgentState
             sarvam_engine: Optional SarvamSTTEngine — primary transcription engine.
                            When provided, Sarvam Saaras V3 is tried first and Whisper
-                           is the automatic fallback.
-                           When None (main.py standalone mode), only Whisper is used.
+                           is loaded lazily only if Sarvam fails.
+                           When None (main.py standalone mode), Whisper loads at init.
         """
         self.state = state
-        self.sarvam_engine = sarvam_engine   # None → Whisper-only (main.py)
+        self.sarvam_engine = sarvam_engine
         self.audio_buffer = []
         self.last_speech_time = 0.0
         self.is_recording = False
         self.actual_samplerate = SAMPLE_RATE
         self.actual_channels = CHANNELS
 
-        # Adaptive endpointing
-        self.base_silence_duration = SILENCE_DURATION
-        self.adaptive_silence_duration = SILENCE_DURATION
+        # Adaptive endpointing (split by engine profile)
+        self._active_endpoint_silence = (
+            SARVAM_LOCAL_SILENCE_SEC if self.sarvam_engine is not None else WHISPER_LOCAL_SILENCE_SEC
+        )
+        self.base_silence_duration = self._active_endpoint_silence
+        self.adaptive_silence_duration = self._active_endpoint_silence
         self.recent_utterance_lengths = []
 
-        # SMART INTERRUPTION: Track how long candidate speaks while AI is speaking
+        # User barge-in while bot speaks (disabled by default for interview mode)
         self.candidate_speaking_duration = 0.0
-        self.interruption_threshold = 3.0  # seconds of continuous speech to interrupt AI
+        self.interruption_threshold = 3.0
 
-        print(f"Loading Whisper model '{MODEL_SIZE}' on {DEVICE}...")
-        self.model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)
+        # Bot interrupt while user speaks
+        self._recording_started_at = 0.0
+        self._last_bot_interrupt_check = 0.0
+        self._bot_interrupt_cooldown_until = 0.0
+
+        # Lazy Whisper — only loaded when Sarvam fails (or no Sarvam configured)
+        self._whisper_model = None
+        self._whisper_lock = threading.Lock()
+        self._stt_lock = threading.Lock()
+
+        # Turn commit / merge guard (hold suspicious partials, merge within window)
+        self._pending_audio: Optional[np.ndarray] = None
+        self._pending_text: str = ""
+        self._pending_until: float = 0.0
+        self._pending_sarvam_failed: bool = False
 
         print(f"Loading Silero VAD on {DEVICE}...")
         self.vad_model, _ = torch.hub.load(
@@ -48,6 +88,176 @@ class STTEngine:
             force_reload=False
         )
         self.vad_model.to(DEVICE)
+
+        if self.sarvam_engine is not None:
+            print("[STT] Primary: Sarvam Saaras V3 (batch per utterance)")
+            if STT_FALLBACK_ENABLED:
+                print(f"[STT] Fallback: Faster Whisper '{MODEL_SIZE}' (loads on demand)")
+            else:
+                print("[STT] Whisper fallback disabled (STT_FALLBACK_ENABLED=false)")
+        else:
+            self._ensure_whisper()
+
+        if not USER_BARGE_IN_ENABLED:
+            print("[STT] User barge-in disabled — mic ignored while bot speaks")
+
+    def _ensure_whisper(self):
+        """Load Whisper model once — deferred until fallback is needed."""
+        if self._whisper_model is not None:
+            return self._whisper_model
+        with self._whisper_lock:
+            if self._whisper_model is not None:
+                return self._whisper_model
+            print(f"Loading Whisper model '{MODEL_SIZE}' on {DEVICE}...")
+            self._whisper_model = WhisperModel(
+                MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE
+            )
+            print(f"[STT] Whisper fallback ready on {DEVICE}")
+            return self._whisper_model
+
+    def _reset_recording_state(self):
+        self.audio_buffer = []
+        self.is_recording = False
+        self.last_speech_time = 0.0
+        self._recording_started_at = 0.0
+        self._last_bot_interrupt_check = 0.0
+
+    def _orch_awaiting_clarifier(self) -> bool:
+        orch = getattr(self.state, "interview_orchestrator", None)
+        return bool(orch and getattr(orch, "awaiting_clarifier_reply", False))
+
+    def _in_core_phase(self) -> bool:
+        orch = getattr(self.state, "interview_orchestrator", None)
+        if orch is None:
+            return False
+        from interview_engine import InterviewPhase
+        return orch.phase == InterviewPhase.CORE
+
+    def _clear_pending_turn(self) -> None:
+        self._pending_audio = None
+        self._pending_text = ""
+        self._pending_until = 0.0
+        self._pending_sarvam_failed = False
+
+    def _discard_expired_pending(self) -> None:
+        if self._pending_audio is not None and time.monotonic() >= self._pending_until:
+            print(
+                f"\n[TURN DISCARD] merge window expired "
+                f"(had {len(self._pending_audio) / SAMPLE_RATE:.1f}s audio, "
+                f"text={self._pending_text!r})",
+                file=sys.stderr,
+            )
+            self._clear_pending_turn()
+
+    def _should_hold_turn(
+        self,
+        text: str,
+        utterance_duration: float,
+        sarvam_failed: bool,
+    ) -> Tuple[bool, str]:
+        if not TURN_MERGE_ENABLED:
+            return False, ""
+        if not self._in_core_phase():
+            return False, ""
+        if self._orch_awaiting_clarifier():
+            return False, ""
+
+        stripped = (text or "").strip()
+        if not stripped:
+            return True, "empty_transcript"
+        if (
+            utterance_duration >= TURN_MERGE_MIN_AUDIO_SEC
+            and len(stripped) < TURN_MERGE_MIN_CHARS
+        ):
+            return True, "short_text_long_audio"
+        if sarvam_failed and len(stripped) < SARVAM_QUALITY_MIN_CHARS:
+            return True, "sarvam_fail_whisper_short"
+        return False, ""
+
+    def _normalize_candidate_name(self, text: str) -> str:
+        if not NAME_NORMALIZE_ENABLED or not text:
+            return text
+        orch = getattr(self.state, "interview_orchestrator", None)
+        canonical = getattr(orch, "candidate_name", "") if orch else ""
+        if not canonical:
+            return text
+        return normalize_candidate_name(text, canonical)
+
+    def _commit_turn(self, text: str) -> None:
+        """Normalize and emit a single turn to the LLM queue."""
+        if not text or len(text) <= 2:
+            return
+        if getattr(self.state, "interview_ended", None) and self.state.interview_ended.is_set():
+            return
+        normalized = self._normalize_candidate_name(text)
+        self.state.llm_queue.put(normalized)
+
+    def _transcribe_with_fallback(
+        self, audio_data: np.ndarray, utterance_duration: float = 0.0
+    ) -> Tuple[str, bool]:
+        """
+        Primary: Sarvam STT. Fallback: Faster Whisper.
+        Returns (transcript, sarvam_failed).
+        """
+        audio_data = audio_data.flatten().astype(np.float32)
+        if len(audio_data) < int(SAMPLE_RATE * 0.3):
+            return "", False
+
+        full_text = ""
+        sarvam_ok = False
+        sarvam_attempted = self.sarvam_engine is not None
+
+        with self._stt_lock:
+            if self.sarvam_engine is not None:
+                try:
+                    result = self.sarvam_engine.transcribe_sync(
+                        audio_data,
+                        sample_rate=self.actual_samplerate or SAMPLE_RATE,
+                    )
+                    if result and result.strip():
+                        candidate = result.strip()
+                        if (
+                            utterance_duration >= SARVAM_QUALITY_MIN_UTTERANCE_SEC
+                            and len(candidate) < SARVAM_QUALITY_MIN_CHARS
+                        ):
+                            print(
+                                f"\n[SARVAM STT] Low-confidence short final for {utterance_duration:.1f}s "
+                                f"audio ('{candidate}') — trying Whisper fallback",
+                                file=sys.stderr,
+                            )
+                        else:
+                            full_text = candidate
+                            sarvam_ok = True
+                            print(f"\n[SARVAM STT] Transcript: {full_text}")
+                    else:
+                        print("\n[SARVAM STT] No result — falling back to Whisper", file=sys.stderr)
+                except Exception as e:
+                    print(f"\n[SARVAM STT Error]: {e} — falling back to Whisper", file=sys.stderr)
+
+            if not sarvam_ok and STT_FALLBACK_ENABLED:
+                try:
+                    model = self._ensure_whisper()
+                    segments, _ = model.transcribe(
+                        audio_data,
+                        beam_size=3,
+                        language="en",
+                        condition_on_previous_text=False,
+                        vad_filter=False,
+                    )
+                    for segment in segments:
+                        full_text += segment.text.strip() + " "
+                    full_text = full_text.strip()
+                    if full_text:
+                        print(f"\n[WHISPER FALLBACK]: {full_text}")
+                except Exception as e:
+                    print(f"\n[STT Error]: {e}", file=sys.stderr)
+                    return "", sarvam_attempted
+            elif not sarvam_ok:
+                print("\n[STT] Sarvam failed and Whisper fallback is disabled", file=sys.stderr)
+                return "", sarvam_attempted
+
+        sarvam_failed = sarvam_attempted and not sarvam_ok
+        return full_text.strip(), sarvam_failed
 
     def audio_callback(self, indata, frames, time_info, status):
         """Callback for sounddevice to capture audio streams."""
@@ -65,6 +275,86 @@ class STTEngine:
         except queue.Full:
             print("[STT] Warning: Audio queue full, dropping chunk", file=sys.stderr)
 
+    def _transcribe_whisper_only(self, audio_data: np.ndarray) -> str:
+        """
+        Whisper-only transcription for bot-interrupt partial checks.
+
+        Deliberately does NOT touch the Sarvam WebSocket so the persistent
+        connection stays clean for the real final-answer transcription.
+        Falls back gracefully if Whisper is unavailable.
+        """
+        audio_data = audio_data.flatten().astype(np.float32)
+        if len(audio_data) < int(SAMPLE_RATE * 0.5):
+            return ""
+        if not STT_FALLBACK_ENABLED:
+            return ""
+        try:
+            model = self._ensure_whisper()
+            segments, _ = model.transcribe(
+                audio_data,
+                beam_size=3,
+                language="en",
+                condition_on_previous_text=False,
+                vad_filter=False,
+            )
+            text = " ".join(s.text.strip() for s in segments).strip()
+            return text
+        except Exception as e:
+            print(f"\n[STT] Whisper partial check error: {e}", file=sys.stderr)
+            return ""
+
+    def _maybe_check_bot_interrupt(self):
+        """
+        While user is still speaking, peek at partial audio via Whisper only
+        and push to bot_interrupt_queue for LLM clarifier check.
+
+        Rules:
+        - Only fires during CORE interview phase (never during intro/greeting).
+        - Uses Whisper exclusively so the Sarvam WebSocket is never disturbed —
+          this guarantees Sarvam gets clean, uninterrupted audio for the real
+          final-answer transcription.
+        """
+        # Only fire during CORE Q&A phase — never during intro, greeting, closing
+        orch = getattr(self.state, "interview_orchestrator", None)
+        if orch is not None:
+            from interview_engine import InterviewPhase
+            if orch.phase != InterviewPhase.CORE:
+                return
+
+        if not self.is_recording or not self.audio_buffer:
+            return
+        if self.state.is_ai_speaking.is_set():
+            return
+        if time.monotonic() < self._bot_interrupt_cooldown_until:
+            return
+        if self._orch_awaiting_clarifier():
+            return
+
+        speech_sec = time.monotonic() - self._recording_started_at
+        if speech_sec < BOT_INTERRUPT_MIN_SPEECH_SEC:
+            return
+        if time.monotonic() - self._last_bot_interrupt_check < BOT_INTERRUPT_CHECK_INTERVAL_SEC:
+            return
+
+        audio_data = np.concatenate(self.audio_buffer).flatten().astype(np.float32)
+        partial_sec = len(audio_data) / SAMPLE_RATE
+        if partial_sec < BOT_INTERRUPT_MIN_PARTIAL_SEC:
+            return
+
+        self._last_bot_interrupt_check = time.monotonic()
+
+        # Use Whisper for partial peek — keeps Sarvam connection untouched
+        partial_text = self._transcribe_whisper_only(audio_data)
+        if len(partial_text) < 12:
+            return
+
+        print(f"\n[STT] Bot-interrupt check (Whisper partial, {partial_sec:.1f}s): {partial_text[:80]}")
+        try:
+            self.state.bot_interrupt_queue.put_nowait(partial_text)
+            self._bot_interrupt_cooldown_until = time.monotonic() + 15.0
+        except queue.Full:
+            pass
+
     def process_audio(self):
         """Worker thread: VAD → accumulate → transcribe."""
         print("\n--- READY: START SPEAKING ---")
@@ -74,12 +364,19 @@ class STTEngine:
 
         while self.state.is_running:
             try:
+                if self.state.clear_stt_buffer.is_set():
+                    self._reset_recording_state()
+                    vad_accumulator = np.empty(0, dtype=np.float32)
+                    pre_speech_buffer.clear()
+                    self.state.clear_stt_buffer.clear()
+                    self.vad_model.reset_states()
+
                 chunk = self.state.audio_queue.get(timeout=1.0)
                 chunk = chunk.flatten().astype(np.float32)
 
-                # SMART INTERRUPTION: Allow candidate to interrupt if speaking long enough
                 if self.state.is_ai_speaking.is_set():
-                    if len(chunk) > 0:
+                    # Bot is speaking — discard mic audio (no user barge-in by default)
+                    if USER_BARGE_IN_ENABLED and len(chunk) > 0:
                         vad_chunk = chunk
                         if self.actual_samplerate != SAMPLE_RATE:
                             import scipy.signal
@@ -108,25 +405,16 @@ class STTEngine:
                                     0, self.candidate_speaking_duration - 0.1
                                 )
 
-                        if self.state.is_ai_speaking.is_set() and not self.state.interrupt_flag.is_set():
-                            self.audio_buffer = []
-                            self.is_recording = False
-                            self.last_speech_time = 0.0
-                            vad_accumulator = np.empty(0, dtype=np.float32)
-                            pre_speech_buffer.clear()
-                            continue
-                    else:
-                        self.candidate_speaking_duration = 0.0
-                        self.audio_buffer = []
-                        self.is_recording = False
-                        continue
-                else:
                     self.candidate_speaking_duration = 0.0
+                    self._reset_recording_state()
+                    vad_accumulator = np.empty(0, dtype=np.float32)
+                    pre_speech_buffer.clear()
+                    continue
+
+                self.candidate_speaking_duration = 0.0
 
                 if not self.state.is_started.is_set():
-                    self.audio_buffer = []
-                    self.is_recording = False
-                    self.last_speech_time = 0.0
+                    self._reset_recording_state()
                     vad_accumulator = np.empty(0, dtype=np.float32)
                     pre_speech_buffer.clear()
                     continue
@@ -153,10 +441,16 @@ class STTEngine:
                         if not self.is_recording:
                             print("\rListening...        ", end="", flush=True)
                             self.is_recording = True
-                            self.audio_buffer.extend(list(pre_speech_buffer))
+                            self._recording_started_at = time.monotonic()
+                            self._last_bot_interrupt_check = time.monotonic()
+                            # Reset cooldown so each new answer gets a clean interrupt window
+                            self._bot_interrupt_cooldown_until = 0.0
+                            for pre_block in pre_speech_buffer:
+                                self.audio_buffer.append(pre_block)
                             pre_speech_buffer.clear()
                         self.audio_buffer.append(process_block)
                         self.last_speech_time = 0.0
+                        self._maybe_check_bot_interrupt()
                     else:
                         if self.is_recording:
                             self.last_speech_time += (512 / SAMPLE_RATE)
@@ -164,8 +458,10 @@ class STTEngine:
                                 self.transcribe_buffer()
                                 self.is_recording = False
                                 self.last_speech_time = 0.0
+                                self._recording_started_at = 0.0
                             else:
                                 self.audio_buffer.append(process_block)
+                                self._maybe_check_bot_interrupt()
                         else:
                             pre_speech_buffer.append(process_block)
 
@@ -176,34 +472,20 @@ class STTEngine:
         """
         Transcribe the accumulated audio buffer.
 
-        Primary:  Sarvam AI Saaras V3  (api_server / Recall mode — sarvam_engine is set)
-        Fallback: faster-whisper        (always available; sole engine in main.py mode)
-
-        Deduplication: if Recall.ai already fired a final transcript for this
-        utterance (state.last_recall_transcript_time was set within the last 4 s)
-        we skip local transcription entirely — the LLM queue already has the text.
+        Primary:  Sarvam AI Saaras V3 (batch per utterance)
+        Fallback: faster-whisper (lazy-loaded)
         """
         if not self.audio_buffer:
             return
 
         if not self.state.is_started.is_set():
-            self.audio_buffer = []
-            self.is_recording = False
-            self.last_speech_time = 0.0
+            self._reset_recording_state()
             return
 
         if self.state.is_ai_speaking.is_set():
-            self.audio_buffer = []
-            self.is_recording = False
-            self.last_speech_time = 0.0
+            self._reset_recording_state()
             return
 
-        # ── Recall.ai deduplication guard ────────────────────────────────────
-        # Recall's is_final transcript fires ~200-400 ms after candidate stops.
-        # Our VAD silence timer fires 0.8-1.5 s later.  If Recall already sent
-        # the transcript to the LLM queue we must NOT run Whisper/Sarvam again.
-        # 4 s window is generous — covers the longest silence threshold (1.5 s)
-        # plus Whisper processing time (~3 s for long answers).
         recall_age = time.monotonic() - self.state.last_recall_transcript_time
         if recall_age < 4.0:
             print(
@@ -217,67 +499,67 @@ class STTEngine:
 
         audio_data = np.concatenate(self.audio_buffer).flatten().astype(np.float32)
 
-        # Adaptive endpointing: tune silence threshold based on recent answer lengths
+        # Merge with held partial audio if still within the merge window
+        self._discard_expired_pending()
+        if self._pending_audio is not None and time.monotonic() < self._pending_until:
+            pending_sec = len(self._pending_audio) / SAMPLE_RATE
+            print(
+                f"\n[TURN MERGE] combining {pending_sec:.1f}s held audio + "
+                f"{len(audio_data) / SAMPLE_RATE:.1f}s new audio",
+                file=sys.stderr,
+            )
+            audio_data = np.concatenate([self._pending_audio, audio_data]).astype(np.float32)
+            self._clear_pending_turn()
+
         utterance_duration = len(audio_data) / SAMPLE_RATE
         self.recent_utterance_lengths.append(utterance_duration)
         if len(self.recent_utterance_lengths) > 10:
             self.recent_utterance_lengths.pop(0)
         if len(self.recent_utterance_lengths) >= 3:
             avg_duration = sum(self.recent_utterance_lengths) / len(self.recent_utterance_lengths)
-            if avg_duration < 2.0:
-                self.adaptive_silence_duration = 0.8
-            elif avg_duration > 5.0:
-                self.adaptive_silence_duration = 1.5
+            if self.sarvam_engine is not None:
+                # Sarvam path favors fuller sentence capture over ultra-fast cutoff.
+                if avg_duration < 2.0:
+                    self.adaptive_silence_duration = max(self._active_endpoint_silence - 0.2, 1.0)
+                elif avg_duration > 5.0:
+                    self.adaptive_silence_duration = max(self._active_endpoint_silence + 0.2, 1.4)
+                else:
+                    self.adaptive_silence_duration = self._active_endpoint_silence
             else:
-                self.adaptive_silence_duration = 1.0
+                # Preserve Whisper behavior for fallback-only mode.
+                if avg_duration < 2.0:
+                    self.adaptive_silence_duration = 0.8
+                elif avg_duration > 5.0:
+                    self.adaptive_silence_duration = 1.5
+                else:
+                    self.adaptive_silence_duration = self._active_endpoint_silence
 
         self.audio_buffer = []
         self.vad_model.reset_states()
 
-        # ── Primary: Sarvam Saaras V3 ─────────────────────────────────────────
-        full_text = ""
-        sarvam_ok = False
+        full_text, sarvam_failed = self._transcribe_with_fallback(
+            audio_data, utterance_duration=utterance_duration
+        )
 
-        if self.sarvam_engine is not None:
-            try:
-                result = self.sarvam_engine.transcribe_sync(
-                    audio_data,
-                    sample_rate=self.actual_samplerate or SAMPLE_RATE,
-                )
-                if result and result.strip():
-                    full_text = result.strip()
-                    sarvam_ok = True
-                    print(f"\n[SARVAM STT] Transcript: {full_text}")
-                else:
-                    print("\n[SARVAM STT] No result — falling back to Whisper", file=sys.stderr)
-            except Exception as e:
-                print(f"\n[SARVAM STT Error]: {e} — falling back to Whisper", file=sys.stderr)
+        # Hold path: store audio for merge even when transcript is empty
+        should_hold, hold_reason = self._should_hold_turn(
+            full_text, utterance_duration, sarvam_failed
+        )
+        if should_hold:
+            print(
+                f"\n[TURN HOLD] reason={hold_reason} duration={utterance_duration:.1f}s "
+                f"text={full_text!r}",
+                file=sys.stderr,
+            )
+            self._pending_audio = audio_data.copy()
+            self._pending_text = (full_text or "").strip() or self._pending_text
+            self._pending_until = time.monotonic() + TURN_MERGE_WINDOW_SEC
+            self._pending_sarvam_failed = sarvam_failed
+            return
 
-        # ── Fallback: faster-whisper ──────────────────────────────────────────
-        if not sarvam_ok:
-            try:
-                segments, _ = self.model.transcribe(
-                    audio_data,
-                    beam_size=3,
-                    language="en",
-                    condition_on_previous_text=False,
-                    vad_filter=False,
-                )
-                for segment in segments:
-                    full_text += segment.text.strip() + " "
-                full_text = full_text.strip()
-                if full_text:
-                    print(f"\n[TRANSCRIPTION]: {full_text}")
-            except Exception as e:
-                try:
-                    self.state.tts_queue.put("Sorry, I couldn't understand that. Please try again.")
-                    self.state.tts_queue.put("<END_OF_TURN>")
-                except Exception:
-                    pass
-                print(f"\n[STT Error]: {e}", file=sys.stderr)
-                return
+        if not full_text:
+            return
 
-        # ── Post-processing: filler removal + backchannel filter ──────────────
         full_text = re.sub(r'\b(um|uh|hmm|ah|uhm)\b[\.\,]?', '', full_text, flags=re.IGNORECASE)
         full_text = re.sub(r'\s+', ' ', full_text).strip()
 
@@ -292,7 +574,4 @@ class STTEngine:
                 print(f"\n[BACKCHANNEL FILTERED]: '{full_text}' (ignored - not a real turn)")
                 return
 
-        if len(full_text) > 2:
-            if getattr(self.state, "interview_ended", None) and self.state.interview_ended.is_set():
-                return
-            self.state.llm_queue.put(full_text)
+        self._commit_turn(full_text)

@@ -196,21 +196,24 @@ class SessionManager:
                         model=config.SARVAM_STT_MODEL,
                         language_code=config.SARVAM_STT_LANGUAGE,
                         mode=config.SARVAM_STT_MODE,
-                        sample_rate=16000,          # Recall.ai audio is always 16 kHz
+                        sample_rate=16000,
                         high_vad_sensitivity=config.SARVAM_STT_HIGH_VAD,
                         flush_signal=True,
+                        collect_deadline_seconds=config.SARVAM_STT_COLLECT_DEADLINE_SEC,
+                        trailing_silence_seconds=config.SARVAM_STT_TRAILING_SILENCE_SEC,
+                        wait_after_end_speech_seconds=config.SARVAM_STT_WAIT_AFTER_END_SEC,
                     )
                     sarvam_stt = SarvamSTTEngine(sarvam_stt_cfg)
                     session.sarvam_stt_engine = sarvam_stt
-                    logger.info(f"Bot {bot_id[:8]} Sarvam STT engine created (model={config.SARVAM_STT_MODEL})")
+                    logger.info(
+                        f"Bot {bot_id[:8]} Sarvam STT primary "
+                        f"(model={config.SARVAM_STT_MODEL}, lang={config.SARVAM_STT_LANGUAGE})"
+                    )
                 except Exception as e:
                     logger.error(f"Failed to create Sarvam STT engine: {e} — will use Whisper only")
                     sarvam_stt = None
 
-            # STTEngine: Sarvam as primary when available, Whisper always present as fallback
-            session.stt_engine = STTEngine(session.state, sarvam_engine=sarvam_stt)
-
-            # Start Sarvam STT background loop (connects immediately so first turn is fast)
+            # Connect Sarvam before STT thread starts (Whisper loads lazily on fallback only)
             if sarvam_stt is not None:
                 threading.Thread(
                     target=sarvam_stt.start_session_loop,
@@ -218,6 +221,16 @@ class SessionManager:
                     daemon=True,
                 ).start()
                 logger.info(f"Bot {bot_id[:8]} Sarvam STT session loop starting in background")
+
+            session.stt_engine = STTEngine(session.state, sarvam_engine=sarvam_stt)
+
+            if config.STT_FALLBACK_ENABLED and config.WHISPER_PRELOAD_ENABLED:
+                threading.Thread(
+                    target=session.stt_engine._ensure_whisper,
+                    name=f"WhisperPreload-{bot_id[:8]}",
+                    daemon=True,
+                ).start()
+                logger.info(f"Bot {bot_id[:8]} Whisper preload started in background")
 
             # ── Build audio sender ────────────────────────────────────────────
             from api_server import TTS_RATE, TTS_REDUCE_PAUSES
@@ -665,6 +678,31 @@ class SessionManager:
             # Mark as inactive
             session.is_active = False
             session.state.is_running = False
+
+            # Disconnect Sarvam TTS before STT teardown
+            if (
+                session.audio_sender
+                and getattr(session.audio_sender, "sarvam_engine", None)
+            ):
+                try:
+                    sarvam_tts = session.audio_sender.sarvam_engine
+                    loop = config.main_event_loop
+                    if loop and loop.is_running():
+                        future = asyncio.run_coroutine_threadsafe(
+                            sarvam_tts.disconnect(), loop
+                        )
+                        future.result(timeout=5)
+                    else:
+                        tmp_loop = asyncio.new_event_loop()
+                        try:
+                            tmp_loop.run_until_complete(sarvam_tts.disconnect())
+                        finally:
+                            tmp_loop.close()
+                    logger.info(f"Sarvam TTS disconnected for bot {bot_id[:8]}")
+                except Exception as e:
+                    logger.error(
+                        f"Error disconnecting Sarvam TTS for bot {bot_id[:8]}: {e}"
+                    )
             
             # Stop Sarvam STT background loop
             if session.sarvam_stt_engine is not None:

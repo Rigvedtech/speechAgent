@@ -6,6 +6,10 @@ class AgentState:
     def __init__(self):
         self.audio_queue = queue.Queue()
         self.llm_queue = queue.Queue()
+        # Partial transcripts while user is still speaking — bot clarifier checks
+        self.bot_interrupt_queue = queue.Queue()
+        # Set by LLM when bot clarifier is spoken — STT clears in-progress buffer
+        self.clear_stt_buffer = threading.Event()
         self.tts_queue = queue.Queue()
         # Set by TTS player when an <END_OF_TURN> finishes playback.
         self.tts_turn_done_event = threading.Event()

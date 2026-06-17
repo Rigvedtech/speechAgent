@@ -83,8 +83,93 @@ class StoppedReason(str, Enum):
 class TurnAction(str, Enum):
     SPEAK = "speak"
     REASK_SAME = "reask_same"
+    REPHRASE = "rephrase"
     WARN_ABUSE = "warn_abuse"
     STOP = "stop"
+
+
+class TurnIntent(str, Enum):
+    """Classifier output for candidate short utterances during Q&A."""
+    ACTUAL_ANSWER = "actual_answer"
+    REPEAT_LAST = "repeat_last"
+    REPHRASE_LAST = "rephrase_last"
+    REPEAT_MAIN = "repeat_main"
+    CONTINUE_ANSWER = "continue_answer"
+
+
+_BRIDGE_PHRASES: Tuple[str, ...] = (
+    "Alright.",
+    "Got it.",
+    "Okay.",
+    "Sure.",
+    "Understood.",
+    "Right.",
+)
+
+_REPEAT_INTENT = re.compile(
+    r"|".join([
+        r"\b(repeat|say\s+again|come\s+again|pardon)\b",
+        r"\bcan\s+you\s+repeat\b",
+        r"\brepeat\s+the\s+question\b",
+        r"\bwhat\s+was\s+the\s+question\b",
+        r"\bsay\s+the\s+question\s+again\b",
+    ]),
+    re.IGNORECASE,
+)
+
+_REPHRASE_INTENT = re.compile(
+    r"|".join([
+        r"\b(didn'?t|don'?t)\s+understand\b",
+        r"\bnot\s+understand(ing)?\b",
+        r"\bcan\s+you\s+explain\s+the\s+question\b",
+        r"\bexplain\s+the\s+question\b",
+        r"\bsimpler\s+(version|way|words)\b",
+        r"\brephrase\s+the\s+question\b",
+        r"\bwhat\s+do\s+you\s+mean\b",
+        r"\bcan\s+you\s+clarify\s+the\s+question\b",
+    ]),
+    re.IGNORECASE,
+)
+
+_INCOMPLETE_TRAILING = re.compile(
+    r"\b(and|so|because|but|like|um|uh|or|if|when|that|then|also|with|for)$",
+    re.IGNORECASE,
+)
+
+_CLARIFIER_CONFUSION = re.compile(
+    r"|".join([
+        r"\bsorry\b",
+        r"\b(didn'?t|don'?t)\s+(understand|get)\b",
+        r"\bnot\s+understand(ing)?\b",
+        r"\bwhat\s+(did\s+you\s+say|was\s+that)\b",
+        r"\bcan\s+you\s+repeat\s+(that|it)\b",
+        r"\bsay\s+that\s+again\b",
+        r"\bpardon\b",
+        r"\bcome\s+again\b",
+    ]),
+    re.IGNORECASE,
+)
+
+_INABILITY_PATTERNS = re.compile(
+    r"|".join([
+        r"\b(don'?t|do\s+not)\s+(know|remember)\b",
+        r"\bno\s+idea\b",
+        r"\bnot\s+sure\b",
+        r"\bcan'?t\s+remember\b",
+        r"\bhaven'?t\s+(used|worked)\b",
+    ]),
+    re.IGNORECASE,
+)
+
+_EXPLICIT_MAIN_QUESTION = re.compile(
+    r"|".join([
+        r"\b(main|original|full)\s+question\b",
+        r"\binterview\s+question\b",
+        r"\bwhat\s+was\s+the\s+(main\s+)?question\b",
+        r"\bgo\s+back\s+to\s+the\s+question\b",
+    ]),
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -150,6 +235,8 @@ class TurnDecision:
     rolling_average: Optional[float] = None
     should_continue: bool = True
     stopped_reason: StoppedReason = StoppedReason.NONE
+    # main | clarifier | prompt — used to track last spoken question for repeat
+    spoken_kind: Optional[str] = None
 
 
 def normalize_difficulty(raw: str) -> str:
@@ -168,6 +255,84 @@ def _source_bucket(source: str) -> str:
 
 def detect_abuse(text: str) -> bool:
     return bool(_ABUSE_PATTERNS.search(text or ""))
+
+
+def detect_meta_intent(text: str) -> Optional[str]:
+    """
+    Detect candidate meta-requests (not answers).
+    Returns 'rephrase', 'repeat', or None.
+    """
+    t = (text or "").strip()
+    if not t:
+        return None
+    # Meta intents are usually short; long answers are treated as normal turns.
+    if len(t) > 120:
+        return None
+    if _REPHRASE_INTENT.search(t):
+        return "rephrase"
+    if _REPEAT_INTENT.search(t):
+        return "repeat"
+    return None
+
+
+def detect_clarifier_confusion(text: str) -> bool:
+    """Candidate did not understand the mid-answer clarifier (not a real answer)."""
+    t = (text or "").strip()
+    if not t or len(t) > 120:
+        return False
+    if detect_meta_intent(t):
+        return True
+    return bool(_CLARIFIER_CONFUSION.search(t))
+
+
+def detect_inability_answer(text: str) -> bool:
+    """Short honest 'I don't know' — complete thought, not a cut-off fragment."""
+    t = (text or "").strip()
+    if not t or len(t) > 80:
+        return False
+    return bool(_INABILITY_PATTERNS.search(t))
+
+
+def detect_turn_intent_fallback(text: str, awaiting_clarifier: bool) -> str:
+    """
+    Regex fallback when LLM classifier is unavailable.
+    Returns a TurnIntent value string.
+    """
+    t = (text or "").strip()
+    if not t:
+        return TurnIntent.ACTUAL_ANSWER.value
+    if len(t) > config.TURN_INTENT_MAX_CHARS:
+        return TurnIntent.ACTUAL_ANSWER.value
+    if detect_inability_answer(t):
+        return TurnIntent.ACTUAL_ANSWER.value
+    if _EXPLICIT_MAIN_QUESTION.search(t):
+        return TurnIntent.REPEAT_MAIN.value
+    meta = detect_meta_intent(t)
+    if meta == "rephrase":
+        return TurnIntent.REPHRASE_LAST.value
+    if meta == "repeat":
+        return TurnIntent.REPEAT_LAST.value
+    if awaiting_clarifier and detect_clarifier_confusion(t):
+        return TurnIntent.REPHRASE_LAST.value
+    return TurnIntent.ACTUAL_ANSWER.value
+
+
+def detect_incomplete_answer(text: str) -> bool:
+    """True when a CORE-phase answer looks cut off or too short to score."""
+    if not config.INCOMPLETE_ANSWER_CHECK_ENABLED:
+        return False
+    t = (text or "").strip()
+    if not t:
+        return True
+    if detect_inability_answer(t):
+        return False
+    words = [w for w in re.split(r"\s+", t) if w]
+    if len(words) < config.MIN_ANSWER_WORDS:
+        return True
+    trimmed = t.rstrip(".,!?…")
+    if _INCOMPLETE_TRAILING.search(trimmed):
+        return True
+    return False
 
 
 class RollingScoreTracker:
@@ -269,6 +434,24 @@ class InterviewOrchestrator:
     abuse_warnings: int = 0
     stopped_reason: StoppedReason = StoppedReason.NONE
 
+    # ── Clarifier state (reset each new main question) ──────────────────────
+    awaiting_clarifier_reply: bool = False
+    clarifier_count_this_question: int = 0
+    _last_clarifier_partial: str = ""
+    _last_clarifier_question: str = ""
+    _last_spoken_question: str = ""
+    _last_spoken_kind: str = ""  # main | clarifier
+    # Each entry: {"bot_q": str, "candidate_a": str}
+    _clarifier_thread: List[dict] = field(default_factory=list)
+    # Accumulated partial answer text before clarifiers (initial chunk)
+    _answer_initial_partial: str = ""
+
+    # Meta-request counters (reset each new main question)
+    question_repeat_count: int = 0
+    question_rephrase_count: int = 0
+    answer_continuation_count: int = 0
+    _bridge_index: int = 0
+
     answer_records: List[AnswerRecord] = field(default_factory=list)
     _rolling: RollingScoreTracker = field(default_factory=lambda: RollingScoreTracker(
         config.ROLLING_WINDOW
@@ -341,6 +524,221 @@ class InterviewOrchestrator:
             return None
         return self.planned_questions[self.current_index]
 
+    def record_spoken(self, text: str, kind: str) -> None:
+        """Track the most recent question the bot spoke (main or clarifier)."""
+        spoken = (text or "").strip()
+        if not spoken or kind not in ("main", "clarifier"):
+            return
+        with self._lock:
+            self._last_spoken_question = spoken
+            self._last_spoken_kind = kind
+            logger.debug(
+                "[SPOKEN] bot=%s kind=%s text=%r",
+                self.bot_id[:8] if self.bot_id else "?",
+                kind,
+                spoken[:80],
+            )
+
+    def classification_context(self) -> dict:
+        """Context block for the turn-intent LLM classifier."""
+        main_q = self.get_current_question()
+        return {
+            "awaiting_clarifier_reply": self.awaiting_clarifier_reply,
+            "main_question": main_q.question if main_q else "",
+            "last_spoken_question": self._last_spoken_question,
+            "last_spoken_kind": self._last_spoken_kind or "main",
+            "last_clarifier_question": self._last_clarifier_question,
+        }
+
+    def decision_for_turn_intent(self, intent: str) -> Optional[TurnDecision]:
+        """Map classified intent to an orchestrator action."""
+        with self._lock:
+            if intent == TurnIntent.REPEAT_LAST.value:
+                return self._decision_repeat_last()
+            if intent == TurnIntent.REPHRASE_LAST.value:
+                return self._decision_rephrase_last()
+            if intent == TurnIntent.REPEAT_MAIN.value:
+                return self._decision_repeat_main()
+            if intent == TurnIntent.CONTINUE_ANSWER.value:
+                return TurnDecision(
+                    action=TurnAction.SPEAK,
+                    spoken_text="Please continue your answer.",
+                    should_continue=True,
+                    spoken_kind="prompt",
+                )
+            return None
+
+    def _decision_repeat_last(self) -> TurnDecision:
+        target = self._last_spoken_question
+        kind = self._last_spoken_kind or "main"
+        if not target:
+            if self.awaiting_clarifier_reply and self._last_clarifier_question:
+                target = self._last_clarifier_question
+                kind = "clarifier"
+            else:
+                q = self.get_current_question()
+                target = q.question if q else ""
+                kind = "main"
+        if kind == "clarifier":
+            logger.info(
+                "[INTENT] bot=%s Q%d repeat_last clarifier",
+                self.bot_id[:8] if self.bot_id else "?",
+                self.current_index + 1,
+            )
+            spoken = f"Of course. I asked: {target}"
+            return TurnDecision(
+                action=TurnAction.SPEAK,
+                spoken_text=spoken,
+                should_continue=True,
+                spoken_kind="clarifier",
+            )
+        if self.question_repeat_count >= config.MAX_QUESTION_REPEATS:
+            spoken = f"No problem. Let me read the question once more. {target}"
+        else:
+            self.question_repeat_count += 1
+            spoken = f"Sure. The question is: {target}"
+        logger.info(
+            "[INTENT] bot=%s Q%d repeat_last main (%d/%d)",
+            self.bot_id[:8] if self.bot_id else "?",
+            self.current_index + 1,
+            self.question_repeat_count,
+            config.MAX_QUESTION_REPEATS,
+        )
+        return TurnDecision(
+            action=TurnAction.SPEAK,
+            spoken_text=spoken,
+            should_continue=True,
+            spoken_kind="main",
+        )
+
+    def _decision_rephrase_last(self) -> TurnDecision:
+        target = self._last_spoken_question
+        kind = self._last_spoken_kind or "main"
+        if not target:
+            if self.awaiting_clarifier_reply and self._last_clarifier_question:
+                target = self._last_clarifier_question
+                kind = "clarifier"
+            else:
+                q = self.get_current_question()
+                target = q.question if q else ""
+                kind = "main"
+        if kind == "clarifier":
+            logger.info(
+                "[INTENT] bot=%s Q%d rephrase_last clarifier",
+                self.bot_id[:8] if self.bot_id else "?",
+                self.current_index + 1,
+            )
+            return TurnDecision(
+                action=TurnAction.REPHRASE,
+                spoken_text=target,
+                should_continue=True,
+                spoken_kind="clarifier",
+            )
+        return self._on_rephrase_question()
+
+    def _decision_repeat_main(self) -> TurnDecision:
+        self.awaiting_clarifier_reply = False
+        logger.info(
+            "[INTENT] bot=%s Q%d repeat_main (explicit)",
+            self.bot_id[:8] if self.bot_id else "?",
+            self.current_index + 1,
+        )
+        return self._on_repeat_question()
+
+    def _next_bridge(self) -> str:
+        phrase = _BRIDGE_PHRASES[self._bridge_index % len(_BRIDGE_PHRASES)]
+        self._bridge_index += 1
+        return phrase
+
+    def try_handle_meta_intent(self, answer_text: str) -> Optional[TurnDecision]:
+        """Handle repeat/rephrase requests before scoring. Returns None if not meta."""
+        with self._lock:
+            if self.phase != InterviewPhase.CORE:
+                return None
+            if self.awaiting_clarifier_reply:
+                return None
+
+            meta = detect_meta_intent(answer_text)
+            if meta == "repeat":
+                return self._on_repeat_question()
+            if meta == "rephrase":
+                return self._on_rephrase_question()
+            return None
+
+    def _on_repeat_question(self) -> TurnDecision:
+        q = self.get_current_question()
+        if not q:
+            return TurnDecision(action=TurnAction.STOP, spoken_text="", should_continue=False)
+
+        if self.question_repeat_count >= config.MAX_QUESTION_REPEATS:
+            logger.info(
+                "[META] bot=%s Q%d repeat limit reached (%d) — re-reading same question",
+                self.bot_id[:8] if self.bot_id else "?",
+                self.current_index + 1,
+                config.MAX_QUESTION_REPEATS,
+            )
+            spoken = (
+                "No problem. Let me read the question once more. "
+                f"{q.question}"
+            )
+            return TurnDecision(
+                action=TurnAction.SPEAK,
+                spoken_text=spoken,
+                should_continue=True,
+                spoken_kind="main",
+            )
+
+        self.question_repeat_count += 1
+        logger.info(
+            "[META] bot=%s Q%d repeat %d/%d",
+            self.bot_id[:8] if self.bot_id else "?",
+            self.current_index + 1,
+            self.question_repeat_count,
+            config.MAX_QUESTION_REPEATS,
+        )
+        spoken = f"Sure. The question is: {q.question}"
+        return TurnDecision(
+            action=TurnAction.SPEAK,
+            spoken_text=spoken,
+            should_continue=True,
+            spoken_kind="main",
+        )
+
+    def _on_rephrase_question(self) -> TurnDecision:
+        q = self.get_current_question()
+        if not q:
+            return TurnDecision(action=TurnAction.STOP, spoken_text="", should_continue=False)
+
+        if self.question_rephrase_count >= config.MAX_QUESTION_REPHRASES:
+            logger.info(
+                "[META] bot=%s Q%d rephrase limit reached (%d)",
+                self.bot_id[:8] if self.bot_id else "?",
+                self.current_index + 1,
+                config.MAX_QUESTION_REPHRASES,
+            )
+            spoken = f"Let's continue with the question as asked. {q.question}"
+            return TurnDecision(
+                action=TurnAction.SPEAK,
+                spoken_text=spoken,
+                should_continue=True,
+                spoken_kind="main",
+            )
+
+        self.question_rephrase_count += 1
+        logger.info(
+            "[META] bot=%s Q%d rephrase %d/%d — LLM will simplify",
+            self.bot_id[:8] if self.bot_id else "?",
+            self.current_index + 1,
+            self.question_rephrase_count,
+            config.MAX_QUESTION_REPHRASES,
+        )
+        return TurnDecision(
+            action=TurnAction.REPHRASE,
+            spoken_text=q.question,
+            should_continue=True,
+            spoken_kind="main",
+        )
+
     def on_greeting_sent(self) -> None:
         with self._lock:
             self.phase = InterviewPhase.AWAIT_INTRO
@@ -370,7 +768,134 @@ class InterviewOrchestrator:
                 len(self.planned_questions),
                 q.id,
             )
-            return TurnDecision(action=TurnAction.SPEAK, spoken_text=spoken)
+            return TurnDecision(
+                action=TurnAction.SPEAK,
+                spoken_text=spoken,
+                spoken_kind="main",
+            )
+
+    def on_clarifier_reply(self, answer_text: str, clarifier_q: str = "") -> TurnDecision:
+        """Short reply after bot mid-answer clarifier — not scored individually."""
+        with self._lock:
+            self.awaiting_clarifier_reply = False
+            q = self.get_current_question()
+
+            bot_q = clarifier_q or self._last_clarifier_question or self._last_clarifier_partial[:120]
+            entry = {
+                "bot_q": bot_q,
+                "candidate_a": (answer_text or "").strip(),
+            }
+            self._clarifier_thread.append(entry)
+
+            logger.info(
+                "[CLARIFIER REPLY] bot=%s Q%d clarifier=%d/%d bot_q=%r candidate_a=%r",
+                self.bot_id[:8] if self.bot_id else "?",
+                self.current_index + 1,
+                self.clarifier_count_this_question,
+                config.BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q,
+                entry["bot_q"][:60],
+                entry["candidate_a"][:60],
+            )
+            self._last_clarifier_partial = ""
+
+            # After clarifier exchange, repeat requests should target the main question
+            if q:
+                self._last_spoken_question = q.question
+                self._last_spoken_kind = "main"
+
+            spoken = "Thanks for clarifying. Please continue from where you left off."
+            return TurnDecision(
+                action=TurnAction.SPEAK,
+                spoken_text=spoken,
+                should_continue=True,
+                spoken_kind="prompt",
+            )
+
+    def mark_clarifier_asked(self, partial_text: str, clarifier_q: str = "") -> None:
+        with self._lock:
+            self.awaiting_clarifier_reply = True
+            self.clarifier_count_this_question += 1
+            self._last_clarifier_partial = (partial_text or "").strip()
+            self._last_clarifier_question = (clarifier_q or "").strip()
+            if self._last_clarifier_question:
+                self.record_spoken(self._last_clarifier_question, "clarifier")
+            if not self._answer_initial_partial:
+                self._answer_initial_partial = (partial_text or "").strip()
+            logger.info(
+                "[CLARIFIER ASKED] bot=%s Q%d clarifier=%d/%d",
+                self.bot_id[:8] if self.bot_id else "?",
+                self.current_index + 1,
+                self.clarifier_count_this_question,
+                config.BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q,
+            )
+
+    def clarifier_limit_reached(self) -> bool:
+        """True when max clarifiers for this question have been used."""
+        return self.clarifier_count_this_question >= config.BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q
+
+    def build_merged_answer_context(self, final_answer: str) -> str:
+        """Combine initial partial + clarifier Q&As + final continuation for scoring."""
+        parts = []
+        if self._answer_initial_partial:
+            parts.append(f"Initial answer:\n{self._answer_initial_partial}")
+        for i, entry in enumerate(self._clarifier_thread, 1):
+            parts.append(
+                f"[Clarifier {i}]\n"
+                f"  Interviewer asked: {entry['bot_q']}\n"
+                f"  Candidate replied: {entry['candidate_a']}"
+            )
+        if final_answer.strip():
+            parts.append(f"Final continuation:\n{final_answer.strip()}")
+        return "\n\n".join(parts) if parts else final_answer.strip()
+
+    def _reset_clarifier_state(self) -> None:
+        """Called when moving to the next main question."""
+        self.awaiting_clarifier_reply = False
+        self.clarifier_count_this_question = 0
+        self._last_clarifier_partial = ""
+        self._last_clarifier_question = ""
+        self._clarifier_thread = []
+        self._answer_initial_partial = ""
+        self._reset_question_meta_state()
+
+    def _reset_question_meta_state(self) -> None:
+        self.question_repeat_count = 0
+        self.question_rephrase_count = 0
+        self.answer_continuation_count = 0
+
+    def try_handle_incomplete_answer(self, answer_text: str) -> Optional[TurnDecision]:
+        """Ask candidate to continue when answer looks cut off (not scored)."""
+        if not config.INCOMPLETE_ANSWER_CHECK_ENABLED:
+            return None
+        if self.awaiting_clarifier_reply:
+            return None
+        if self.phase != InterviewPhase.CORE:
+            return None
+        if not detect_incomplete_answer(answer_text):
+            return None
+        if self.answer_continuation_count >= config.MAX_ANSWER_CONTINUATIONS:
+            logger.info(
+                "[INCOMPLETE] bot=%s Q%d continuation limit reached — scoring anyway",
+                self.bot_id[:8] if self.bot_id else "?",
+                self.current_index + 1,
+            )
+            return None
+
+        with self._lock:
+            self.answer_continuation_count += 1
+            logger.info(
+                "[INCOMPLETE] bot=%s Q%d continuation %d/%d text=%r",
+                self.bot_id[:8] if self.bot_id else "?",
+                self.current_index + 1,
+                self.answer_continuation_count,
+                config.MAX_ANSWER_CONTINUATIONS,
+                (answer_text or "")[:80],
+            )
+            return TurnDecision(
+                action=TurnAction.SPEAK,
+                spoken_text="Please continue your answer.",
+                should_continue=True,
+            )
 
     def process_answer(
         self,
@@ -378,6 +903,9 @@ class InterviewOrchestrator:
         evaluation: EvaluationResult,
     ) -> TurnDecision:
         with self._lock:
+            if self.awaiting_clarifier_reply:
+                return self.on_clarifier_reply(answer_text)
+
             if self.phase == InterviewPhase.ENDED:
                 return TurnDecision(
                     action=TurnAction.STOP,
@@ -393,6 +921,7 @@ class InterviewOrchestrator:
             if not q:
                 return self._complete_all()
 
+            clarifier_count = self.clarifier_count_this_question
             record = AnswerRecord(
                 question_index=self.current_index + 1,
                 question_id=q.id,
@@ -414,6 +943,16 @@ class InterviewOrchestrator:
             can_continue = self._rolling.can_continue(config.CONTINUE_AVG_THRESHOLD)
 
             self._log_score(record, rolling_avg, can_continue)
+            if clarifier_count:
+                logger.info(
+                    "[SCORE] bot=%s Q%d scored with %d clarifier exchange(s) included",
+                    self.bot_id[:8] if self.bot_id else "?",
+                    self.current_index + 1,
+                    clarifier_count,
+                )
+
+            # Reset clarifier state before advancing
+            self._reset_clarifier_state()
 
             if not can_continue:
                 return self._build_stop(
@@ -430,13 +969,14 @@ class InterviewOrchestrator:
             if next_q is None:
                 return self._complete_all(record, rolling_avg)
 
-            spoken = f"Thank you. {next_q.question}"
+            spoken = f"{self._next_bridge()} {next_q.question}"
             return TurnDecision(
                 action=TurnAction.SPEAK,
                 spoken_text=spoken,
                 score_record=record,
                 rolling_average=rolling_avg,
                 should_continue=True,
+                spoken_kind="main",
             )
 
     def _handle_abuse(self) -> TurnDecision:
@@ -619,13 +1159,21 @@ class InterviewOrchestrator:
         blocks.append(f"=== GROUNDING RULES ===\n{GROUNDING_RULES}")
         return "\n\n".join(blocks)
 
-    def evaluator_context(self, question: BankQuestion) -> str:
-        return (
+    def evaluator_context(self, question: BankQuestion, merged_answer: str = "") -> str:
+        """Build evaluator prompt context, optionally with merged clarifier thread."""
+        base = (
             f"Question ({question.normalized_difficulty}, {question.source}): "
             f"{question.question}\n\n"
             f"JD excerpt (for relevance):\n{self.jd_text[:1200]}\n\n"
             f"Resume excerpt (for relevance):\n{self.cv_text[:1200]}"
         )
+        if merged_answer:
+            base += (
+                "\n\nNOTE: The candidate's answer below includes mid-answer clarifier exchanges. "
+                "Extra depth from clarifiers is a positive signal, not padding. "
+                "Score based on the full picture.\n"
+            )
+        return base
 
 
 def parse_bank_questions(raw_list: List[dict]) -> List[BankQuestion]:
