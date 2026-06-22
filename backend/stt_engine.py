@@ -18,6 +18,7 @@ from config import (
     SILENCE_DURATION,
     STT_FALLBACK_ENABLED,
     USER_BARGE_IN_ENABLED,
+    BOT_INTERRUPT_ENABLED,
     BOT_INTERRUPT_MIN_SPEECH_SEC,
     BOT_INTERRUPT_CHECK_INTERVAL_SEC,
     BOT_INTERRUPT_MIN_PARTIAL_SEC,
@@ -29,9 +30,12 @@ from config import (
     TURN_MERGE_WINDOW_SEC,
     TURN_MERGE_MIN_AUDIO_SEC,
     TURN_MERGE_MIN_CHARS,
+    TURN_MERGE_MIN_HOLD_SEC,
+    TURN_MERGE_MAX_SHORT_HOLD_SEC,
     NAME_NORMALIZE_ENABLED,
 )
 from state import AgentState
+from interview_engine import should_commit_short_turn_immediately
 from transcript_utils import normalize_candidate_name
 
 
@@ -69,6 +73,8 @@ class STTEngine:
         self._recording_started_at = 0.0
         self._last_bot_interrupt_check = 0.0
         self._bot_interrupt_cooldown_until = 0.0
+        self._check_num: int = 0
+        self._prev_check_partial: str = ""
 
         # Lazy Whisper — only loaded when Sarvam fails (or no Sarvam configured)
         self._whisper_model = None
@@ -121,6 +127,8 @@ class STTEngine:
         self.last_speech_time = 0.0
         self._recording_started_at = 0.0
         self._last_bot_interrupt_check = 0.0
+        self._check_num = 0
+        self._prev_check_partial = ""
 
     def _orch_awaiting_clarifier(self) -> bool:
         orch = getattr(self.state, "interview_orchestrator", None)
@@ -140,14 +148,22 @@ class STTEngine:
         self._pending_sarvam_failed = False
 
     def _discard_expired_pending(self) -> None:
-        if self._pending_audio is not None and time.monotonic() >= self._pending_until:
+        if self._pending_audio is None or time.monotonic() < self._pending_until:
+            return
+        pending_text = (self._pending_text or "").strip()
+        print(
+            f"\n[TURN DISCARD] merge window expired "
+            f"(had {len(self._pending_audio) / SAMPLE_RATE:.1f}s audio, "
+            f"text={pending_text!r})",
+            file=sys.stderr,
+        )
+        if pending_text and should_commit_short_turn_immediately(pending_text):
             print(
-                f"\n[TURN DISCARD] merge window expired "
-                f"(had {len(self._pending_audio) / SAMPLE_RATE:.1f}s audio, "
-                f"text={self._pending_text!r})",
+                f"\n[TURN FLUSH] committing held short turn: {pending_text!r}",
                 file=sys.stderr,
             )
-            self._clear_pending_turn()
+            self._commit_turn(pending_text)
+        self._clear_pending_turn()
 
     def _should_hold_turn(
         self,
@@ -163,15 +179,22 @@ class STTEngine:
             return False, ""
 
         stripped = (text or "").strip()
+        if should_commit_short_turn_immediately(stripped):
+            return False, ""
+
         if not stripped:
+            if utterance_duration < TURN_MERGE_MIN_HOLD_SEC:
+                return False, ""
             return True, "empty_transcript"
         if (
             utterance_duration >= TURN_MERGE_MIN_AUDIO_SEC
             and len(stripped) < TURN_MERGE_MIN_CHARS
+            and utterance_duration >= TURN_MERGE_MAX_SHORT_HOLD_SEC
         ):
             return True, "short_text_long_audio"
         if sarvam_failed and len(stripped) < SARVAM_QUALITY_MIN_CHARS:
-            return True, "sarvam_fail_whisper_short"
+            if utterance_duration >= TURN_MERGE_MAX_SHORT_HOLD_SEC:
+                return True, "sarvam_fail_whisper_short"
         return False, ""
 
     def _normalize_candidate_name(self, text: str) -> str:
@@ -190,6 +213,16 @@ class STTEngine:
         if getattr(self.state, "interview_ended", None) and self.state.interview_ended.is_set():
             return
         normalized = self._normalize_candidate_name(text)
+        hook = getattr(self.state, "on_candidate_speech", None)
+        if callable(hook):
+            try:
+                hook()
+            except Exception:
+                self.state.last_candidate_speech_at = time.monotonic()
+                self.state.pending_presence_check = False
+        else:
+            self.state.last_candidate_speech_at = time.monotonic()
+            self.state.pending_presence_check = False
         self.state.llm_queue.put(normalized)
 
     def _transcribe_with_fallback(
@@ -306,15 +339,17 @@ class STTEngine:
     def _maybe_check_bot_interrupt(self):
         """
         While user is still speaking, peek at partial audio via Whisper only
-        and push to bot_interrupt_queue for LLM clarifier check.
+        and push ProgressCheckPayload to bot_interrupt_queue for depth/drag gate.
 
         Rules:
         - Only fires during CORE interview phase (never during intro/greeting).
-        - Uses Whisper exclusively so the Sarvam WebSocket is never disturbed —
-          this guarantees Sarvam gets clean, uninterrupted audio for the real
-          final-answer transcription.
+        - First check after BOT_INTERRUPT_MIN_SPEECH_SEC (default 15s), then every
+          BOT_INTERRUPT_CHECK_INTERVAL_SEC (default 10s).
+        - Uses Whisper exclusively so the Sarvam WebSocket is never disturbed.
         """
-        # Only fire during CORE Q&A phase — never during intro, greeting, closing
+        if not BOT_INTERRUPT_ENABLED:
+            return
+
         orch = getattr(self.state, "interview_orchestrator", None)
         if orch is not None:
             from interview_engine import InterviewPhase
@@ -343,15 +378,31 @@ class STTEngine:
 
         self._last_bot_interrupt_check = time.monotonic()
 
-        # Use Whisper for partial peek — keeps Sarvam connection untouched
-        partial_text = self._transcribe_whisper_only(audio_data)
-        if len(partial_text) < 12:
+        full_partial = self._transcribe_whisper_only(audio_data)
+        if len(full_partial) < 12:
             return
 
-        print(f"\n[STT] Bot-interrupt check (Whisper partial, {partial_sec:.1f}s): {partial_text[:80]}")
+        recent_segment = full_partial[len(self._prev_check_partial):].strip()
+        self._prev_check_partial = full_partial
+        self._check_num += 1
+
+        from interview_engine import ProgressCheckPayload
+        payload = ProgressCheckPayload(
+            full_partial=full_partial,
+            recent_segment=recent_segment,
+            speech_sec=speech_sec,
+            check_num=self._check_num,
+        )
+
+        print(
+            f"\n[PROGRESS CHECK #{self._check_num}] {speech_sec:.0f}s | "
+            f"full={len(full_partial)} chars | recent={recent_segment[:60]!r}"
+        )
         try:
-            self.state.bot_interrupt_queue.put_nowait(partial_text)
-            self._bot_interrupt_cooldown_until = time.monotonic() + 15.0
+            self.state.bot_interrupt_queue.put_nowait(payload)
+            self._bot_interrupt_cooldown_until = (
+                time.monotonic() + BOT_INTERRUPT_CHECK_INTERVAL_SEC
+            )
         except queue.Full:
             pass
 
@@ -566,9 +617,9 @@ class STTEngine:
         if full_text:
             lowered = full_text.lower()
             backchannel_patterns = [
-                r'^(yeah|yes|yep|yup|okay|ok|mhm|mmhmm|uh-huh|mm-hmm|right|sure|got it)$',
-                r'^(yeah|yes|yep|yup|okay|ok|mhm|mmhmm|uh-huh|mm-hmm|right|sure|got it)[\.!\?]*$',
-                r'^(yeah yeah|ok ok|yes yes)$',
+                r'^(yeah|yes|yep|yup|mhm|mmhmm|uh-huh|mm-hmm|right|got it)$',
+                r'^(yeah|yes|yep|yup|mhm|mmhmm|uh-huh|mm-hmm|right|got it)[\.!\?]*$',
+                r'^(yeah yeah|yes yes)$',
             ]
             if any(re.match(p, lowered) for p in backchannel_patterns):
                 print(f"\n[BACKCHANNEL FILTERED]: '{full_text}' (ignored - not a real turn)")

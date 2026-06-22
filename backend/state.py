@@ -25,6 +25,12 @@ class AgentState:
         # transcript for this session.  stt_engine.transcribe_buffer() checks
         # this to avoid double-sending the same utterance to the LLM queue.
         self.last_recall_transcript_time: float = 0.0
+        # Last time candidate speech was committed (monotonic) — silence watcher.
+        self.last_candidate_speech_at: float = 0.0
+        self.last_playback_done_at: float = 0.0
+        self.pending_presence_check: bool = False
+        # Optional hook set by SessionManager — cancels post-TTS silence watcher.
+        self.on_candidate_speech = None
 
         # Structured interview orchestrator (set on /api/start).
         self.interview_orchestrator = None

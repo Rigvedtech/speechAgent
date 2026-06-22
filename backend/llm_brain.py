@@ -12,12 +12,17 @@ from interview_engine import (
     EVALUATOR_SYSTEM_PROMPT,
     EvaluationResult,
     InterviewPhase,
+    ProgressCheckPayload,
     TurnAction,
     TurnDecision,
     TurnIntent,
+    detect_explicit_question_repeat,
+    detect_inability_answer,
+    detect_presence_confirm,
     detect_turn_intent_fallback,
 )
 from transcript_utils import normalize_candidate_name
+from transcript_log import log_transcript
 
 logger = logging.getLogger(__name__)
 
@@ -71,19 +76,70 @@ _CLASSIFY_TURN_SYSTEM = (
     "Intent values:\n"
     "- actual_answer: substantive answer attempt (technical content, explanation)\n"
     "- repeat_last: wants the LAST thing the interviewer said repeated "
-    "(e.g. didn't catch it, say again, audio unclear, repeat the question, pardon, "
-    "come again, what did you say, missed part of it)\n"
+    "(e.g. didn't catch it, say again, audio unclear, pardon, come again, "
+    "what did you say, missed part of it). NOT when they say they don't know.\n"
     "- rephrase_last: wants the LAST thing said in simpler/clearer words "
     "(didn't understand, rephrase, explain differently, slower, simpler)\n"
-    "- repeat_main: explicitly wants the ORIGINAL main interview question "
-    "(main question, original question, go back to the interview question)\n"
+    "- repeat_main: wants the CURRENT main interview question repeated "
+    "(repeat the question, say the question again, what was the question, "
+    "main/original interview question, go back to the question)\n"
     "- continue_answer: mid-answer fragment that trails off and needs prompting to continue\n\n"
     "Rules:\n"
-    "- Default repeat/rephrase requests to repeat_last or rephrase_last — NOT repeat_main.\n"
+    "- 'Repeat the question' / 'what was the question' → repeat_main (current question).\n"
+    "- 'Sorry, I don't know / can't remember / can't recall / no answer' → actual_answer "
+    "(NOT repeat_last — they are declining to answer).\n"
     "- If awaiting_clarifier_reply is true, repeat_last/rephrase_last refer to the clarifier.\n"
-    "- Only use repeat_main when they clearly ask for the main/original interview question.\n"
-    "- Polite phrases (sorry, excuse me) with repeat/rephrase intent → repeat_last or rephrase_last.\n"
+    "- Polite 'sorry' WITH explicit repeat/rephrase intent → repeat_main or rephrase_last.\n"
+    "- Polite 'sorry' WITH inability (don't know, can't recall) → actual_answer.\n"
     "- If they give technical content, choose actual_answer even if short."
+)
+
+_PROGRESS_GATE_SYSTEM = (
+    "You are a technical interviewer monitoring a LIVE answer still in progress.\n"
+    "You do NOT score yet. Judge only whether the candidate is on-track.\n"
+    "Return ONLY valid JSON: {\"verdict\": \"ON_TRACK|DRAG|UNCLEAR\", "
+    "\"confidence\": 0.0-1.0, \"reason\": \"one sentence\"}\n\n"
+    "ON_TRACK = addressing the question with real technical content, examples, "
+    "mechanisms, or structured explanation (even if incomplete).\n"
+    "DRAG = mostly filler, repetition, vague generalities, or off-topic talk "
+    "that doesn't answer what was asked — including related-but-wrong topics "
+    "(e.g. Node.js runtime/V8 when the question is middleware in Express).\n"
+    "UNCLEAR = not enough signal yet; use only in the first ~15 seconds.\n\n"
+    "Rules:\n"
+    "- After 20+ seconds, do NOT stay UNCLEAR if they discuss a different topic "
+    "than the question — use DRAG with confidence >= 0.75.\n"
+    "- Related stack talk (Node, Express setup) without answering the specific "
+    "question counts as DRAG, not ON_TRACK.\n"
+    "- Early strong on-topic content counts; recent wandering may still be ON_TRACK.\n"
+    "- Do NOT penalise length alone — long on-topic answers are fine.\n"
+    "- Ignore STT noise/garbled tokens unless the whole answer lacks substance.\n"
+    "- Return DRAG when confident the answer is not addressing what was asked."
+)
+
+_PROGRESS_TOPIC_STOPWORDS = frozenset({
+    "what", "when", "where", "your", "about", "explain", "describe", "tell",
+    "would", "could", "should", "have", "with", "that", "this", "from", "they",
+    "their", "there", "been", "being", "into", "through", "between", "using",
+    "give", "role", "basics", "start", "question", "application", "project",
+})
+
+_RUNTIME_DRIFT_PATTERN = re.compile(
+    r"\b(node\.?js|nodejs|note\s*gs|v8|runtime|javascript engine|c\+\+)\b",
+    re.IGNORECASE,
+)
+_MIDDLEWARE_ON_TOPIC_PATTERN = re.compile(
+    r"\b(middleware|next\s*\(|req\.|res\.|request.{0,20}response|"
+    r"logging|authentication|auth)\b",
+    re.IGNORECASE,
+)
+_UNCLEAR_OFF_TOPIC_MARKERS = (
+    "hasn't addressed",
+    "has not addressed",
+    "without middleware",
+    "node.js",
+    "runtime environment",
+    "off-topic",
+    "not addressed",
 )
 
 
@@ -458,6 +514,14 @@ class LLMBrain:
                 len(merged),
             )
 
+        if orch.drag_strikes > 0:
+            logger.info(
+                "[EVALUATOR] Q%d drag_strikes=%d progress_checks=%d",
+                orch.current_index + 1,
+                orch.drag_strikes,
+                len(orch.progress_checks),
+            )
+
         user_content = (
             f"{context_block}\n\n"
             f"Candidate answer:\n{merged}"
@@ -512,6 +576,8 @@ class LLMBrain:
         orch = self.state.interview_orchestrator
 
         if spoken:
+            bot_id = orch.bot_id if orch else None
+            log_transcript(bot_id, "assistant", spoken)
             self.state.tts_queue.put(spoken)
             self.conversation_history.append({"role": "assistant", "content": spoken})
             if orch and getattr(decision, "spoken_kind", None) in ("main", "clarifier"):
@@ -555,6 +621,11 @@ class LLMBrain:
         orch = self.state.interview_orchestrator
         if not orch:
             return TurnIntent.ACTUAL_ANSWER.value
+
+        if detect_inability_answer(user_text):
+            return TurnIntent.ACTUAL_ANSWER.value
+        if detect_explicit_question_repeat(user_text):
+            return TurnIntent.REPEAT_MAIN.value
 
         ctx = orch.classification_context()
         fallback = detect_turn_intent_fallback(
@@ -674,9 +745,32 @@ class LLMBrain:
             return True
 
         if orch.phase == InterviewPhase.CORE:
-            intent = TurnIntent.ACTUAL_ANSWER.value
-            if self._should_classify_turn(user_text):
+            if self.state.pending_presence_check and detect_presence_confirm(user_text):
+                self.state.pending_presence_check = False
+                decision = TurnDecision(
+                    action=TurnAction.SPEAK,
+                    spoken_text="Great, please go ahead with your answer when you're ready.",
+                    should_continue=True,
+                    spoken_kind="prompt",
+                )
+                self._emit_orchestrated_turn(decision)
+                return True
+
+            checkin = orch.try_handle_continuation_checkin(user_text)
+            if checkin is not None:
+                self._emit_orchestrated_turn(checkin)
+                return True
+
+            if detect_inability_answer(user_text):
+                intent = TurnIntent.ACTUAL_ANSWER.value
+            elif detect_explicit_question_repeat(user_text):
+                if self._apply_intent_decision(TurnIntent.REPEAT_MAIN.value):
+                    return True
+                return True
+            elif self._should_classify_turn(user_text):
                 intent = self._classify_turn_intent(user_text)
+            else:
+                intent = TurnIntent.ACTUAL_ANSWER.value
 
             if intent != TurnIntent.ACTUAL_ANSWER.value:
                 if self._apply_intent_decision(intent):
@@ -774,6 +868,126 @@ class LLMBrain:
                 return True
         return False
 
+    @staticmethod
+    def _question_topic_tokens(question_text: str) -> set:
+        words = re.findall(r"\b\w{4,}\b", (question_text or "").lower())
+        return {w for w in words if w not in _PROGRESS_TOPIC_STOPWORDS}
+
+    @staticmethod
+    def _progress_checks_suggest_off_topic(progress_checks: list) -> bool:
+        unclear = [e for e in progress_checks if e.get("verdict") == "UNCLEAR"]
+        if len(unclear) < config.PROGRESS_GATE_UNCLEAR_ESCALATION_CHECKS:
+            return False
+        recent = unclear[-config.PROGRESS_GATE_UNCLEAR_ESCALATION_CHECKS:]
+        for entry in recent:
+            reason = (entry.get("reason") or "").lower()
+            if not any(marker in reason for marker in _UNCLEAR_OFF_TOPIC_MARKERS):
+                return False
+        return recent[-1].get("speech_sec", 0) >= config.PROGRESS_GATE_LONG_ANSWER_SEC - 5
+
+    def _evaluate_answer_progress(
+        self, payload: ProgressCheckPayload, question_text: str
+    ) -> dict:
+        """Layered depth-vs-drag gate for mid-answer progress checks."""
+        default = {"verdict": "UNCLEAR", "confidence": 0.0, "reason": "default"}
+
+        q_words = self._question_topic_tokens(question_text)
+        partial_lower = payload.full_partial.lower()
+        full_words = set(re.findall(r"\b\w{4,}\b", partial_lower))
+        overlap = len(q_words & full_words)
+        structure_words = (
+            "because", "therefore", "for example", "first", "then",
+            "finally", "specifically", "in my project", "we used",
+        )
+        has_structure = any(w in partial_lower for w in structure_words)
+        word_count = len(payload.full_partial.split())
+
+        if overlap >= config.PROGRESS_GATE_MIN_TOPIC_OVERLAP and has_structure and word_count >= 20:
+            return {
+                "verdict": "ON_TRACK",
+                "confidence": 0.85,
+                "reason": "rule: on-topic with structure",
+            }
+        if word_count < 15:
+            return {
+                "verdict": "UNCLEAR",
+                "confidence": 0.5,
+                "reason": "rule: too short to judge",
+            }
+
+        if (
+            payload.speech_sec >= config.PROGRESS_GATE_LONG_ANSWER_SEC
+            and word_count >= 25
+            and overlap < config.PROGRESS_GATE_MIN_TOPIC_OVERLAP
+        ):
+            return {
+                "verdict": "DRAG",
+                "confidence": 0.78,
+                "reason": "rule: long answer with low question-topic overlap",
+            }
+
+        q_lower = question_text.lower()
+        if "middleware" in q_lower and payload.speech_sec >= 20 and word_count >= 20:
+            if (
+                _RUNTIME_DRIFT_PATTERN.search(partial_lower)
+                and not _MIDDLEWARE_ON_TOPIC_PATTERN.search(partial_lower)
+            ):
+                return {
+                    "verdict": "DRAG",
+                    "confidence": 0.82,
+                    "reason": "rule: runtime/engine talk without middleware content",
+                }
+
+        if not GROQ_API_KEY:
+            return default
+
+        try:
+            from groq import Groq
+            client = Groq(api_key=GROQ_API_KEY)
+            user_content = (
+                f"Interview question:\n{question_text}\n\n"
+                f"Full partial (since answer started):\n{payload.full_partial[:800]}\n\n"
+                f"Recent segment (last ~10s):\n{payload.recent_segment[:300]}\n\n"
+                f"Duration: {payload.speech_sec:.0f}s | Words: {word_count} | "
+                f"Check #{payload.check_num}"
+            )
+            completion = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[
+                    {"role": "system", "content": _PROGRESS_GATE_SYSTEM},
+                    {"role": "user", "content": user_content},
+                ],
+                max_tokens=60,
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+            raw = (completion.choices[0].message.content or "").strip()
+            data = json.loads(raw)
+            return data if "verdict" in data else default
+        except Exception as ex:
+            logger.warning("[PROGRESS GATE] LLM failed: %s", ex)
+            return default
+
+    def _force_complete_from_drag(self, full_partial: str) -> None:
+        """Score and advance after repeated drag strikes during mid-answer check."""
+        orch = self.state.interview_orchestrator
+        question = orch.get_current_question() if orch else None
+        if not orch or not question:
+            return
+
+        if not orch._answer_initial_partial:
+            orch._answer_initial_partial = full_partial.strip()
+
+        evaluation = self._evaluate_answer(full_partial, question)
+        decision = orch.force_complete_question(full_partial, evaluation)
+        self._emit_orchestrated_turn(decision)
+        logger.info(
+            "[FORCE COMPLETE] bot=%s Q%d drag_strikes=%d emitted",
+            orch.bot_id[:8] if orch.bot_id else "?",
+            orch.current_index,
+            orch.drag_strikes,
+        )
+
     def _generate_simpler_question(self, question_text: str) -> Optional[str]:
         """Rewrite current question in simpler words for rephrase meta-requests."""
         q = (question_text or "").strip()
@@ -819,8 +1033,11 @@ class LLMBrain:
             return None
         return raw
 
-    def _handle_bot_interrupt_partial(self, partial_text: str) -> None:
-        """Bot interrupts long user answer with a short clarifying question."""
+    def _handle_bot_interrupt_partial(self, payload) -> None:
+        """Mid-answer depth-vs-drag progress gate (15s start, 10s interval)."""
+        if not isinstance(payload, ProgressCheckPayload):
+            return
+
         orch = self.state.interview_orchestrator
         if orch is None or self.state.interview_ended.is_set():
             return
@@ -828,39 +1045,70 @@ class LLMBrain:
             return
         if orch.awaiting_clarifier_reply:
             return
-        if orch.clarifier_limit_reached():
-            logger.info(
-                "[BOT INTERRUPT] bot=%s Q%d clarifier cap reached (%d/%d) — skipping",
-                orch.bot_id[:8] if orch.bot_id else "?",
-                orch.current_index + 1,
-                orch.clarifier_count_this_question,
-                config.BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q,
-            )
-            return
 
         q = orch.get_current_question()
         if not q:
             return
 
-        clarifier = self._generate_clarifier_question(partial_text, q.question)
-        if not clarifier:
-            logger.debug("[BOT INTERRUPT] SKIP — no clarifier needed for partial=%r", partial_text[:60])
-            return
+        if not orch._answer_initial_partial:
+            orch._answer_initial_partial = payload.full_partial.strip()
+
+        gate = self._evaluate_answer_progress(payload, q.question)
+        verdict = gate.get("verdict", "UNCLEAR")
+        confidence = float(gate.get("confidence", 0.0))
+        reason = gate.get("reason", "")
+
+        if verdict == "UNCLEAR" and payload.speech_sec >= config.PROGRESS_GATE_LONG_ANSWER_SEC - 5:
+            trial_checks = list(orch.progress_checks) + [{
+                "verdict": verdict,
+                "reason": reason,
+                "speech_sec": payload.speech_sec,
+            }]
+            if self._progress_checks_suggest_off_topic(trial_checks):
+                verdict = "DRAG"
+                confidence = max(confidence, config.BOT_INTERRUPT_GATE_MIN_CONFIDENCE)
+                reason = f"escalated: repeated UNCLEAR off-topic ({reason})"
+                logger.info(
+                    "[PROGRESS GATE] bot=%s Q%d check#%d escalated UNCLEAR→DRAG",
+                    orch.bot_id[:8] if orch.bot_id else "?",
+                    orch.current_index + 1,
+                    payload.check_num,
+                )
+
+        new_strikes = orch.record_progress_check(
+            payload.check_num, verdict, confidence, reason, payload.speech_sec
+        )
 
         logger.info(
-            "[BOT INTERRUPT] bot=%s Q%d clarifier=%d/%d asked=%r",
+            "[PROGRESS GATE] bot=%s Q%d check#%d verdict=%s confidence=%.2f reason=%r",
             orch.bot_id[:8] if orch.bot_id else "?",
             orch.current_index + 1,
-            orch.clarifier_count_this_question + 1,
-            config.BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q,
-            clarifier,
+            payload.check_num,
+            verdict,
+            confidence,
+            reason,
         )
-        orch.mark_clarifier_asked(partial_text, clarifier_q=clarifier)
-        self.state.clear_stt_buffer.set()
-        self.state.tts_queue.put(clarifier)
-        self.state.tts_queue.put("<END_OF_TURN>")
-        print(f"\n[Bot interrupt Q{orch.current_index + 1}]: {clarifier}")
-        print("--- READY: START SPEAKING ---")
+
+        if verdict != "DRAG" or confidence < config.BOT_INTERRUPT_GATE_MIN_CONFIDENCE:
+            return
+
+        if new_strikes == 1:
+            nudge = (
+                "I notice we're going a bit off-track — "
+                "could you bring it back to the question?"
+            )
+            log_transcript(orch.bot_id, "assistant", nudge)
+            self.state.tts_queue.put(nudge)
+            self.state.tts_queue.put("<END_OF_TURN>")
+            logger.info(
+                "[NUDGE] bot=%s Q%d strike=1",
+                orch.bot_id[:8] if orch.bot_id else "?",
+                orch.current_index + 1,
+            )
+            return
+
+        if new_strikes >= config.BOT_INTERRUPT_DRAG_STRIKES_MAX:
+            self._force_complete_from_drag(payload.full_partial)
 
     def start(self):
         """Worker loop for LLM response generation."""
@@ -896,7 +1144,9 @@ class LLMBrain:
                 if self.state.interview_ended.is_set():
                     continue
 
-                print(f"\n[You]: {user_text}")
+                orch = self.state.interview_orchestrator
+                bot_id = orch.bot_id if orch else None
+                log_transcript(bot_id, "user", user_text)
 
                 wrapped_user = self._wrap_candidate_speech(user_text)
                 self.conversation_history.append({"role": "user", "content": wrapped_user})

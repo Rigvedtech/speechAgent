@@ -400,7 +400,7 @@ class SarvamTTSEngine:
                 }
                 
                 logger.info(
-                    f"[SARVAM TTS] Speaking ({i+1}/{len(chunks)}): '{chunk[:50]}{'...' if len(chunk) > 50 else ''}'"
+                    f"[SARVAM TTS] Speaking ({i+1}/{len(chunks)}): '{chunk}'"
                 )
                 
                 stt_start_time = time.time()

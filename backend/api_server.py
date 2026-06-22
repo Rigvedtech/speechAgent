@@ -24,6 +24,7 @@ from recall_bot_service import (
 )
 from session_manager import SessionManager
 from audio_receiver import AudioReceiver
+from transcript_log import log_transcript
 import config as app_config
 import ws_hub
 
@@ -146,13 +147,9 @@ async def audio_stream_ws(websocket: WebSocket, page_session_id: str):
                     msg = _json.loads(data)
                     if msg.get('type') == 'playback_done':
                         # Browser ring buffer drained — audio has finished playing.
-                        # Unblock STT immediately so the user's next words are heard.
                         session = session_manager.get_session(bot_id)
                         if session:
-                            session.state.is_ai_speaking.clear()
-                            logger.info(
-                                f"[audio-stream] playback_done — STT unblocked for bot {bot_id[:8]}…"
-                            )
+                            session_manager.on_playback_done(session)
                     # pong and unknown messages are silently ignored
                 except Exception:
                     pass
@@ -472,6 +469,7 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
             )
 
             session.state.is_started.set()
+            log_transcript(bot_id, "assistant", greeting_text)
             session.state.tts_queue.put(greeting_text)
             session.state.tts_queue.put("<END_OF_TURN>")
 

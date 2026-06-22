@@ -22,7 +22,15 @@ from integrated_audio_sender import IntegratedAudioSender
 from webrtc_stream_manager import WebRTCStreamManager
 import config
 
+from transcript_log import close_session, log_transcript, start_session
+
 logger = logging.getLogger(__name__)
+
+_PRESENCE_PHRASES = (
+    "Can you hear me clearly?",
+    "Just checking — are you still there?",
+    "Take your time. Can you hear me okay?",
+)
 
 
 @dataclass
@@ -45,6 +53,10 @@ class MeetingSession:
     _speaking_fallback_task: Optional[asyncio.Task] = None
     # Sarvam STT engine (primary) — None when Sarvam is disabled or unavailable
     sarvam_stt_engine: Optional[object] = None
+    # Post-playback silence watcher — fires "can you hear me?" after quiet period
+    _silence_watch_task: Optional[asyncio.Task] = None
+    _presence_checks_this_question: int = 0
+    _presence_check_q_index: int = -1
 
     def __post_init__(self):
         """Initialize processing components that don't need Sarvam config."""
@@ -120,6 +132,8 @@ class SessionManager:
             if session:
                 session.is_active = False
                 session.state.is_running = False
+                self.cancel_silence_check(session)
+                close_session(bot_id)
                 del self.sessions[bot_id]
                 logger.info(f"Removed stale local session for bot {bot_id[:8]}")
             if self.meeting_to_bot.get(key) == bot_id:
@@ -223,6 +237,7 @@ class SessionManager:
                 logger.info(f"Bot {bot_id[:8]} Sarvam STT session loop starting in background")
 
             session.stt_engine = STTEngine(session.state, sarvam_engine=sarvam_stt)
+            session.state.on_candidate_speech = lambda s=session: self.on_candidate_speech(s)
 
             if config.STT_FALLBACK_ENABLED and config.WHISPER_PRELOAD_ENABLED:
                 threading.Thread(
@@ -279,6 +294,7 @@ class SessionManager:
             # Update mapping from "CREATING" placeholder to actual bot_id
             meeting_key = normalize_meeting_url(meeting_url)
             self.meeting_to_bot[meeting_key] = bot_id
+            start_session(bot_id)
             
             logger.info(
                 f"Session {bot_id} created for meeting "
@@ -389,6 +405,7 @@ class SessionManager:
                     if session._speaking_fallback_task:
                         session._speaking_fallback_task.cancel()
                         session._speaking_fallback_task = None
+                    self.cancel_silence_check(session)
                     # Tell the browser to flush its ring buffer immediately
                     if (session.use_webpage
                             and session.audio_sender
@@ -403,6 +420,7 @@ class SessionManager:
                     if batch_turns and turn_sentences and session.audio_sender:
                         full_text = " ".join(turn_sentences)
                         turn_sentences.clear()
+                        self.cancel_silence_check(session)
                         session.state.is_ai_speaking.set()
                         logger.info(
                             f"Bot {session.bot_id[:8]} speaking full turn "
@@ -438,6 +456,14 @@ class SessionManager:
                         # File-upload / batch mode: no browser feedback — clear after brief delay
                         await asyncio.sleep(0.3)
                         session.state.is_ai_speaking.clear()
+                        session.state.last_playback_done_at = time.monotonic()
+                        if config.POST_TTS_SILENCE_CHECK_ENABLED:
+                            self.cancel_silence_check(session)
+                            session._silence_watch_task = asyncio.ensure_future(
+                                self._run_silence_check(
+                                    session, config.POST_TTS_SILENCE_CHECK_SEC
+                                )
+                            )
 
                     # Proactively ensure Sarvam TTS is still connected while the bot is
                     # idle (between turns).  The keepalive task handles this when the
@@ -467,6 +493,7 @@ class SessionManager:
                     continue
                 
                 # WebRTC mode: stream each sentence immediately for lower latency
+                self.cancel_silence_check(session)
                 session.state.is_ai_speaking.set()
                 
                 if session.audio_sender:
@@ -530,6 +557,119 @@ class SessionManager:
                 )
         except asyncio.CancelledError:
             pass  # cancelled by interrupt or by playback_done handler — normal path
+
+    def _sync_presence_question_index(self, session: MeetingSession) -> None:
+        orch = session.state.interview_orchestrator
+        if not orch:
+            return
+        idx = orch.current_index
+        if idx != session._presence_check_q_index:
+            session._presence_checks_this_question = 0
+            session._presence_check_q_index = idx
+
+    def cancel_silence_check(self, session: MeetingSession) -> None:
+        task = session._silence_watch_task
+        if task and not task.done():
+            task.cancel()
+        session._silence_watch_task = None
+
+    def _candidate_is_silent(self, session: MeetingSession, since: float) -> bool:
+        stt = session.stt_engine
+        if stt and getattr(stt, "is_recording", False):
+            return False
+        last_speech = session.state.last_candidate_speech_at
+        if last_speech and last_speech >= since:
+            return False
+        if not session.state.llm_queue.empty():
+            return False
+        return True
+
+    async def _run_silence_check(self, session: MeetingSession, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+            if not session.is_active or session.state.interview_ended.is_set():
+                return
+            if session.state.is_ai_speaking.is_set():
+                return
+
+            orch = session.state.interview_orchestrator
+            if orch is None:
+                return
+            from interview_engine import InterviewPhase
+            if orch.phase != InterviewPhase.CORE:
+                return
+
+            self._sync_presence_question_index(session)
+            if session._presence_checks_this_question >= config.MAX_PRESENCE_CHECKS_PER_QUESTION:
+                return
+
+            since = session.state.last_playback_done_at
+            if not since or not self._candidate_is_silent(session, since):
+                return
+
+            import random
+            phrase = random.choice(_PRESENCE_PHRASES)
+            session._presence_checks_this_question += 1
+            session.state.pending_presence_check = True
+            log_transcript(session.bot_id, "assistant", phrase)
+            session.state.tts_queue.put(phrase)
+            session.state.tts_queue.put("<END_OF_TURN>")
+            logger.info(
+                "[PRESENCE CHECK] bot=%s Q%d check=%d/%d",
+                session.bot_id[:8],
+                orch.current_index + 1,
+                session._presence_checks_this_question,
+                config.MAX_PRESENCE_CHECKS_PER_QUESTION,
+            )
+        except asyncio.CancelledError:
+            pass
+        finally:
+            session._silence_watch_task = None
+
+    def schedule_silence_check(
+        self,
+        session: MeetingSession,
+        delay: Optional[float] = None,
+    ) -> None:
+        if not config.POST_TTS_SILENCE_CHECK_ENABLED:
+            return
+        if session.state.interview_ended.is_set():
+            return
+        orch = session.state.interview_orchestrator
+        if orch is None:
+            return
+        from interview_engine import InterviewPhase
+        if orch.phase != InterviewPhase.CORE:
+            return
+
+        loop = config.main_event_loop
+        if not loop or not loop.is_running():
+            return
+
+        self.cancel_silence_check(session)
+        wait = delay if delay is not None else config.POST_TTS_SILENCE_CHECK_SEC
+
+        def _create_task() -> None:
+            session._silence_watch_task = asyncio.ensure_future(
+                self._run_silence_check(session, wait)
+            )
+
+        loop.call_soon_threadsafe(_create_task)
+
+    def on_playback_done(self, session: MeetingSession) -> None:
+        """Called when browser finishes playing bot audio — start silence watcher."""
+        session.state.is_ai_speaking.clear()
+        session.state.last_playback_done_at = time.monotonic()
+        self.schedule_silence_check(session)
+        logger.info(
+            f"[audio-stream] playback_done — STT unblocked for bot {session.bot_id[:8]}…"
+        )
+
+    def on_candidate_speech(self, session: MeetingSession) -> None:
+        """Track candidate activity and cancel pending silence check."""
+        session.state.last_candidate_speech_at = time.monotonic()
+        session.state.pending_presence_check = False
+        self.cancel_silence_check(session)
 
     def handle_audio_chunk(self, bot_id: str, audio_array: np.ndarray):
         """
@@ -641,6 +781,7 @@ class SessionManager:
         # Mark the time so stt_engine.transcribe_buffer() can detect the
         # duplicate and skip running Whisper / Sarvam on the same audio.
         session.state.last_recall_transcript_time = time.monotonic()
+        self.on_candidate_speech(session)
 
         logger.info(f"\n[RECALL TRANSCRIPT] '{text}'")
         session.state.llm_queue.put(text)
@@ -674,6 +815,8 @@ class SessionManager:
                 return
             
             logger.info(f"Ending session for bot {bot_id}")
+            self.cancel_silence_check(session)
+            close_session(bot_id)
             
             # Mark as inactive
             session.is_active = False

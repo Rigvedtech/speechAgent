@@ -110,9 +110,21 @@ _REPEAT_INTENT = re.compile(
     r"|".join([
         r"\b(repeat|say\s+again|come\s+again|pardon)\b",
         r"\bcan\s+you\s+repeat\b",
-        r"\brepeat\s+the\s+question\b",
+        r"\brepeat\s+(the|that)\s+question\b",
         r"\bwhat\s+was\s+the\s+question\b",
         r"\bsay\s+the\s+question\s+again\b",
+    ]),
+    re.IGNORECASE,
+)
+
+_EXPLICIT_QUESTION_REPEAT = re.compile(
+    r"|".join([
+        r"\brepeat\s+(the|that)\s+question\b",
+        r"\bwhat\s+was\s+the\s+question\b",
+        r"\bsay\s+the\s+question\s+again\b",
+        r"\bcan\s+you\s+repeat\s+(the|that)\s+question\b",
+        r"\b(didn'?t|don'?t)\s+(get|catch)\s+(it|that)\b",
+        r"\bmissed\s+(the\s+)?question\b",
     ]),
     re.IGNORECASE,
 )
@@ -136,6 +148,31 @@ _INCOMPLETE_TRAILING = re.compile(
     re.IGNORECASE,
 )
 
+# Short but complete answers — must not trigger "Please continue your answer."
+_SHORT_COMPLETE_ANSWER = re.compile(
+    r"|".join([
+        r"\bno\b.*\bnot\b",
+        r"\bit'?s\s+not\b",
+        r"\bnot\s+(difficult|hard|easy|simple|complex)\b",
+        r"\b(yes|yeah|yep|yup|correct|right|sure|absolutely)\b",
+        r"\bi\s+(can|do|have|would|will)\b",
+        r"\bthat'?s\s+(correct|right|fine|okay|ok)\b",
+    ]),
+    re.IGNORECASE,
+)
+
+_CONTINUATION_CHECKIN = re.compile(
+    r"|".join([
+        r"^(hello|hi|hey)[\.!\?]?$",
+        r"^(okay|ok|sure)[\.!\?]?$",
+        r"\bcan\s+you\s+hear\s+me\b",
+        r"\bare\s+you\s+there\b",
+        r"\bexcuse\s+me\b",
+        r"^(sorry|thank\s*(you|u)|thanks)[\.!\?]?$",
+    ]),
+    re.IGNORECASE,
+)
+
 _CLARIFIER_CONFUSION = re.compile(
     r"|".join([
         r"\bsorry\b",
@@ -155,7 +192,10 @@ _INABILITY_PATTERNS = re.compile(
         r"\b(don'?t|do\s+not)\s+(know|remember)\b",
         r"\bno\s+idea\b",
         r"\bnot\s+sure\b",
-        r"\bcan'?t\s+remember\b",
+        r"\bcan'?t\s+(remember|recall)\b",
+        r"\b(don'?t|do\s+not)\s+have\s+(an?\s+)?answer\b",
+        r"\bno\s+answer\b",
+        r"\bnot\s+able\s+to\s+answer\b",
         r"\bhaven'?t\s+(used|worked)\b",
     ]),
     re.IGNORECASE,
@@ -239,6 +279,15 @@ class TurnDecision:
     spoken_kind: Optional[str] = None
 
 
+@dataclass
+class ProgressCheckPayload:
+    """Mid-answer progress gate input — queued from STT to LLM worker."""
+    full_partial: str
+    recent_segment: str
+    speech_sec: float
+    check_num: int
+
+
 def normalize_difficulty(raw: str) -> str:
     key = (raw or "").strip().lower()
     return _DIFFICULTY_ALIASES.get(key, raw.strip().title() if raw else "Low")
@@ -251,6 +300,57 @@ def _source_bucket(source: str) -> str:
     if "jd" in s or "job" in s:
         return "jd"
     return "other"
+
+
+def _normalize_question_text(text: str) -> str:
+    """Normalize question text for duplicate detection in the question plan."""
+    t = (text or "").strip().lower()
+    t = re.sub(r"[^\w\s]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def detect_explicit_question_repeat(text: str) -> bool:
+    """True when the candidate wants the current interview question repeated."""
+    t = (text or "").strip()
+    if not t or len(t) > 120:
+        return False
+    if detect_inability_answer(t):
+        return False
+    return bool(_EXPLICIT_QUESTION_REPEAT.search(t))
+
+
+_SHORT_IMMEDIATE_TURN = re.compile(
+    r"|".join([
+        r"\bsorry\b",
+        r"\bthank\s*(you|u)\b",
+        r"\bthanks\b",
+        r"\bcan\s+you\s+hear\s+me\b",
+        r"\bare\s+you\s+there\b",
+        r"\bexcuse\s+me\b",
+        r"\bhello\b",
+        r"\bhi\b",
+    ]),
+    re.IGNORECASE,
+)
+
+
+def should_commit_short_turn_immediately(text: str) -> bool:
+    """
+    Short complete utterances that must reach the LLM without TURN MERGE hold.
+    Covers meta-requests, inability, and social/check-in phrases.
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 120:
+        return False
+    if detect_inability_answer(t):
+        return True
+    if detect_explicit_question_repeat(t):
+        return True
+    if detect_meta_intent(t):
+        return True
+    if _SHORT_IMMEDIATE_TURN.search(t):
+        return True
+    return False
 
 
 def detect_abuse(text: str) -> bool:
@@ -267,6 +367,8 @@ def detect_meta_intent(text: str) -> Optional[str]:
         return None
     # Meta intents are usually short; long answers are treated as normal turns.
     if len(t) > 120:
+        return None
+    if detect_inability_answer(t):
         return None
     if _REPHRASE_INTENT.search(t):
         return "rephrase"
@@ -305,7 +407,7 @@ def detect_turn_intent_fallback(text: str, awaiting_clarifier: bool) -> str:
         return TurnIntent.ACTUAL_ANSWER.value
     if detect_inability_answer(t):
         return TurnIntent.ACTUAL_ANSWER.value
-    if _EXPLICIT_MAIN_QUESTION.search(t):
+    if detect_explicit_question_repeat(t) or _EXPLICIT_MAIN_QUESTION.search(t):
         return TurnIntent.REPEAT_MAIN.value
     meta = detect_meta_intent(t)
     if meta == "rephrase":
@@ -317,6 +419,53 @@ def detect_turn_intent_fallback(text: str, awaiting_clarifier: bool) -> str:
     return TurnIntent.ACTUAL_ANSWER.value
 
 
+def detect_short_complete_answer(text: str) -> bool:
+    """True when a short utterance is a complete thought, not a cut-off fragment."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _SHORT_COMPLETE_ANSWER.search(t):
+        return True
+    words = [w for w in re.split(r"\s+", t) if w]
+    if len(words) >= config.MIN_SHORT_COMPLETE_WORDS and re.search(
+        r'[.!?]["\']?\s*$', t
+    ):
+        return True
+    return False
+
+
+def detect_continuation_checkin(text: str) -> bool:
+    """Social / check-in phrase after we asked the candidate to continue."""
+    t = (text or "").strip()
+    if not t or len(t) > 60:
+        return False
+    if _CONTINUATION_CHECKIN.search(t):
+        return True
+    if _SHORT_IMMEDIATE_TURN.search(t) and len(t.split()) <= 4:
+        return True
+    return False
+
+
+_PRESENCE_CONFIRM = re.compile(
+    r"|".join([
+        r"\b(yes|yeah|yep|yup|sure|okay|ok|correct|right|audible)\b",
+        r"\b(i\s+can\s+hear|can\s+hear\s+you|hear\s+you\s+(fine|clearly|okay))\b",
+        r"\b(loud\s+and\s+clear|all\s+good)\b",
+    ]),
+    re.IGNORECASE,
+)
+
+
+def detect_presence_confirm(text: str) -> bool:
+    """Candidate confirms they can hear the bot after a presence check."""
+    t = (text or "").strip()
+    if not t or len(t) > 80:
+        return False
+    if detect_continuation_checkin(t):
+        return True
+    return bool(_PRESENCE_CONFIRM.search(t))
+
+
 def detect_incomplete_answer(text: str) -> bool:
     """True when a CORE-phase answer looks cut off or too short to score."""
     if not config.INCOMPLETE_ANSWER_CHECK_ENABLED:
@@ -325,6 +474,8 @@ def detect_incomplete_answer(text: str) -> bool:
     if not t:
         return True
     if detect_inability_answer(t):
+        return False
+    if detect_short_complete_answer(t):
         return False
     words = [w for w in re.split(r"\s+", t) if w]
     if len(words) < config.MIN_ANSWER_WORDS:
@@ -383,6 +534,7 @@ class QuestionSelector:
 
         selected: List[BankQuestion] = []
         source_toggle = 0
+        used_question_texts: set = set()
 
         for slot_diff in pattern:
             if slot_diff not in buckets:
@@ -390,14 +542,15 @@ class QuestionSelector:
                     f"Question bank missing difficulty '{slot_diff}'."
                 )
             picked = QuestionSelector._pop_from_bucket(
-                buckets[slot_diff], source_toggle
+                buckets[slot_diff], source_toggle, used_question_texts
             )
             if picked is None:
                 raise ValueError(
-                    f"Not enough '{slot_diff}' questions to fill "
+                    f"Not enough unique '{slot_diff}' questions to fill "
                     f"{max_questions} planned slots."
                 )
             selected.append(picked)
+            used_question_texts.add(_normalize_question_text(picked.question))
             source_toggle ^= 1
 
         return selected
@@ -406,13 +559,29 @@ class QuestionSelector:
     def _pop_from_bucket(
         bucket: Dict[str, Deque[BankQuestion]],
         source_toggle: int,
+        used_question_texts: set,
     ) -> Optional[BankQuestion]:
         order = ("jd", "resume", "other") if source_toggle % 2 == 0 else (
             "resume", "jd", "other"
         )
         for src in order:
-            if bucket[src]:
-                return bucket[src].popleft()
+            if not bucket[src]:
+                continue
+            remaining: Deque[BankQuestion] = deque()
+            picked: Optional[BankQuestion] = None
+            while bucket[src]:
+                candidate = bucket[src].popleft()
+                if picked is not None:
+                    remaining.append(candidate)
+                    continue
+                norm = _normalize_question_text(candidate.question)
+                if norm in used_question_texts:
+                    remaining.append(candidate)
+                    continue
+                picked = candidate
+            bucket[src] = remaining
+            if picked is not None:
+                return picked
         return None
 
 
@@ -451,6 +620,11 @@ class InterviewOrchestrator:
     question_rephrase_count: int = 0
     answer_continuation_count: int = 0
     _bridge_index: int = 0
+
+    # Progress gate (depth vs drag) — reset each new main question
+    drag_strikes: int = 0
+    progress_checks: List[dict] = field(default_factory=list)
+    force_completed: bool = False
 
     answer_records: List[AnswerRecord] = field(default_factory=list)
     _rolling: RollingScoreTracker = field(default_factory=lambda: RollingScoreTracker(
@@ -569,17 +743,16 @@ class InterviewOrchestrator:
             return None
 
     def _decision_repeat_last(self) -> TurnDecision:
-        target = self._last_spoken_question
         kind = self._last_spoken_kind or "main"
-        if not target:
-            if self.awaiting_clarifier_reply and self._last_clarifier_question:
-                target = self._last_clarifier_question
-                kind = "clarifier"
-            else:
+        if self.awaiting_clarifier_reply or kind == "clarifier":
+            target = self._last_clarifier_question or self._last_spoken_question
+            if not target:
+                target = self._last_spoken_question
+            if not target:
                 q = self.get_current_question()
-                target = q.question if q else ""
-                kind = "main"
-        if kind == "clarifier":
+                return self._on_repeat_question() if q else TurnDecision(
+                    action=TurnAction.STOP, spoken_text="", should_continue=False
+                )
             logger.info(
                 "[INTENT] bot=%s Q%d repeat_last clarifier",
                 self.bot_id[:8] if self.bot_id else "?",
@@ -592,24 +765,9 @@ class InterviewOrchestrator:
                 should_continue=True,
                 spoken_kind="clarifier",
             )
-        if self.question_repeat_count >= config.MAX_QUESTION_REPEATS:
-            spoken = f"No problem. Let me read the question once more. {target}"
-        else:
-            self.question_repeat_count += 1
-            spoken = f"Sure. The question is: {target}"
-        logger.info(
-            "[INTENT] bot=%s Q%d repeat_last main (%d/%d)",
-            self.bot_id[:8] if self.bot_id else "?",
-            self.current_index + 1,
-            self.question_repeat_count,
-            config.MAX_QUESTION_REPEATS,
-        )
-        return TurnDecision(
-            action=TurnAction.SPEAK,
-            spoken_text=spoken,
-            should_continue=True,
-            spoken_kind="main",
-        )
+
+        # Repeat the current planned question — never the greeting, nudge, or Q1 by mistake.
+        return self._on_repeat_question()
 
     def _decision_rephrase_last(self) -> TurnDecision:
         target = self._last_spoken_question
@@ -660,6 +818,8 @@ class InterviewOrchestrator:
 
             meta = detect_meta_intent(answer_text)
             if meta == "repeat":
+                if detect_inability_answer(answer_text):
+                    return None
                 return self._on_repeat_question()
             if meta == "rephrase":
                 return self._on_rephrase_question()
@@ -672,20 +832,20 @@ class InterviewOrchestrator:
 
         if self.question_repeat_count >= config.MAX_QUESTION_REPEATS:
             logger.info(
-                "[META] bot=%s Q%d repeat limit reached (%d) — re-reading same question",
+                "[META] bot=%s Q%d repeat limit reached (%d) — prompt only, no re-read",
                 self.bot_id[:8] if self.bot_id else "?",
                 self.current_index + 1,
                 config.MAX_QUESTION_REPEATS,
             )
             spoken = (
-                "No problem. Let me read the question once more. "
-                f"{q.question}"
+                "I've already repeated the question a couple of times. "
+                "Please try your best answer when you're ready."
             )
             return TurnDecision(
                 action=TurnAction.SPEAK,
                 spoken_text=spoken,
                 should_continue=True,
-                spoken_kind="main",
+                spoken_kind="prompt",
             )
 
         self.question_repeat_count += 1
@@ -711,17 +871,20 @@ class InterviewOrchestrator:
 
         if self.question_rephrase_count >= config.MAX_QUESTION_REPHRASES:
             logger.info(
-                "[META] bot=%s Q%d rephrase limit reached (%d)",
+                "[META] bot=%s Q%d rephrase limit reached (%d) — prompt only, no re-read",
                 self.bot_id[:8] if self.bot_id else "?",
                 self.current_index + 1,
                 config.MAX_QUESTION_REPHRASES,
             )
-            spoken = f"Let's continue with the question as asked. {q.question}"
+            spoken = (
+                "Let's stick with the question as asked. "
+                "Please go ahead with your answer when you're ready."
+            )
             return TurnDecision(
                 action=TurnAction.SPEAK,
                 spoken_text=spoken,
                 should_continue=True,
-                spoken_kind="main",
+                spoken_kind="prompt",
             )
 
         self.question_rephrase_count += 1
@@ -848,6 +1011,123 @@ class InterviewOrchestrator:
             parts.append(f"Final continuation:\n{final_answer.strip()}")
         return "\n\n".join(parts) if parts else final_answer.strip()
 
+    def record_progress_check(
+        self,
+        check_num: int,
+        verdict: str,
+        confidence: float,
+        reason: str,
+        speech_sec: float,
+    ) -> int:
+        """Log a mid-answer progress gate result; increment drag_strikes when confident DRAG."""
+        with self._lock:
+            entry = {
+                "check_num": check_num,
+                "verdict": verdict,
+                "confidence": confidence,
+                "reason": reason,
+                "speech_sec": speech_sec,
+            }
+            self.progress_checks.append(entry)
+            if (
+                verdict == "DRAG"
+                and confidence >= config.BOT_INTERRUPT_GATE_MIN_CONFIDENCE
+            ):
+                self.drag_strikes += 1
+            return self.drag_strikes
+
+    def build_drag_context(self) -> str:
+        """Multi-line progress gate summary for the evaluator prompt."""
+        if not self.progress_checks:
+            return ""
+        lines = []
+        for entry in self.progress_checks:
+            lines.append(
+                f"Check {entry['check_num']} at {entry['speech_sec']:.0f}s: "
+                f"{entry['verdict']} (confidence={entry['confidence']:.2f}) — "
+                f"{entry['reason']}"
+            )
+        if self.force_completed or self.drag_strikes >= config.BOT_INTERRUPT_DRAG_STRIKES_MAX:
+            lines.append("Force-completed: yes (candidate went off-topic after repeated drag)")
+        return "\n".join(lines)
+
+    def force_complete_question(
+        self,
+        answer_text: str,
+        evaluation: EvaluationResult,
+    ) -> TurnDecision:
+        """End current question early after repeated drag — score and advance."""
+        with self._lock:
+            self.force_completed = True
+            if self.phase == InterviewPhase.ENDED:
+                return TurnDecision(
+                    action=TurnAction.STOP,
+                    spoken_text="",
+                    should_continue=False,
+                    stopped_reason=self.stopped_reason,
+                )
+
+            q = self.get_current_question()
+            if not q:
+                return self._complete_all()
+
+            merged_answer = self.build_merged_answer_context(answer_text)
+            record = AnswerRecord(
+                question_index=self.current_index + 1,
+                question_id=q.id,
+                difficulty=q.normalized_difficulty,
+                source=q.source,
+                question_text=q.question,
+                answer_text=merged_answer.strip(),
+                score=evaluation.score,
+                confident=evaluation.confident,
+                relevant=evaluation.relevant,
+                strengths=evaluation.strengths,
+                develop=evaluation.develop,
+                fix=evaluation.fix,
+            )
+            self.answer_records.append(record)
+            self._rolling.push(evaluation.score)
+
+            rolling_avg = self._rolling.average()
+            can_continue = self._rolling.can_continue(config.CONTINUE_AVG_THRESHOLD)
+
+            logger.info(
+                "[FORCE COMPLETE] bot=%s Q%d drag_strikes=%d score=%d",
+                self.bot_id[:8] if self.bot_id else "?",
+                self.current_index + 1,
+                self.drag_strikes,
+                evaluation.score,
+            )
+            self._log_score(record, rolling_avg, can_continue)
+
+            self._reset_clarifier_state()
+
+            if not can_continue:
+                return self._build_stop(
+                    "Thank you for your time today. We'll wrap up here. "
+                    "The team will be in touch with next steps.",
+                    StoppedReason.LOW_ROLLING_AVERAGE,
+                    record,
+                    rolling_avg,
+                )
+
+            self.current_index += 1
+            next_q = self.get_current_question()
+
+            if next_q is None:
+                return self._complete_all(record, rolling_avg)
+
+            spoken = f"Okay, thank you. Let's continue. {next_q.question}"
+            return TurnDecision(
+                action=TurnAction.SPEAK,
+                spoken_text=spoken,
+                score_record=record,
+                rolling_average=rolling_avg,
+                should_continue=True,
+                spoken_kind="main",
+            )
+
     def _reset_clarifier_state(self) -> None:
         """Called when moving to the next main question."""
         self.awaiting_clarifier_reply = False
@@ -856,12 +1136,36 @@ class InterviewOrchestrator:
         self._last_clarifier_question = ""
         self._clarifier_thread = []
         self._answer_initial_partial = ""
+        self.drag_strikes = 0
+        self.progress_checks = []
+        self.force_completed = False
         self._reset_question_meta_state()
 
     def _reset_question_meta_state(self) -> None:
         self.question_repeat_count = 0
         self.question_rephrase_count = 0
         self.answer_continuation_count = 0
+
+    def try_handle_continuation_checkin(self, answer_text: str) -> Optional[TurnDecision]:
+        """Respond to hello/check-in while waiting for a continued answer — do not score."""
+        if self.answer_continuation_count <= 0:
+            return None
+        if self.phase != InterviewPhase.CORE:
+            return None
+        if not detect_continuation_checkin(answer_text):
+            return None
+        logger.info(
+            "[CONTINUATION CHECKIN] bot=%s Q%d text=%r",
+            self.bot_id[:8] if self.bot_id else "?",
+            self.current_index + 1,
+            (answer_text or "")[:80],
+        )
+        return TurnDecision(
+            action=TurnAction.SPEAK,
+            spoken_text="No problem. Please continue with your answer when you're ready.",
+            should_continue=True,
+            spoken_kind="prompt",
+        )
 
     def try_handle_incomplete_answer(self, answer_text: str) -> Optional[TurnDecision]:
         """Ask candidate to continue when answer looks cut off (not scored)."""
@@ -870,6 +1174,8 @@ class InterviewOrchestrator:
         if self.awaiting_clarifier_reply:
             return None
         if self.phase != InterviewPhase.CORE:
+            return None
+        if detect_short_complete_answer(answer_text):
             return None
         if not detect_incomplete_answer(answer_text):
             return None
@@ -1116,7 +1422,7 @@ class InterviewOrchestrator:
             ]
             fix_items = [r.fix for r in self.answer_records if r.fix]
 
-            return {
+            report = {
                 "candidate_name": self.candidate_name,
                 "bot_id": self.bot_id,
                 "phase": self.phase.value,
@@ -1145,6 +1451,10 @@ class InterviewOrchestrator:
                 "summary_develop": list(dict.fromkeys(develop_items)),
                 "summary_fix": list(dict.fromkeys(fix_items)),
             }
+            if self.bot_id:
+                from transcript_log import get_session_transcript
+                report["transcript"] = get_session_transcript(self.bot_id)
+            return report
 
     def document_context_for_llm(self) -> str:
         blocks = []
@@ -1172,6 +1482,12 @@ class InterviewOrchestrator:
                 "\n\nNOTE: The candidate's answer below includes mid-answer clarifier exchanges. "
                 "Extra depth from clarifiers is a positive signal, not padding. "
                 "Score based on the full picture.\n"
+            )
+        if self.drag_strikes > 0 or self.progress_checks:
+            base += (
+                f"\n\nProgress gate notes:\n{self.build_drag_context()}\n"
+                "If drag_strikes >= 2: candidate went off-topic; reflect in 'develop' and "
+                "score the substantive content only (ignore the off-topic portion).\n"
             )
         return base
 
@@ -1203,5 +1519,7 @@ EVALUATOR_SYSTEM_PROMPT = (
     "Fields: score (int 0-10), confident (bool), relevant (bool), "
     "strengths (short string), develop (area to improve), fix (actionable tip). "
     "Be fair: partial answers can be 5-7; strong specific answers 8-10; "
-    "off-topic or empty 0-4. confident=false if vague, unsure, or filler-heavy."
+    "off-topic or empty 0-4. confident=false if vague, unsure, or filler-heavy. "
+    "If progress_notes are present: note off-topic drift in develop/fix; "
+    "score based on substantive content, not filler or repeated generalities."
 )
