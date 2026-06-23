@@ -367,7 +367,47 @@ class SarvamSTTEngine:
                 pass
             self._loop.call_soon_threadsafe(self._loop.stop)
         if self._loop_thread:
-            self._loop_thread.join(timeout=5)
+            self._loop_thread.join(timeout=3)
+
+    def update_language_settings(self, language_code: str, mode: str) -> None:
+        """Update STT language/mode (reconnect required to take effect)."""
+        self.config.language_code = language_code
+        self.config.mode = mode
+
+    async def reconnect_with_settings(self) -> bool:
+        """Disconnect and reconnect with current config (e.g. after language change)."""
+        await self._cancel_batch_task()
+        if self.ws and not self._is_ws_closed():
+            try:
+                await self.ws.close()
+            except Exception:
+                pass
+        self.ws = None
+        self.is_connected = False
+        self.retry_count = 0
+        return await self.connect()
+
+    def apply_language_settings_sync(self, language_code: str, mode: str) -> bool:
+        """Thread-safe: update language and reconnect the session WebSocket."""
+        self.update_language_settings(language_code, mode)
+        if not self._loop or not self._loop.is_running():
+            logger.warning("Sarvam STT loop not running — language settings stored only")
+            return False
+        future = asyncio.run_coroutine_threadsafe(
+            self.reconnect_with_settings(), self._loop
+        )
+        try:
+            ok = future.result(timeout=15)
+            logger.info(
+                "[STT LANG] Sarvam reconnected lang=%s mode=%s ok=%s",
+                language_code,
+                mode,
+                ok,
+            )
+            return ok
+        except Exception as ex:
+            logger.warning("[STT LANG] Sarvam reconnect failed: %s", ex)
+            return False
 
     def _float32_to_pcm_bytes(self, audio_float32) -> bytes:
         if np is None:

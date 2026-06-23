@@ -296,6 +296,16 @@ class SarvamTTSEngine:
         self.is_connected = False
         self.retry_count = 0
         return await self.connect()
+
+    def update_language_code(self, language_code: str) -> None:
+        self.config.language_code = language_code
+
+    async def reconnect_with_settings(self) -> bool:
+        """Close and reconnect so new language_code is used in the WebSocket URL."""
+        await self.disconnect()
+        self.is_connected = False
+        self.retry_count = 0
+        return await self.connect()
     
     def _split_text(self, text: str) -> list[str]:
         """

@@ -35,3 +35,5 @@ class AgentState:
         # Structured interview orchestrator (set on /api/start).
         self.interview_orchestrator = None
         self.interview_ended = threading.Event()
+        # Resolved at POST /api/start: "english" | "hinglish"
+        self.interview_language: str = "english"

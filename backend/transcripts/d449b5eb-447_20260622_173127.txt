@@ -1,0 +1,12 @@
+# Transcript bot=d449b5eb-4472-4d31-9c00-1c9c5f94b95d started=20260622_173127
+17:32:50 [AI]: Hello ATHARV, welcome. I'm Prabhat, your interviewer today. Before we begin, could you please introduce yourself briefly?
+17:33:09 [You]: Yeah, hi Prabhat. My name is ATHARV More.
+17:33:09 [AI]: Thank you for introducing yourself, ATHARV. Can you explain the difference between a LEFT JOIN and an INNER JOIN in SQL, and give me a simple business scenario where you'd choose one over the other?
+17:33:50 [You]: Oh yeah Yeah, and Inner Join returns only the records. The atom matching values in both tables and left join returns all records from left table. and a matching record from the right table. And business scenario is marketing teams often use left joins to identify inactive customers. For re-engagement campaigns.
+17:33:51 [AI]: Alright. Your resume mentions your work at KAS Marine contributed to a 5% improvement in fuel efficiency recommendations. Can you walk me through exactly how you analyzed the vessel performance data and what specific trend you found that led to this recommendation?
+17:34:40 [You]: yeah Yeah, I first clean the data set by removing duplicates, handling missing values, and standardizing units. Then using Excel and Power BI I create a dashboard to analyze fuel consumption across routes and vessel types. I discovered that certain vessels operating above optimal speed speed consistently and consume disproportionately higher fuel. So By all this, the team was able to improve fuel efficiency recommendation by Approximately 5%
+17:34:42 [AI]: Got it. Our JD and your resume both mention SQL window functions. Can you tell me about a time you used a window function, like RANK() or LAG(), to answer a specific business question that would have been difficult to solve otherwise?
+17:35:24 [You]: While analyzing marine logistic data, I noticed special names and rude information were recorded. in constantly Ensure accurate report Porting and analyzing identified consonant Naming Patterns Used Excel function like Like Dream Upper We look up created a master mapping table for standard vessels names
+17:35:25 [AI]: Okay. In Excel, what's the purpose of a Pivot Table, and can you walk me through the basic steps to create one from a raw dataset?
+17:35:47 [You]: Pivot table helps summarize, analyze, and explore large data set quickly. Without writing formulas
+17:35:48 [AI]: Thank you for your time today. We'll wrap up here. The team will be in touch with next steps.

@@ -166,6 +166,15 @@ class IntegratedAudioSender:
         else:
             logger.warning("Sarvam TTS pre-connect failed — will retry on first speak")
         return connected
+
+    async def apply_tts_language(self, language_code: str) -> bool:
+        """Update Sarvam TTS language and reconnect WebSocket."""
+        if not self.use_sarvam or not self.sarvam_engine:
+            return False
+        self.sarvam_engine.update_language_code(language_code)
+        ok = await self.sarvam_engine.reconnect_with_settings()
+        logger.info("[TTS LANG] Sarvam language=%s reconnected=%s", language_code, ok)
+        return ok
     
     async def send_text_to_bot(self, bot_id: str, text: str, state=None) -> bool:
         """

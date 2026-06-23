@@ -115,9 +115,15 @@ class BotConfig:
 
 class RecallBotService:
     """Service to interact with Recall.ai API for bot management."""
-    
-    BASE_URL = "https://us-west-2.recall.ai/api/v1"
-    
+
+    _REGION_URLS = {
+        "us-west-2":     "https://us-west-2.recall.ai/api/v1",
+        "us-east-1":     "https://us-east-1.recall.ai/api/v1",
+        "eu-central-1":  "https://eu-central-1.recall.ai/api/v1",
+        "ap-northeast-1": "https://ap-northeast-1.recall.ai/api/v1",
+    }
+    _DEFAULT_REGION = "ap-northeast-1"
+
     def __init__(self, api_key: Optional[str] = None):
         """
         Initialize Recall.ai bot service.
@@ -128,7 +134,16 @@ class RecallBotService:
         self.api_key = api_key or os.getenv("RECALL_API_KEY")
         if not self.api_key:
             raise ValueError("RECALL_API_KEY not found in environment variables")
-        
+
+        region = os.getenv("RECALL_REGION", self._DEFAULT_REGION).strip()
+        self.BASE_URL = self._REGION_URLS.get(region) or self._REGION_URLS[self._DEFAULT_REGION]
+        if region not in self._REGION_URLS:
+            logger.warning(
+                "[Recall] Unknown RECALL_REGION=%r — defaulting to %s",
+                region, self._DEFAULT_REGION,
+            )
+        logger.info("[Recall] Using region=%s  BASE_URL=%s", region, self.BASE_URL)
+
         self.headers = {
             "Authorization": f"Token {self.api_key}",
             "Content-Type": "application/json",

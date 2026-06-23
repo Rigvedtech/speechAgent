@@ -23,14 +23,9 @@ from webrtc_stream_manager import WebRTCStreamManager
 import config
 
 from transcript_log import close_session, log_transcript, start_session
+from language_profiles import get_profile, get_ui_strings
 
 logger = logging.getLogger(__name__)
-
-_PRESENCE_PHRASES = (
-    "Can you hear me clearly?",
-    "Just checking — are you still there?",
-    "Take your time. Can you hear me okay?",
-)
 
 
 @dataclass
@@ -608,7 +603,9 @@ class SessionManager:
                 return
 
             import random
-            phrase = random.choice(_PRESENCE_PHRASES)
+            lang = getattr(session.state, "interview_language", "english") or "english"
+            phrases = get_ui_strings(lang).presence_phrases
+            phrase = random.choice(phrases)
             session._presence_checks_this_question += 1
             session.state.pending_presence_check = True
             log_transcript(session.bot_id, "assistant", phrase)
@@ -785,6 +782,33 @@ class SessionManager:
 
         logger.info(f"\n[RECALL TRANSCRIPT] '{text}'")
         session.state.llm_queue.put(text)
+
+    async def apply_language_profile(self, session: MeetingSession, language_mode: str) -> None:
+        """
+        Apply STT/TTS language settings for this interview session.
+        Called from POST /api/start before the greeting.
+        """
+        profile = get_profile(language_mode)
+        session.state.interview_language = profile.mode
+
+        if session.sarvam_stt_engine is not None:
+            session.sarvam_stt_engine.apply_language_settings_sync(
+                profile.speech.stt_language,
+                profile.speech.stt_mode,
+            )
+
+        if session.audio_sender is not None:
+            await session.audio_sender.apply_tts_language(profile.speech.tts_language)
+
+        logger.info(
+            "[LANGUAGE] bot=%s mode=%s stt=%s/%s tts=%s whisper_fb=%s",
+            session.bot_id[:8],
+            profile.mode,
+            profile.speech.stt_language,
+            profile.speech.stt_mode,
+            profile.speech.tts_language,
+            profile.speech.whisper_fallback,
+        )
 
     def get_session(self, bot_id: str) -> Optional[MeetingSession]:
         """

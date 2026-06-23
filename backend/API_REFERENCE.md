@@ -43,12 +43,18 @@ Base URL: `http://localhost:8000`
 
 **Requirements:**
 - `bot_id` (required) - Bot ID from /api/join
-- `greeting_message` (optional) - Custom greeting text
+- `candidate_name`, `jdText`, `cvText`, `questions` (required)
+- `language_mode` (optional) - `"english"` or `"hinglish"`; omitted → `DEFAULT_INTERVIEW_LANGUAGE` from `.env`
+- `greeting_message` (optional) - Custom greeting instruction (via LLM)
 
 **Request:**
 ```json
 {
-  "greeting_message": "Hello, let's begin the interview..."
+  "candidate_name": "Atharv",
+  "jdText": "...",
+  "cvText": "...",
+  "questions": [{"id": "q1", "difficulty": "Low", "source": "jd", "question": "..."}],
+  "language_mode": "hinglish"
 }
 ```
 
@@ -58,7 +64,10 @@ Base URL: `http://localhost:8000`
   "success": true,
   "bot_id": "abc-123",
   "message": "Interview started",
-  "greeting": "Hello Pranay, I am Prabhat..."
+  "language_mode": "hinglish",
+  "candidate_name": "Atharv",
+  "questions_planned": 10,
+  "phase": "greeting"
 }
 ```
 

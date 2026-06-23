@@ -17,6 +17,7 @@ from enum import Enum
 from typing import Deque, Dict, List, Optional, Tuple
 
 import config
+from language_profiles import LanguageMode, get_ui_strings
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,12 @@ _REPEAT_INTENT = re.compile(
         r"\brepeat\s+(the|that)\s+question\b",
         r"\bwhat\s+was\s+the\s+question\b",
         r"\bsay\s+the\s+question\s+again\b",
+        r"\b(dobara|phir\s+se)\b",
+        r"\bquestion\s+repeat\b",
+        r"\bsawal\s+(dobara|repeat)\b",
+        r"\bkya\s+aap\b.*\brepeat\b",
+        r"\bdobara\s+bata\b",
+        r"\bdobara\s+bol\b",
     ]),
     re.IGNORECASE,
 )
@@ -139,6 +146,9 @@ _REPHRASE_INTENT = re.compile(
         r"\brephrase\s+the\s+question\b",
         r"\bwhat\s+do\s+you\s+mean\b",
         r"\bcan\s+you\s+clarify\s+the\s+question\b",
+        r"\bsamajh\s+nahi\b",
+        r"\bsimple\s+(tareeke|words)\s+se\b",
+        r"\bdobara\s+samjha\b",
     ]),
     re.IGNORECASE,
 )
@@ -197,6 +207,11 @@ _INABILITY_PATTERNS = re.compile(
         r"\bno\s+answer\b",
         r"\bnot\s+able\s+to\s+answer\b",
         r"\bhaven'?t\s+(used|worked)\b",
+        r"\bnahi\s+pata\b",
+        r"\bpata\s+nahi\b",
+        r"\b(nahi|na)\s+yaad\b",
+        r"\bmalum\s+nahi\b",
+        r"\bjawab\s+nahi\b",
     ]),
     re.IGNORECASE,
 )
@@ -451,6 +466,10 @@ _PRESENCE_CONFIRM = re.compile(
         r"\b(yes|yeah|yep|yup|sure|okay|ok|correct|right|audible)\b",
         r"\b(i\s+can\s+hear|can\s+hear\s+you|hear\s+you\s+(fine|clearly|okay))\b",
         r"\b(loud\s+and\s+clear|all\s+good)\b",
+        r"\b(haan|ha|ji)\b",
+        r"\bsun\s*(pa\s+raha|sakta|sakti|rahi|rahe)\b",
+        r"\bsunai\s+de\s+raha\b",
+        r"\btheek\s+hai\b",
     ]),
     re.IGNORECASE,
 )
@@ -597,6 +616,7 @@ class InterviewOrchestrator:
     cv_text: str
     planned_questions: List[BankQuestion]
     bot_id: str = ""
+    language_mode: LanguageMode = "english"
 
     phase: InterviewPhase = InterviewPhase.GREETING
     current_index: int = 0
@@ -641,6 +661,7 @@ class InterviewOrchestrator:
         jd_text: str,
         cv_text: str,
         bank: List[BankQuestion],
+        language_mode: LanguageMode = "english",
     ) -> "InterviewOrchestrator":
         planned = QuestionSelector.select(bank, config.MAX_QUESTIONS)
         orch = cls(
@@ -649,9 +670,13 @@ class InterviewOrchestrator:
             jd_text=jd_text.strip(),
             cv_text=cv_text.strip(),
             planned_questions=planned,
+            language_mode=language_mode,
         )
         orch._log_injection()
         return orch
+
+    def _ui(self):
+        return get_ui_strings(self.language_mode)
 
     def _log_injection(self) -> None:
         plan_summary = [
@@ -736,7 +761,7 @@ class InterviewOrchestrator:
             if intent == TurnIntent.CONTINUE_ANSWER.value:
                 return TurnDecision(
                     action=TurnAction.SPEAK,
-                    spoken_text="Please continue your answer.",
+                    spoken_text=self._ui().please_continue,
                     should_continue=True,
                     spoken_kind="prompt",
                 )
@@ -758,7 +783,7 @@ class InterviewOrchestrator:
                 self.bot_id[:8] if self.bot_id else "?",
                 self.current_index + 1,
             )
-            spoken = f"Of course. I asked: {target}"
+            spoken = self._ui().repeat_last_clarifier.format(target=target)
             return TurnDecision(
                 action=TurnAction.SPEAK,
                 spoken_text=spoken,
@@ -804,7 +829,8 @@ class InterviewOrchestrator:
         return self._on_repeat_question()
 
     def _next_bridge(self) -> str:
-        phrase = _BRIDGE_PHRASES[self._bridge_index % len(_BRIDGE_PHRASES)]
+        bridges = self._ui().bridge_phrases
+        phrase = bridges[self._bridge_index % len(bridges)]
         self._bridge_index += 1
         return phrase
 
@@ -837,10 +863,7 @@ class InterviewOrchestrator:
                 self.current_index + 1,
                 config.MAX_QUESTION_REPEATS,
             )
-            spoken = (
-                "I've already repeated the question a couple of times. "
-                "Please try your best answer when you're ready."
-            )
+            spoken = self._ui().repeat_limit
             return TurnDecision(
                 action=TurnAction.SPEAK,
                 spoken_text=spoken,
@@ -856,7 +879,15 @@ class InterviewOrchestrator:
             self.question_repeat_count,
             config.MAX_QUESTION_REPEATS,
         )
-        spoken = f"Sure. The question is: {q.question}"
+        if self.language_mode == "hinglish":
+            spoken = self._ui().repeat_intro.format(question=q.question)
+            return TurnDecision(
+                action=TurnAction.SPEAK,
+                spoken_text=spoken,
+                should_continue=True,
+                spoken_kind="main",
+            )
+        spoken = self._ui().repeat_intro.format(question=q.question)
         return TurnDecision(
             action=TurnAction.SPEAK,
             spoken_text=spoken,
@@ -876,10 +907,7 @@ class InterviewOrchestrator:
                 self.current_index + 1,
                 config.MAX_QUESTION_REPHRASES,
             )
-            spoken = (
-                "Let's stick with the question as asked. "
-                "Please go ahead with your answer when you're ready."
-            )
+            spoken = self._ui().rephrase_limit
             return TurnDecision(
                 action=TurnAction.SPEAK,
                 spoken_text=spoken,
@@ -921,9 +949,9 @@ class InterviewOrchestrator:
                     "Thank you for introducing yourself. We'll wrap up here for today.",
                     StoppedReason.COMPLETED,
                 )
-            spoken = (
-                f"Thank you for introducing yourself, {self.candidate_name}. "
-                f"{q.question}"
+            spoken = self._ui().intro_thanks.format(
+                name=self.candidate_name,
+                question=q.question,
             )
             logger.info(
                 "[INTERVIEW PHASE] bot=%s → core | asking Q1/%d id=%s",
@@ -966,7 +994,7 @@ class InterviewOrchestrator:
                 self._last_spoken_question = q.question
                 self._last_spoken_kind = "main"
 
-            spoken = "Thanks for clarifying. Please continue from where you left off."
+            spoken = self._ui().continue_after_clarifier
             return TurnDecision(
                 action=TurnAction.SPEAK,
                 spoken_text=spoken,
@@ -1105,8 +1133,7 @@ class InterviewOrchestrator:
 
             if not can_continue:
                 return self._build_stop(
-                    "Thank you for your time today. We'll wrap up here. "
-                    "The team will be in touch with next steps.",
+                    self._ui().closing_low_average,
                     StoppedReason.LOW_ROLLING_AVERAGE,
                     record,
                     rolling_avg,
@@ -1119,6 +1146,15 @@ class InterviewOrchestrator:
                 return self._complete_all(record, rolling_avg)
 
             spoken = f"Okay, thank you. Let's continue. {next_q.question}"
+            if self.language_mode == "hinglish":
+                return TurnDecision(
+                    action=TurnAction.REPHRASE,
+                    spoken_text=next_q.question,
+                    score_record=record,
+                    rolling_average=rolling_avg,
+                    should_continue=True,
+                    spoken_kind="main",
+                )
             return TurnDecision(
                 action=TurnAction.SPEAK,
                 spoken_text=spoken,
@@ -1162,7 +1198,7 @@ class InterviewOrchestrator:
         )
         return TurnDecision(
             action=TurnAction.SPEAK,
-            spoken_text="No problem. Please continue with your answer when you're ready.",
+            spoken_text=self._ui().please_continue_when_ready,
             should_continue=True,
             spoken_kind="prompt",
         )
@@ -1199,7 +1235,7 @@ class InterviewOrchestrator:
             )
             return TurnDecision(
                 action=TurnAction.SPEAK,
-                spoken_text="Please continue your answer.",
+                spoken_text=self._ui().please_continue,
                 should_continue=True,
             )
 
@@ -1262,8 +1298,7 @@ class InterviewOrchestrator:
 
             if not can_continue:
                 return self._build_stop(
-                    "Thank you for your time today. We'll wrap up here. "
-                    "The team will be in touch with next steps.",
+                    self._ui().closing_low_average,
                     StoppedReason.LOW_ROLLING_AVERAGE,
                     record,
                     rolling_avg,
@@ -1276,6 +1311,15 @@ class InterviewOrchestrator:
                 return self._complete_all(record, rolling_avg)
 
             spoken = f"{self._next_bridge()} {next_q.question}"
+            if self.language_mode == "hinglish":
+                return TurnDecision(
+                    action=TurnAction.REPHRASE,
+                    spoken_text=next_q.question,
+                    score_record=record,
+                    rolling_average=rolling_avg,
+                    should_continue=True,
+                    spoken_kind="main",
+                )
             return TurnDecision(
                 action=TurnAction.SPEAK,
                 spoken_text=spoken,
@@ -1289,7 +1333,7 @@ class InterviewOrchestrator:
         q = self.get_current_question()
         if not q:
             return self._build_stop(
-                "I need to end our session here. Thank you for your time.",
+                self._ui().closing_abuse,
                 StoppedReason.ABUSE,
             )
 
@@ -1303,10 +1347,7 @@ class InterviewOrchestrator:
                 self.current_index + 1,
                 q.id,
             )
-            spoken = (
-                "I need us to keep this professional. Let's stay focused on the interview. "
-                f"{q.question}"
-            )
+            spoken = self._ui().abuse_warning.format(question=q.question)
             return TurnDecision(
                 action=TurnAction.WARN_ABUSE,
                 spoken_text=spoken,
@@ -1318,7 +1359,7 @@ class InterviewOrchestrator:
             self.bot_id[:8] if self.bot_id else "?",
         )
         return self._build_stop(
-            "I need to end our session here. Thank you for your time.",
+            self._ui().closing_abuse,
             StoppedReason.ABUSE,
         )
 
@@ -1329,10 +1370,7 @@ class InterviewOrchestrator:
     ) -> TurnDecision:
         self.phase = InterviewPhase.CLOSING
         self.stopped_reason = StoppedReason.COMPLETED
-        spoken = (
-            "Thank you for completing the interview today. "
-            "We'll review your responses and be in touch soon."
-        )
+        spoken = self._ui().closing_completed
         logger.info(
             "[INTERVIEW END] bot=%s reason=completed_all_questions scored=%d",
             self.bot_id[:8] if self.bot_id else "?",

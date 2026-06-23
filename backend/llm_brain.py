@@ -7,7 +7,12 @@ import config
 from config import GROQ_API_KEY, GROQ_MODEL, GROQ_TEMPERATURE, GROQ_MAX_TOKENS, OLLAMA_MODEL
 import document as interview_documents
 from state import AgentState
-from system_prompt import SYSTEM_PROMPT
+from system_prompt import (
+    get_system_prompt,
+    get_rephrase_system,
+    get_clarifier_system,
+)
+from language_profiles import get_ui_strings
 from interview_engine import (
     EVALUATOR_SYSTEM_PROMPT,
     EvaluationResult,
@@ -23,6 +28,7 @@ from interview_engine import (
 )
 from transcript_utils import normalize_candidate_name
 from transcript_log import log_transcript
+from report_store import save_report
 
 logger = logging.getLogger(__name__)
 
@@ -49,27 +55,6 @@ _JAILBREAK_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-_CLARIFIER_SYSTEM = (
-    "You are a technical interviewer. The candidate is mid-answer and still speaking. "
-    "Given their partial transcript and the current interview question, decide if you "
-    "should ask ONE very short follow-up (max 15 words) about a SPECIFIC sub-detail "
-    "they mentioned — not the main topic of the question.\n"
-    "Rules:\n"
-    "- NEVER ask 'What is X?' if X is already the core subject of the main question "
-    "(e.g. do not ask 'What is middleware?' when the question is 'Explain middleware').\n"
-    "- Prefer 'Can you elaborate on how you used X?' or 'What role did X play in your setup?' "
-    "over generic definition questions.\n"
-    "- Only ask about a term they actually mentioned in their partial answer.\n"
-    "- Reply with exactly SKIP if no useful follow-up is needed.\n"
-    "- Reply with only the follow-up question — no preamble."
-)
-
-_REPHRASE_SYSTEM = (
-    "You are a technical interviewer. Rewrite the interview question in simpler, "
-    "plain English for a voice interview. Max 25 words. Do not reveal the answer, "
-    "hints, or examples. Return only the rewritten question — no preamble."
-)
-
 _CLASSIFY_TURN_SYSTEM = (
     "You classify a candidate's short spoken reply during a live technical interview. "
     "Return ONLY valid JSON: {\"intent\": \"...\", \"confidence\": 0.0-1.0}\n\n"
@@ -91,7 +76,10 @@ _CLASSIFY_TURN_SYSTEM = (
     "- If awaiting_clarifier_reply is true, repeat_last/rephrase_last refer to the clarifier.\n"
     "- Polite 'sorry' WITH explicit repeat/rephrase intent → repeat_main or rephrase_last.\n"
     "- Polite 'sorry' WITH inability (don't know, can't recall) → actual_answer.\n"
-    "- If they give technical content, choose actual_answer even if short."
+    "- If they give technical content, choose actual_answer even if short.\n"
+    "- Hinglish examples: 'kya aap question repeat kar sakte ho' → repeat_main; "
+    "'samajh nahi aaya' → rephrase_last; 'nahi pata' / 'pata nahi' → actual_answer; "
+    "'haan sunai de raha hai' during presence check → actual_answer."
 )
 
 _PROGRESS_GATE_SYSTEM = (
@@ -203,6 +191,13 @@ class LLMBrain:
         )
         self.max_runtime_history_messages = 12
 
+    def _language_mode(self) -> str:
+        mode = getattr(self.state, "interview_language", "english") or "english"
+        orch = self.state.interview_orchestrator
+        if orch is not None:
+            mode = getattr(orch, "language_mode", mode) or mode
+        return mode
+
     def _interview_document_messages(self):
         """JD + resume + grounding rules (session injection or document.py fallback)."""
         orch = self.state.interview_orchestrator
@@ -280,7 +275,7 @@ class LLMBrain:
         """Build a persona-stable request context for each model call."""
         runtime_history = self.conversation_history[-self.max_runtime_history_messages:]
         return (
-            [{"role": "system", "content": SYSTEM_PROMPT}]
+            [{"role": "system", "content": get_system_prompt(self._language_mode())}]
             + self._interview_document_messages()
             + self.persona_examples
             + self._jailbreak_reminder_messages(latest_user_text)
@@ -572,8 +567,13 @@ class LLMBrain:
 
     def _emit_orchestrated_turn(self, decision) -> None:
         """Send orchestrator-authored spoken line directly to TTS."""
+        if decision.action == TurnAction.REPHRASE:
+            decision = self._resolve_rephrase_decision(decision)
+
         spoken = (decision.spoken_text or "").strip()
         orch = self.state.interview_orchestrator
+        if spoken and orch and orch.language_mode == "hinglish":
+            spoken = self._localize_bank_question_in_text(spoken, orch)
 
         if spoken:
             bot_id = orch.bot_id if orch else None
@@ -599,6 +599,14 @@ class LLMBrain:
             self.state.interview_ended.set()
             if orch:
                 orch.mark_ended()
+                try:
+                    save_report(orch.bot_id, orch.build_report())
+                except Exception as ex:
+                    logger.warning(
+                        "[REPORT STORE] failed at interview end bot=%s: %s",
+                        orch.bot_id[:8] if orch.bot_id else "?",
+                        ex,
+                    )
                 logger.info(
                     "[INTERVIEW REPORT READY] bot=%s reason=%s",
                     orch.bot_id[:8] if orch.bot_id else "?",
@@ -710,22 +718,29 @@ class LLMBrain:
             return False
 
         if decision.action == TurnAction.REPHRASE:
-            simplified = self._generate_simpler_question(decision.spoken_text)
-            text = simplified or decision.spoken_text
-            prefix = (
-                "Let me put it more simply: "
-                if decision.spoken_kind == "clarifier"
-                else "No problem. Let me ask it more simply: "
-            )
-            decision = TurnDecision(
-                action=TurnAction.SPEAK,
-                spoken_text=f"{prefix}{text}",
-                should_continue=True,
-                spoken_kind=decision.spoken_kind or "main",
-            )
+            decision = self._resolve_rephrase_decision(decision)
 
         self._emit_orchestrated_turn(decision)
         return True
+
+    def _resolve_rephrase_decision(self, decision: TurnDecision) -> TurnDecision:
+        """Localize/rephrase bank question text (English → Hinglish when configured)."""
+        ui = get_ui_strings(self._language_mode())
+        simplified = self._generate_simpler_question(decision.spoken_text)
+        text = simplified or decision.spoken_text
+        if decision.spoken_kind == "clarifier":
+            prefix = ui.rephrase_prefix_clarifier
+        else:
+            prefix = ui.rephrase_prefix_main
+        return TurnDecision(
+            action=TurnAction.SPEAK,
+            spoken_text=f"{prefix}{text}",
+            should_continue=decision.should_continue,
+            spoken_kind=decision.spoken_kind or "main",
+            score_record=decision.score_record,
+            rolling_average=decision.rolling_average,
+            stopped_reason=decision.stopped_reason,
+        )
 
     def _handle_orchestrated_turn(self, user_text: str) -> bool:
         """
@@ -741,15 +756,29 @@ class LLMBrain:
 
         if orch.phase == InterviewPhase.AWAIT_INTRO:
             decision = orch.on_intro_answer()
+            if orch.language_mode == "hinglish":
+                q = orch.get_current_question()
+                if q:
+                    localized = self._generate_simpler_question(q.question) or q.question
+                    ui = get_ui_strings("hinglish")
+                    decision = TurnDecision(
+                        action=TurnAction.SPEAK,
+                        spoken_text=ui.intro_thanks.format(
+                            name=orch.candidate_name,
+                            question=localized,
+                        ),
+                        spoken_kind="main",
+                    )
             self._emit_orchestrated_turn(decision)
             return True
 
         if orch.phase == InterviewPhase.CORE:
             if self.state.pending_presence_check and detect_presence_confirm(user_text):
                 self.state.pending_presence_check = False
+                ui = get_ui_strings(self._language_mode())
                 decision = TurnDecision(
                     action=TurnAction.SPEAK,
-                    spoken_text="Great, please go ahead with your answer when you're ready.",
+                    spoken_text=ui.presence_confirm_ack,
                     should_continue=True,
                     spoken_kind="prompt",
                 )
@@ -815,7 +844,7 @@ class LLMBrain:
             f"Candidate partial answer (still speaking):\n{partial}"
         )
         messages = [
-            {"role": "system", "content": _CLARIFIER_SYSTEM},
+            {"role": "system", "content": get_clarifier_system(self._language_mode())},
             {"role": "user", "content": user_content},
         ]
         raw = ""
@@ -995,7 +1024,7 @@ class LLMBrain:
             return None
 
         messages = [
-            {"role": "system", "content": _REPHRASE_SYSTEM},
+            {"role": "system", "content": get_rephrase_system(self._language_mode())},
             {"role": "user", "content": f"Original question:\n{q}"},
         ]
         raw = ""
@@ -1032,6 +1061,16 @@ class LLMBrain:
         if len(raw) < 5:
             return None
         return raw
+
+    def _localize_bank_question_in_text(self, spoken: str, orch) -> str:
+        """Replace English bank question with Hinglish rephrase when present in spoken line."""
+        q = orch.get_current_question()
+        if not q or not q.question or q.question not in spoken:
+            return spoken
+        localized = self._generate_simpler_question(q.question)
+        if localized:
+            return spoken.replace(q.question, localized)
+        return spoken
 
     def _handle_bot_interrupt_partial(self, payload) -> None:
         """Mid-answer depth-vs-drag progress gate (15s start, 10s interval)."""

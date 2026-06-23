@@ -267,7 +267,7 @@ class STTEngine:
                 except Exception as e:
                     print(f"\n[SARVAM STT Error]: {e} — falling back to Whisper", file=sys.stderr)
 
-            if not sarvam_ok and STT_FALLBACK_ENABLED:
+            if not sarvam_ok and self._allow_whisper_fallback():
                 try:
                     model = self._ensure_whisper()
                     segments, _ = model.transcribe(
@@ -286,11 +286,26 @@ class STTEngine:
                     print(f"\n[STT Error]: {e}", file=sys.stderr)
                     return "", sarvam_attempted
             elif not sarvam_ok:
-                print("\n[STT] Sarvam failed and Whisper fallback is disabled", file=sys.stderr)
+                mode = getattr(self.state, "interview_language", "english") or "english"
+                if mode != "english":
+                    print(
+                        f"\n[STT] Sarvam failed in {mode} mode — Whisper fallback disabled",
+                        file=sys.stderr,
+                    )
+                else:
+                    print("\n[STT] Sarvam failed and Whisper fallback is disabled", file=sys.stderr)
                 return "", sarvam_attempted
 
         sarvam_failed = sarvam_attempted and not sarvam_ok
         return full_text.strip(), sarvam_failed
+
+    def _allow_whisper_fallback(self) -> bool:
+        if not STT_FALLBACK_ENABLED:
+            return False
+        mode = getattr(self.state, "interview_language", "english") or "english"
+        if mode != "english":
+            return False
+        return True
 
     def audio_callback(self, indata, frames, time_info, status):
         """Callback for sounddevice to capture audio streams."""

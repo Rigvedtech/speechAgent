@@ -126,6 +126,15 @@ TTS_FALLBACK_ENABLED = _env_str("TTS_FALLBACK_ENABLED", "true").lower() == "true
 SARVAM_MAX_RETRIES = _env_int("SARVAM_MAX_RETRIES", 3)
 SARVAM_RETRY_BASE_SECONDS = _env_float("SARVAM_RETRY_BASE_SECONDS", 1.0)
 
+# Interview language (POST /api/start language_mode; default when omitted)
+DEFAULT_INTERVIEW_LANGUAGE = _env_str("DEFAULT_INTERVIEW_LANGUAGE", "english").lower()
+LANG_ENGLISH_STT_LANGUAGE = _env_str("LANG_ENGLISH_STT_LANGUAGE", "en-IN")
+LANG_ENGLISH_STT_MODE = _env_str("LANG_ENGLISH_STT_MODE", "transcribe")
+LANG_ENGLISH_TTS_LANGUAGE = _env_str("LANG_ENGLISH_TTS_LANGUAGE", "en-IN")
+LANG_HINGLISH_STT_LANGUAGE = _env_str("LANG_HINGLISH_STT_LANGUAGE", "hi-IN")
+LANG_HINGLISH_STT_MODE = _env_str("LANG_HINGLISH_STT_MODE", "codemix")
+LANG_HINGLISH_TTS_LANGUAGE = _env_str("LANG_HINGLISH_TTS_LANGUAGE", "hi-IN")
+
 # Log Sarvam status
 if SARVAM_API_KEY and SARVAM_API_KEY != "your_api_key_here" and SARVAM_API_KEY != "":
     if SARVAM_STT_ENABLED:

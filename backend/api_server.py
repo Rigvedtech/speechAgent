@@ -7,7 +7,7 @@ import os
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Literal
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -25,6 +25,9 @@ from recall_bot_service import (
 from session_manager import SessionManager
 from audio_receiver import AudioReceiver
 from transcript_log import log_transcript
+from report_html import render_not_completed_html, render_report_html
+from report_service import resolve_interview_report
+from language_profiles import resolve_language_mode, get_ui_strings
 import config as app_config
 import ws_hub
 
@@ -331,6 +334,7 @@ class StartInterviewRequest(BaseModel):
     cvText: str
     questions: List[QuestionBankItem]
     greeting_message: Optional[str] = None
+    language_mode: Optional[Literal["english", "hinglish"]] = None
 
 
 @app.post("/api/start/{bot_id}")
@@ -346,7 +350,8 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
         "questions": [
             {"id": "q1", "difficulty": "Low", "source": "jd", "question": "..."}
         ],
-        "greeting_message": "optional custom greeting instruction"
+        "greeting_message": "optional custom greeting instruction",
+        "language_mode": "english | hinglish (optional — defaults to DEFAULT_INTERVIEW_LANGUAGE)"
     }
     """
     try:
@@ -388,6 +393,11 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
         if not request.questions:
             raise HTTPException(status_code=400, detail="questions list cannot be empty")
 
+        try:
+            resolved_language = resolve_language_mode(request.language_mode)
+        except ValueError as ve:
+            raise HTTPException(status_code=400, detail=str(ve))
+
         from interview_engine import InterviewOrchestrator, parse_bank_questions
 
         try:
@@ -398,12 +408,16 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
                 jd_text=jd_text,
                 cv_text=cv_text,
                 bank=bank,
+                language_mode=resolved_language,
             )
         except ValueError as ve:
             raise HTTPException(status_code=400, detail=str(ve))
 
         session.state.interview_orchestrator = orchestrator
         session.state.interview_ended.clear()
+        session.state.interview_language = resolved_language
+
+        await session_manager.apply_language_profile(session, resolved_language)
 
         # Bot must be admitted to the meeting before interview starts
         try:
@@ -462,10 +476,10 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
             session.state.is_started.set()
             session.state.llm_queue.put(greeting_instruction)
         else:
-            greeting_text = (
-                f"Hello {candidate_name}, welcome. "
-                f"I'm {BOT_NAME}, your interviewer today. "
-                f"Before we begin, could you please introduce yourself briefly?"
+            ui = get_ui_strings(resolved_language)
+            greeting_text = ui.greeting_template.format(
+                name=candidate_name,
+                bot_name=BOT_NAME,
             )
 
             session.state.is_started.set()
@@ -482,9 +496,10 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
             )
 
         logger.info(
-            "Interview started for bot %s candidate=%s planned_questions=%d",
+            "Interview started for bot %s candidate=%s language=%s planned_questions=%d",
             bot_id,
             candidate_name,
+            resolved_language,
             len(orchestrator.planned_questions),
         )
 
@@ -493,6 +508,7 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
             "bot_id": bot_id,
             "message": "Interview started",
             "candidate_name": candidate_name,
+            "language_mode": resolved_language,
             "questions_planned": len(orchestrator.planned_questions),
             "planned_question_ids": [q.id for q in orchestrator.planned_questions],
             "phase": orchestrator.phase.value,
@@ -509,20 +525,9 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
 async def get_interview_report(bot_id: str):
     """
     Get structured interview report card (scores, develop/fix areas).
-    Available once interview has started; best after interview ends.
+    Returns 409 until the interview ends; persists to disk so report survives /api/leave.
     """
-    session = session_manager.get_session(bot_id)
-    if not session:
-        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
-
-    orch = session.state.interview_orchestrator
-    if not orch:
-        raise HTTPException(
-            status_code=400,
-            detail="Interview not started — call POST /api/start first",
-        )
-
-    report = orch.build_report()
+    report = resolve_interview_report(bot_id, session_manager)
     logger.info(
         "[REPORT] bot=%s scored=%d overall_avg=%s stopped=%s",
         bot_id[:8],
@@ -531,6 +536,31 @@ async def get_interview_report(bot_id: str):
         report.get("stopped_reason"),
     )
     return {"success": True, "report": report}
+
+
+@app.get("/api/interview/{bot_id}/report.html", response_class=HTMLResponse)
+async def get_interview_report_html(bot_id: str):
+    """
+    Paper-style HTML report card for browser / Postman preview.
+    Returns 409 until the interview ends; serves from disk after session cleanup.
+    """
+    try:
+        report = resolve_interview_report(bot_id, session_manager)
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            return HTMLResponse(
+                content=render_not_completed_html(bot_id),
+                status_code=409,
+            )
+        raise
+
+    logger.info(
+        "[REPORT HTML] bot=%s scored=%d overall_avg=%s",
+        bot_id[:8],
+        report.get("questions_scored"),
+        report.get("overall_average"),
+    )
+    return HTMLResponse(content=render_report_html(report), status_code=200)
 
 
 @app.delete("/api/leave/{bot_id}", response_model=LeaveResponse)
