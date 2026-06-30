@@ -1,5 +1,6 @@
 import queue
 import threading
+from typing import Optional
 
 class AgentState:
     """Shared state to seamlessly connect separate modules."""
@@ -29,10 +30,23 @@ class AgentState:
         self.last_candidate_speech_at: float = 0.0
         self.last_playback_done_at: float = 0.0
         self.pending_presence_check: bool = False
+        # True while candidate VAD is actively recording an utterance
+        self.candidate_recording: bool = False
+        # Optional override for next presence-check delay (set after new main question)
+        self.presence_check_delay_sec: Optional[float] = None
+        # True while bot speaks a mid-answer clarifier or focused rephrase (not a full turn).
+        self.mid_answer_interrupt: bool = False
+        # Optional hooks set by SessionManager — preserve/restore STT buffer across mid-answer TTS.
+        self.on_preserve_stt_buffer = None
+        self.on_restore_stt_buffer = None
         # Optional hook set by SessionManager — cancels post-TTS silence watcher.
         self.on_candidate_speech = None
+        self.on_candidate_speech_started = None
+        self.on_question_advanced = None
+        # Last bot utterance kind: main | clarifier | drag | prompt — for interrupt cooldowns
+        self.last_bot_speech_kind: str = ""
 
-        # Structured interview orchestrator (set on /api/start).
+        # Structured interview orchestrator (set on POST /api/join or legacy /api/start).
         self.interview_orchestrator = None
         self.interview_ended = threading.Event()
         # Resolved at POST /api/start: "english" | "hinglish"

@@ -3,6 +3,7 @@ import queue
 import re
 import time
 import threading
+import logging
 import torch
 import numpy as np
 import collections
@@ -32,11 +33,28 @@ from config import (
     TURN_MERGE_MIN_CHARS,
     TURN_MERGE_MIN_HOLD_SEC,
     TURN_MERGE_MAX_SHORT_HOLD_SEC,
+    MIN_ANSWER_WORDS,
     NAME_NORMALIZE_ENABLED,
+    INTRO_MIN_CHARS,
+    INTRO_MIN_SPEECH_SEC,
+    INTRO_MERGE_WINDOW_SEC,
+    CORE_ANSWER_MERGE_WINDOW_SEC,
+    CORE_LONG_ANSWER_SPEECH_SEC,
+    CORE_LONG_ANSWER_SILENCE_SEC,
+    CORE_ANSWER_MAX_HOLD_SEC,
+    TURN_FLUSH_GUARD_MIN_CHARS,
+    TURN_FLUSH_DEFER_SEC,
+    sarvam_collect_deadline_sec,
+    sarvam_transcribe_timeout_sec,
 )
 from state import AgentState
-from interview_engine import should_commit_short_turn_immediately
+from interview_engine import (
+    detect_incomplete_answer,
+    should_commit_short_turn_immediately,
+)
 from transcript_utils import normalize_candidate_name
+
+logger = logging.getLogger(__name__)
 
 
 class STTEngine:
@@ -86,6 +104,8 @@ class STTEngine:
         self._pending_text: str = ""
         self._pending_until: float = 0.0
         self._pending_sarvam_failed: bool = False
+        self._pending_core_deadline: float = 0.0
+        self._turn_q_index: int = -1
 
         print(f"Loading Silero VAD on {DEVICE}...")
         self.vad_model, _ = torch.hub.load(
@@ -124,11 +144,37 @@ class STTEngine:
     def _reset_recording_state(self):
         self.audio_buffer = []
         self.is_recording = False
+        self.state.candidate_recording = False
         self.last_speech_time = 0.0
         self._recording_started_at = 0.0
         self._last_bot_interrupt_check = 0.0
         self._check_num = 0
         self._prev_check_partial = ""
+
+    def preserve_answer_in_progress(self) -> None:
+        """Save in-progress answer audio before mid-answer bot speech (clarifier/rephrase)."""
+        if not self.is_recording or not self.audio_buffer:
+            return
+        self._preserved_snapshot = {
+            "audio": np.concatenate(self.audio_buffer).copy(),
+            "started_at": self._recording_started_at,
+            "check_num": self._check_num,
+            "prev_partial": self._prev_check_partial,
+            "last_speech_time": self.last_speech_time,
+        }
+
+    def restore_answer_in_progress(self) -> None:
+        """Restore answer buffer after mid-answer bot speech so the candidate can continue."""
+        snap = getattr(self, "_preserved_snapshot", None)
+        if not snap:
+            return
+        self.audio_buffer = [snap["audio"]]
+        self.is_recording = True
+        self._recording_started_at = snap["started_at"]
+        self._check_num = snap["check_num"]
+        self._prev_check_partial = snap["prev_partial"]
+        self.last_speech_time = snap.get("last_speech_time", 0.0)
+        self._preserved_snapshot = None
 
     def _orch_awaiting_clarifier(self) -> bool:
         orch = getattr(self.state, "interview_orchestrator", None)
@@ -141,29 +187,233 @@ class STTEngine:
         from interview_engine import InterviewPhase
         return orch.phase == InterviewPhase.CORE
 
+    def _in_await_intro_phase(self) -> bool:
+        orch = getattr(self.state, "interview_orchestrator", None)
+        if orch is None:
+            return False
+        from interview_engine import InterviewPhase
+        return orch.phase == InterviewPhase.AWAIT_INTRO
+
+    _INTRO_GREETING_WORDS = frozenset({
+        "hello", "hi", "hey", "namaste", "namaskar", "good", "morning",
+        "evening", "afternoon", "prabhat", "prabhupada", "sir", "maam",
+        "ma'am", "thanks", "thank", "you",
+    })
+
+    def _is_greeting_only_intro(self, text: str) -> bool:
+        """Short hello/namaste-only utterances are not a complete introduction."""
+        stripped = re.sub(r"[^\w\s']", " ", (text or "").strip().lower())
+        words = [w for w in stripped.split() if w]
+        if not words or len(words) > 6:
+            return False
+        return all(w in self._INTRO_GREETING_WORDS for w in words)
+
+    def _should_hold_intro_turn(
+        self, text: str, utterance_duration: float
+    ) -> Tuple[bool, str]:
+        stripped = (text or "").strip()
+        if len(stripped) >= INTRO_MIN_CHARS:
+            return False, ""
+        if (
+            utterance_duration >= INTRO_MIN_SPEECH_SEC
+            and len(stripped) >= max(40, INTRO_MIN_CHARS // 2)
+        ):
+            return False, ""
+        if self._is_greeting_only_intro(stripped):
+            return True, "greeting_only"
+        if len(stripped) < INTRO_MIN_CHARS:
+            return True, "intro_too_short"
+        return False, ""
+
+    def _should_flush_held_intro_turn(self, text: str, audio_sec: float) -> bool:
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        if len(stripped) >= INTRO_MIN_CHARS:
+            return True
+        if audio_sec >= INTRO_MIN_SPEECH_SEC and len(stripped) >= 40:
+            return True
+        return False
+
+    def _merge_window_sec(self, hold_reason: str = "") -> float:
+        if hold_reason == "core_answer_in_progress":
+            return CORE_ANSWER_MERGE_WINDOW_SEC
+        if self._in_await_intro_phase():
+            return INTRO_MERGE_WINDOW_SEC
+        return TURN_MERGE_WINDOW_SEC
+
+    _ANSWER_DONE_SUFFIX = re.compile(
+        r"(?:"
+        r"that'?s\s+it|that'?s\s+all|i'?m\s+done|that\s+is\s+it"
+        r"|bas|ठीक\s+है|बस|हो\s+गया"
+        r")\s*[\.\!\?]*(?:\s+|$)",
+        re.IGNORECASE,
+    )
+
+    def _contains_answer_done_marker(self, text: str) -> bool:
+        """Detect completion cues anywhere in the answer, especially at the end."""
+        t = (text or "").strip()
+        if not t:
+            return False
+        if self._ANSWER_DONE_SUFFIX.search(t):
+            return True
+        # Short utterance that is only a done phrase
+        if len(t) <= 40 and re.match(
+            r"^(?:that'?s\s+it|that'?s\s+all|done|bas|ठीक\s+है|बस)\s*[\.\!\?]*$",
+            t,
+            re.IGNORECASE,
+        ):
+            return True
+        return False
+
+    def _is_answer_done_phrase(self, text: str) -> bool:
+        return self._contains_answer_done_marker(text)
+
+    def _core_answer_in_progress(self) -> bool:
+        """True when mid-answer progress checks indicate an in-flight CORE answer."""
+        orch = getattr(self.state, "interview_orchestrator", None)
+        if orch is None or not self._in_core_phase():
+            return False
+        if orch.awaiting_clarifier_reply:
+            return False
+        if orch.progress_checks:
+            return True
+        if orch.answer_continuation_count > 0:
+            return True
+        return False
+
+    def _active_endpoint_silence_for_recording(self) -> float:
+        """Use a longer pause threshold during long CORE answers to avoid splitting."""
+        endpoint = self.adaptive_silence_duration
+        if not self.is_recording or not self._recording_started_at:
+            return endpoint
+        if not self._in_core_phase():
+            return endpoint
+        speech_sec = time.monotonic() - self._recording_started_at
+        if speech_sec >= CORE_LONG_ANSWER_SPEECH_SEC:
+            return max(endpoint, CORE_LONG_ANSWER_SILENCE_SEC)
+        return endpoint
+
+    def _sync_turn_question_index(self) -> None:
+        """Drop held turns when the orchestrator advances to a new question."""
+        orch = getattr(self.state, "interview_orchestrator", None)
+        if orch is None:
+            return
+        idx = orch.current_index
+        if idx == self._turn_q_index:
+            return
+        if self._pending_audio is not None:
+            logger.info(
+                "[TURN DISCARD] Q%d→Q%d — dropping held turn %r",
+                max(self._turn_q_index, 0) + 1,
+                idx + 1,
+                (self._pending_text or "")[:60],
+            )
+            self._clear_pending_turn()
+        self._turn_q_index = idx
+
+    def _current_q_label(self) -> str:
+        orch = getattr(self.state, "interview_orchestrator", None)
+        if orch is None:
+            return "?"
+        return str(orch.current_index + 1)
+
+    def _substantive_answer_in_progress(self) -> bool:
+        """True when a long CORE answer is actively being captured or checked."""
+        if self._core_answer_in_progress():
+            return True
+        if self.is_recording and self._in_core_phase():
+            if self._recording_started_at:
+                speech_sec = time.monotonic() - self._recording_started_at
+                if speech_sec >= 8.0:
+                    return True
+        orch = getattr(self.state, "interview_orchestrator", None)
+        if orch is not None and orch.has_active_answer_progress():
+            return True
+        return False
+
+    def _defer_pending_flush(self, pending_text: str, pending_sec: float, reason: str) -> None:
+        logger.warning(
+            "[TURN DEFER] Q%s %s — active answer in progress (audio=%.1fs chars=%d text=%r)",
+            self._current_q_label(),
+            reason,
+            pending_sec,
+            len(pending_text),
+            pending_text[:60],
+        )
+        self._pending_until = time.monotonic() + TURN_FLUSH_DEFER_SEC
+
     def _clear_pending_turn(self) -> None:
         self._pending_audio = None
         self._pending_text = ""
         self._pending_until = 0.0
         self._pending_sarvam_failed = False
+        self._pending_core_deadline = 0.0
+
+    def _should_flush_held_core_turn(self, text: str, audio_sec: float) -> bool:
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        if self._contains_answer_done_marker(stripped):
+            return True
+        if len(stripped) >= TURN_MERGE_MIN_CHARS:
+            return True
+        if audio_sec >= CORE_LONG_ANSWER_SPEECH_SEC and len(stripped) >= 40:
+            return True
+        return False
 
     def _discard_expired_pending(self) -> None:
         if self._pending_audio is None or time.monotonic() < self._pending_until:
             return
         pending_text = (self._pending_text or "").strip()
-        print(
-            f"\n[TURN DISCARD] merge window expired "
-            f"(had {len(self._pending_audio) / SAMPLE_RATE:.1f}s audio, "
-            f"text={pending_text!r})",
-            file=sys.stderr,
-        )
-        if pending_text and should_commit_short_turn_immediately(pending_text):
-            print(
-                f"\n[TURN FLUSH] committing held short turn: {pending_text!r}",
-                file=sys.stderr,
+        pending_sec = len(self._pending_audio) / SAMPLE_RATE
+        if self._in_await_intro_phase():
+            should_flush = self._should_flush_held_intro_turn(pending_text, pending_sec)
+        elif self._pending_core_deadline > 0:
+            should_flush = self._should_flush_held_core_turn(pending_text, pending_sec)
+        else:
+            should_flush = self._should_flush_held_turn(pending_text, pending_sec)
+
+        if should_flush and self._substantive_answer_in_progress():
+            if len(pending_text) < TURN_FLUSH_GUARD_MIN_CHARS:
+                self._defer_pending_flush(
+                    pending_text, pending_sec, "tiny held turn during long answer"
+                )
+                return
+
+        if should_flush:
+            logger.info(
+                "[TURN FLUSH] Q%s merge window expired — committing held turn "
+                "(audio=%.1fs chars=%d): %r",
+                self._current_q_label(),
+                pending_sec,
+                len(pending_text),
+                pending_text[:80],
             )
             self._commit_turn(pending_text)
+        else:
+            logger.warning(
+                "[TURN DISCARD] Q%s merge window expired — dropping held turn "
+                "(audio=%.1fs chars=%d text=%r)",
+                self._current_q_label(),
+                pending_sec,
+                len(pending_text),
+                pending_text[:80] if pending_text else "",
+            )
         self._clear_pending_turn()
+
+    def _should_flush_held_turn(self, text: str, audio_sec: float) -> bool:
+        """Commit held text on expiry instead of silently dropping substantive answers."""
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        if should_commit_short_turn_immediately(stripped):
+            return True
+        if len(stripped) >= TURN_MERGE_MIN_CHARS:
+            return True
+        if audio_sec >= TURN_MERGE_MIN_AUDIO_SEC and len(stripped) >= 3:
+            return True
+        return False
 
     def _should_hold_turn(
         self,
@@ -173,6 +423,8 @@ class STTEngine:
     ) -> Tuple[bool, str]:
         if not TURN_MERGE_ENABLED:
             return False, ""
+        if self._in_await_intro_phase():
+            return self._should_hold_intro_turn(text, utterance_duration)
         if not self._in_core_phase():
             return False, ""
         if self._orch_awaiting_clarifier():
@@ -180,6 +432,29 @@ class STTEngine:
 
         stripped = (text or "").strip()
         if should_commit_short_turn_immediately(stripped):
+            return False, ""
+
+        if self._in_core_phase() and self._core_answer_in_progress():
+            if self._contains_answer_done_marker(stripped):
+                return False, ""
+            if (
+                self._pending_core_deadline > 0
+                and time.monotonic() >= self._pending_core_deadline
+            ):
+                logger.info(
+                    "[TURN FLUSH] core answer max hold reached — committing chars=%d",
+                    len(stripped),
+                )
+                return False, ""
+            if detect_incomplete_answer(stripped):
+                return True, "core_answer_in_progress"
+            word_count = len(stripped.split())
+            if word_count < MIN_ANSWER_WORDS:
+                return True, "core_answer_in_progress"
+            return False, ""
+
+        # Substantive Sarvam finals must reach scoring — never hold.
+        if stripped and len(stripped) >= TURN_MERGE_MIN_CHARS and not sarvam_failed:
             return False, ""
 
         if not stripped:
@@ -206,13 +481,25 @@ class STTEngine:
             return text
         return normalize_candidate_name(text, canonical)
 
-    def _commit_turn(self, text: str) -> None:
-        """Normalize and emit a single turn to the LLM queue."""
-        if not text or len(text) <= 2:
-            return
+    def _commit_turn(self, text: str) -> bool:
+        """Normalize and emit a single turn to the LLM queue. Returns True if queued."""
+        self._sync_turn_question_index()
+        stripped = (text or "").strip()
+        if not stripped or len(stripped) <= 2:
+            logger.debug("[TURN SKIP] reason=too_short len=%d", len(stripped))
+            return False
         if getattr(self.state, "interview_ended", None) and self.state.interview_ended.is_set():
-            return
-        normalized = self._normalize_candidate_name(text)
+            logger.debug("[TURN SKIP] reason=interview_ended")
+            return False
+        orch = getattr(self.state, "interview_orchestrator", None)
+        if orch is not None and orch.is_stale_previous_question_tail(stripped):
+            logger.info(
+                "[TURN SKIP] stale tail from previous question Q%d text=%r",
+                orch.current_index + 1,
+                stripped[:80],
+            )
+            return False
+        normalized = self._normalize_candidate_name(stripped)
         hook = getattr(self.state, "on_candidate_speech", None)
         if callable(hook):
             try:
@@ -224,6 +511,52 @@ class STTEngine:
             self.state.last_candidate_speech_at = time.monotonic()
             self.state.pending_presence_check = False
         self.state.llm_queue.put(normalized)
+        logger.info(
+            "[TURN COMMIT] queued %d chars for LLM/scoring",
+            len(normalized),
+        )
+        return True
+
+    def _clean_transcript_text(self, text: str) -> str:
+        cleaned = re.sub(r'\b(um|uh|hmm|ah|uhm)\b[\.\,]?', '', text, flags=re.IGNORECASE)
+        return re.sub(r'\s+', ' ', cleaned).strip()
+
+    def _is_backchannel(self, text: str) -> bool:
+        lowered = (text or "").strip().lower()
+        backchannel_patterns = [
+            r'^(yeah|yes|yep|yup|mhm|mmhmm|uh-huh|mm-hmm|right|got it)$',
+            r'^(yeah|yes|yep|yup|mhm|mmhmm|uh-huh|mm-hmm|right|got it)[\.!\?]*$',
+            r'^(yeah yeah|yes yes)$',
+        ]
+        return any(re.match(p, lowered) for p in backchannel_patterns)
+
+    def _finalize_transcript_commit(
+        self,
+        full_text: str,
+        utterance_duration: float,
+    ) -> None:
+        """Filter backchannels and commit a transcribed turn with explicit logging."""
+        if not full_text:
+            logger.info(
+                "[TURN SKIP] reason=empty_transcript duration=%.1fs",
+                utterance_duration,
+            )
+            return
+
+        cleaned = self._clean_transcript_text(full_text)
+        if not cleaned:
+            logger.info(
+                "[TURN SKIP] reason=empty_after_cleanup duration=%.1fs",
+                utterance_duration,
+            )
+            return
+
+        if self._is_backchannel(cleaned):
+            logger.info("[TURN SKIP] reason=backchannel text=%r", cleaned)
+            print(f"\n[BACKCHANNEL FILTERED]: '{cleaned}' (ignored - not a real turn)")
+            return
+
+        self._commit_turn(cleaned)
 
     def _transcribe_with_fallback(
         self, audio_data: np.ndarray, utterance_duration: float = 0.0
@@ -239,13 +572,23 @@ class STTEngine:
         full_text = ""
         sarvam_ok = False
         sarvam_attempted = self.sarvam_engine is not None
+        stt_timeout = sarvam_transcribe_timeout_sec(utterance_duration)
+        collect_deadline = sarvam_collect_deadline_sec(utterance_duration)
 
         with self._stt_lock:
             if self.sarvam_engine is not None:
                 try:
+                    logger.debug(
+                        "[STT] Sarvam batch audio=%.1fs timeout=%.1fs collect=%.1fs",
+                        utterance_duration,
+                        stt_timeout,
+                        collect_deadline,
+                    )
                     result = self.sarvam_engine.transcribe_sync(
                         audio_data,
                         sample_rate=self.actual_samplerate or SAMPLE_RATE,
+                        timeout=stt_timeout,
+                        collect_deadline=collect_deadline,
                     )
                     if result and result.strip():
                         candidate = result.strip()
@@ -270,10 +613,12 @@ class STTEngine:
             if not sarvam_ok and self._allow_whisper_fallback():
                 try:
                     model = self._ensure_whisper()
+                    mode = getattr(self.state, "interview_language", "english") or "english"
+                    whisper_lang = None if mode == "hinglish" else "en"
                     segments, _ = model.transcribe(
                         audio_data,
                         beam_size=3,
-                        language="en",
+                        language=whisper_lang,
                         condition_on_previous_text=False,
                         vad_filter=False,
                     )
@@ -303,9 +648,10 @@ class STTEngine:
         if not STT_FALLBACK_ENABLED:
             return False
         mode = getattr(self.state, "interview_language", "english") or "english"
-        if mode != "english":
-            return False
-        return True
+        if mode == "english":
+            return True
+        from language_profiles import get_profile
+        return get_profile(mode).speech.whisper_fallback
 
     def audio_callback(self, indata, frames, time_info, status):
         """Callback for sounddevice to capture audio streams."""
@@ -338,10 +684,12 @@ class STTEngine:
             return ""
         try:
             model = self._ensure_whisper()
+            mode = getattr(self.state, "interview_language", "english") or "english"
+            whisper_lang = None if mode == "hinglish" else "en"
             segments, _ = model.transcribe(
                 audio_data,
                 beam_size=3,
-                language="en",
+                language=whisper_lang,
                 condition_on_previous_text=False,
                 vad_filter=False,
             )
@@ -375,6 +723,10 @@ class STTEngine:
             return
         if self.state.is_ai_speaking.is_set():
             return
+        if orch is not None:
+            ok, _reason = orch.can_run_progress_gate(is_ai_speaking=False)
+            if not ok:
+                return
         if time.monotonic() < self._bot_interrupt_cooldown_until:
             return
         if self._orch_awaiting_clarifier():
@@ -507,10 +859,19 @@ class STTEngine:
                         if not self.is_recording:
                             print("\rListening...        ", end="", flush=True)
                             self.is_recording = True
+                            self.state.candidate_recording = True
                             self._recording_started_at = time.monotonic()
                             self._last_bot_interrupt_check = time.monotonic()
                             # Reset cooldown so each new answer gets a clean interrupt window
                             self._bot_interrupt_cooldown_until = 0.0
+                            started_hook = getattr(
+                                self.state, "on_candidate_speech_started", None
+                            )
+                            if callable(started_hook):
+                                try:
+                                    started_hook()
+                                except Exception:
+                                    pass
                             for pre_block in pre_speech_buffer:
                                 self.audio_buffer.append(pre_block)
                             pre_speech_buffer.clear()
@@ -520,7 +881,8 @@ class STTEngine:
                     else:
                         if self.is_recording:
                             self.last_speech_time += (512 / SAMPLE_RATE)
-                            if self.last_speech_time >= self.adaptive_silence_duration:
+                            endpoint = self._active_endpoint_silence_for_recording()
+                            if self.last_speech_time >= endpoint:
                                 self.transcribe_buffer()
                                 self.is_recording = False
                                 self.last_speech_time = 0.0
@@ -543,6 +905,8 @@ class STTEngine:
         """
         if not self.audio_buffer:
             return
+
+        self._sync_turn_question_index()
 
         if not self.state.is_started.is_set():
             self._reset_recording_state()
@@ -584,12 +948,12 @@ class STTEngine:
         if len(self.recent_utterance_lengths) >= 3:
             avg_duration = sum(self.recent_utterance_lengths) / len(self.recent_utterance_lengths)
             if self.sarvam_engine is not None:
-                # Sarvam path favors fuller sentence capture over ultra-fast cutoff.
                 if avg_duration < 2.0:
-                    self.adaptive_silence_duration = max(self._active_endpoint_silence - 0.2, 1.0)
-                elif avg_duration > 5.0:
-                    self.adaptive_silence_duration = max(self._active_endpoint_silence + 0.2, 1.4)
+                    self.adaptive_silence_duration = max(
+                        self._active_endpoint_silence - 0.2, 0.8
+                    )
                 else:
+                    # Do not stretch silence for long answers — keeps turn-end latency stable.
                     self.adaptive_silence_duration = self._active_endpoint_silence
             else:
                 # Preserve Whisper behavior for fallback-only mode.
@@ -607,37 +971,36 @@ class STTEngine:
             audio_data, utterance_duration=utterance_duration
         )
 
-        # Hold path: store audio for merge even when transcript is empty
+        if self.state.is_ai_speaking.is_set():
+            logger.info(
+                "[TURN DISCARD] Q%s bot speaking during transcription — dropping utterance",
+                self._current_q_label(),
+            )
+            return
+
         should_hold, hold_reason = self._should_hold_turn(
             full_text, utterance_duration, sarvam_failed
         )
         if should_hold:
-            print(
-                f"\n[TURN HOLD] reason={hold_reason} duration={utterance_duration:.1f}s "
-                f"text={full_text!r}",
-                file=sys.stderr,
+            logger.info(
+                "[TURN HOLD] reason=%s duration=%.1fs chars=%d text=%r",
+                hold_reason,
+                utterance_duration,
+                len((full_text or "").strip()),
+                (full_text or "")[:80],
             )
             self._pending_audio = audio_data.copy()
-            self._pending_text = (full_text or "").strip() or self._pending_text
-            self._pending_until = time.monotonic() + TURN_MERGE_WINDOW_SEC
+            new_text = (full_text or "").strip()
+            if self._pending_text and new_text:
+                self._pending_text = f"{self._pending_text} {new_text}".strip()
+            elif new_text:
+                self._pending_text = new_text
+            self._pending_until = time.monotonic() + self._merge_window_sec(hold_reason)
             self._pending_sarvam_failed = sarvam_failed
+            if hold_reason == "core_answer_in_progress" and self._pending_core_deadline <= 0:
+                self._pending_core_deadline = (
+                    time.monotonic() + CORE_ANSWER_MAX_HOLD_SEC
+                )
             return
 
-        if not full_text:
-            return
-
-        full_text = re.sub(r'\b(um|uh|hmm|ah|uhm)\b[\.\,]?', '', full_text, flags=re.IGNORECASE)
-        full_text = re.sub(r'\s+', ' ', full_text).strip()
-
-        if full_text:
-            lowered = full_text.lower()
-            backchannel_patterns = [
-                r'^(yeah|yes|yep|yup|mhm|mmhmm|uh-huh|mm-hmm|right|got it)$',
-                r'^(yeah|yes|yep|yup|mhm|mmhmm|uh-huh|mm-hmm|right|got it)[\.!\?]*$',
-                r'^(yeah yeah|yes yes)$',
-            ]
-            if any(re.match(p, lowered) for p in backchannel_patterns):
-                print(f"\n[BACKCHANNEL FILTERED]: '{full_text}' (ignored - not a real turn)")
-                return
-
-        self._commit_turn(full_text)
+        self._finalize_transcript_commit(full_text, utterance_duration)

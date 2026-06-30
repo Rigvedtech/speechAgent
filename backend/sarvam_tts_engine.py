@@ -164,7 +164,10 @@ class SarvamTTSEngine:
         async with self.connection_lock:
             if self.is_connected and not self._is_ws_closed():
                 return True
-            
+
+            # Language reconnect uses _close_ws only; reset so keepalive can restart.
+            self.should_stop = False
+
             try:
                 # Build URL with model and completion event flag
                 # send_completion_event=true ensures we get an explicit "final" event
@@ -302,7 +305,7 @@ class SarvamTTSEngine:
 
     async def reconnect_with_settings(self) -> bool:
         """Close and reconnect so new language_code is used in the WebSocket URL."""
-        await self.disconnect()
+        await self._close_ws()
         self.is_connected = False
         self.retry_count = 0
         return await self.connect()

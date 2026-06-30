@@ -1,0 +1,6 @@
+# Transcript bot=d6796702-f567-4be6-9659-b0b0cf53ab50 started=20260625_124607
+12:47:44 [AI]: Namaste Atharv, welcome. Main Prabhat hoon, aaj aapka interviewer. Shuru karne se pehle, kripya apna brief introduction dijiye.
+12:48:29 [You]: हां हां Hello Prabhat तो मेरा नाम अथर्व मोरे है। I have completed my Bachelor of Information Technology From CKD College, Panvel. मैं जो विनगर में रहता हूं। During my academic करियर I have been strong Foundation in Data Analyst इस and Business Analyst. I have also completed 1 month internship Date as a data analyst from Kasmarat. At that time I gained solid experience of how to collect data and analyze the data.
+12:48:29 [AI]: Intro dene ke liye dhanyavaad, Atharv. Do table combine karne ke liye aapne kabhi SQL JOIN ka use kiya hai?
+12:49:12 [You]: हाँ इन SQL the choice between the left line and inner joint Depend on the business requirement and the type of Analyze we want to perform And inner join returns only those record that have matching values in both tables. I use it when I am understand only in records and exist in both data sets. On the other hand Left Join Returns All Record From The Left Table Regardless of of whether matching record exist in the right Right Table.
+12:49:13 [AI]: Samajh gaya. Aapne KAS Marine me fuel efficiency improve kiya, us analysis ke baare me bataiye

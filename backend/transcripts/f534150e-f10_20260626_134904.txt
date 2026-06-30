@@ -1,0 +1,6 @@
+# Transcript bot=f534150e-f102-44c3-9c31-e7421da6ef87 started=20260626_134904
+13:50:13 [AI]: Namaste Atharv, welcome. Main Prabhat hoon, aaj aapka interviewer. Shuru karne se pehle, kripya apna brief introduction dijiye.
+13:51:04 [You]: बात I am प्रणय। And I have completed my Bachelor's degree in Computer Application. Right now I am working as a project engineer in Rigved technology. And I am looking for a software developer role in your organization.
+13:51:04 [AI]: Intro dene ke liye dhanyavaad, Atharv. Aapne SQL joins kaun se use kiye hain, INNER JOIN aur LEFT JOIN mein se kaunsa kab use karte hain?
+13:51:22 [You]: उसके बाद next next question वो पूछता जाएगा तो उस हिसाब से यहां पे देखिएगा current status क्या है वगैरह।
+13:51:23 [AI]: Samajh gaya. Aapne KAS Marine mein 5% fuel efficiency improvement kiya, usmein aapne kaunse data points analyze kiye?

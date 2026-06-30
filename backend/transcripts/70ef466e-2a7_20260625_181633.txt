@@ -1,0 +1,47 @@
+# Transcript bot=70ef466e-2a7c-4167-9c88-e3c2d14b4628 started=20260625_181633
+18:17:51 [AI]: Namaste Atharv, welcome. Main Prabhat hoon, aaj aapka interviewer. Shuru karne se pehle, kripya apna brief introduction dijiye.
+18:18:37 [You]: Hello Prabhat. मैं myself Atharv More. I have completed my Bachelor of Information Technology. From Security College Panvel I resides at जुईनगर वाशी During my academic career I have gained strong foundation in data analyst and business analyst. I have also completed 1 month of data analysis internship from Casmar and At that time I mean solid experience of how to collect raw data material and analyze the data. Also currently I am completing my data analyst course from Newton School. So that's it about myself.
+18:18:37 [AI]: Intro dene ke liye dhanyavaad, Atharv. Excel mein Pivot Table use karke dataset summarize kaise kiya?
+18:19:13 [AI]: P kya hai?
+18:19:23 [You]: तो I frequently use Tables to summarize large data sets. For example while analyzing operations data ठीक है। At Casmar and work with voice data set containing information such as vessel and its roots, voice duration and fuel consumption. I use pivot table to summarize fuel consumption by vessels and route Please help me identify Which routes और vessels were consuming more fuel than expected? Expected Also analyze monthly
+18:19:23 [AI]: Theek hai. Jahan se chhoda tha wahan se continue kijiye.
+18:19:57 [You]: I use pivot table to summarize fuel consumption by vessels and routes This help me identify which roots और vessels were consuming more fuel than expected. I also analyze Monthly Voucher Performance to Identify Trends over time. So This is द main use of pivot table। इन Excel टू summarize data sets।
+18:19:58 [AI]: Samajh gaya. RCB-IPL SQL project mein complex SQL queries kaise likhe?
+18:20:34 [AI]: joins kaise use kiye?
+18:21:16 [You]: One of the most challenging analytical Questions in my RCB IPL Project देखो आज। Which RCB batsman consistently perform well across multiple IPL seasons and venues. To answer this question, I had to combine data from multiple tables such as matches, Deliveries Players Information and venue details. First I use multiple joins To combine this data set देन aggregates run scored by each player for every हाँ पर तो तो I use multiple jobs to combine this data sets then aggregates runs scored by each player for every session and venue. The tricky part was ranking players separately within each season. While maintaining details player level Records I solve this using rank window function. The query logic was challenging because it required combining multiple data set performing aggregations and ranking players with separate season simultaneously.
+18:21:16 [AI]: Theek hai. Jahan se chhoda tha wahan se continue kijiye.
+18:21:35 [You]: The tricky part was ranking players separately within each season. While maintaining detailed player level records, I solved this using rank window function.
+18:21:36 [AI]: Achha. Pivot Table ke alawa Excel mein kya advanced functions use kiye?
+18:22:10 [AI]: INDEX/MATCH kaise flexible hai?
+18:22:36 [You]: Apart from pivot table I frequently use functions such as VLOOKUP Index Match If statement Count if and Sum if. For example in one project I had customer information in one sheet and transaction details in another. I use index match Function To retrieve customer attribute based on customer ID. Because it is more flexible than VLOOKUP Works Even when the Index by Match to Retrieve Customer Attribute Based on customer ID because it is more flexible Then we look up. and work even when the we look up बुक अप कॉलम इज नॉट but Not the left most column.
+18:22:36 [AI]: Theek hai. Jahan se chhoda tha wahan se continue kijiye.
+18:22:53 [You]: I have also used nested if statement for categorizing customers into high भाई। Medium and Low Level Segment Based on purchase amount. So that's it.
+18:22:54 [AI]: Got it. SQL mein INNER JOIN aur LEFT JOIN mein kya difference hai?
+18:23:27 [AI]: table kya hai?
+18:23:35 [You]: An inner join returns only records. दैट आर मैचिंग वैल्यूज इन बोथ टेबल्स। फॉर एग्जांपल इफ आई हैव कस्टमर टेबल एंड ऑर्डर टेबल एंड आई वांट टू सी ओनली कस्टमर्स। Who placed order? I would use inner join. A left join returns all records from left table and matching records. Only the matching records from the right tables. If no match exist It returns null value. For example if I Want to identify customers who have never place an order पर
+18:23:35 [AI]: Theek hai. Jahan se chhoda tha wahan se continue kijiye.
+18:23:59 [You]: In short inner join means only matching records and left join means all records from left table plus match only matching records from right tables. Not all records from right tables. It only Get Matching Records.
+18:23:59 [AI]: Samajh gaya. KAS Marine mein Power BI dashboard kaise banaya?
+18:24:14 [You]: For example if I want to identify customers who have never placed an order I would use a left join that's it.
+18:24:14 [AI]: Achha. SQL mein window function use karke user transactions ka total sales kaise nikale?
+18:24:47 [AI]: Seedha point par aate hain. SQL mein window function use karke total sales kaise calculate karein?
+18:24:57 [AI]: Seedha point par aate hain. SQL mein window function use karke user transactions ka total sales kaise calculate kare?
+18:25:09 [AI]: Right. Power BI dashboard banane se pehle kya sochte hain?
+18:25:43 [AI]: APIs kyun important hain?
+18:25:49 [You]: One of the most Comprehensive I would first rank each transaction for every user. Based on transaction amount and then calculate total sales.
+18:25:49 [AI]: Theek hai. Jahan se chhoda tha wahan se continue kijiye.
+18:26:10 [You]: Which KB are important what decision will stakeholder make using the dashboard. Understanding the audience and business goal को helps determine which visualization metrics and level of detail should be included.
+18:26:12 [AI]: Theek hai. Internship mein analysis kaise kiya aur fuel efficiency recommendations mein 5% improvement kaise kiya?
+18:26:48 [AI]: Power bed kya tha?
+18:27:09 [You]: At Casmarana analyze operational data set containing voyage detail, vessel speed, Food Information, O H Duration and Fuel Consumption Locks. The first Involve cleaning and validating the data. क्या? Using SQL and Excel Next I perform exploratory analysis To identify trends in fuel consumption across vessels and routes. Using power tables and Power BI dashboard and discord एक muscle operating outside optimal speed ranges consume Significantly Power View is a tool to visualize the Tables and API से मूव। Effective form हाँ
+18:27:09 [AI]: Theek hai. Jahan se chhoda tha wahan se continue kijiye.
+18:27:38 [You]: Based on this finding I recommended maintaining vessels within optimal speed range and improving route planning. I present this insert through interactive Power BI dashboard and Visual comparison swing Fuel use before crypto Optimization। A 5% improvement in fuel efficiency is there.
+18:27:39 [AI]: Okay. Data stakeholders ko present kaise kiya?
+18:28:11 [AI]: Seedha point par aate hain. Data stakeholders ko present karne ke liye aapka preferred Data Visualization tool kya hai?
+18:28:24 [AI]: Seedha point par aate hain. Data stakeholders ko present karne ke liye kaun sa visualization tool use karte hain?
+18:28:35 [AI]: Achha. Data quality issues kaise handle kiye?
+18:29:09 [AI]: standardize kaise kiya?
+18:29:13 [You]: some common data quality issue I have encounter include missing values Example missing fuel consumption और information duplicate records Inconsistent formats, incorrect data types, Outlier Invalid Values मैं Overall Approach इस 2 Profile द data Identify issues Clean and Standardize the data set Validate the changes and then proceed with analysis. That's it.
+18:29:13 [AI]: Theek hai. Jahan se chhoda tha wahan se continue kijiye.
+18:29:42 [You]: Incorrect data type Example numeric Numeric value stored as text. Next Solution convert to Appropriate data types before analyzing. Outliers and Invalid Values Identify Through Exploratory Analysis and validate with business teams Before taking Corrective Actions.
+18:29:43 [AI]: Interview complete karne ke liye dhanyavaad. Hum aapke responses review karenge aur jald contact karenge.

@@ -64,3 +64,30 @@ def load_report(bot_id: str) -> Optional[Dict[str, Any]]:
 
 def report_exists(bot_id: str) -> bool:
     return load_report(bot_id) is not None
+
+
+def list_reports() -> list[Dict[str, Any]]:
+    """Return lightweight summaries of all persisted reports, newest first."""
+    summaries: list[Dict[str, Any]] = []
+    reports_dir = _reports_dir()
+    paths = sorted(reports_dir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in paths:
+        try:
+            with _lock:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            if not data.get("interview_completed"):
+                continue
+            summaries.append(
+                {
+                    "bot_id": data.get("bot_id") or path.stem,
+                    "candidate_name": data.get("candidate_name"),
+                    "overall_average": data.get("overall_average"),
+                    "questions_scored": data.get("questions_scored"),
+                    "questions_planned": data.get("questions_planned"),
+                    "stopped_reason": data.get("stopped_reason"),
+                    "completed_at": data.get("completed_at"),
+                }
+            )
+        except (json.JSONDecodeError, OSError) as ex:
+            logger.warning("[REPORT STORE] skip %s: %s", path, ex)
+    return summaries

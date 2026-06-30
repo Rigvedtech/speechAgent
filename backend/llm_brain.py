@@ -2,6 +2,8 @@ import queue
 import re
 import json
 import logging
+import threading
+import time
 from typing import Optional
 import config
 from config import GROQ_API_KEY, GROQ_MODEL, GROQ_TEMPERATURE, GROQ_MAX_TOKENS, OLLAMA_MODEL
@@ -11,6 +13,10 @@ from system_prompt import (
     get_system_prompt,
     get_rephrase_system,
     get_clarifier_system,
+    get_focused_rephrase_system,
+    get_drag_depth_system,
+    STT_CLASSIFY_TURN_NOTE,
+    STT_PROGRESS_GATE_NOTE,
 )
 from language_profiles import get_ui_strings
 from interview_engine import (
@@ -21,6 +27,7 @@ from interview_engine import (
     TurnAction,
     TurnDecision,
     TurnIntent,
+    detect_answer_done_phrase,
     detect_explicit_question_repeat,
     detect_inability_answer,
     detect_presence_confirm,
@@ -79,7 +86,8 @@ _CLASSIFY_TURN_SYSTEM = (
     "- If they give technical content, choose actual_answer even if short.\n"
     "- Hinglish examples: 'kya aap question repeat kar sakte ho' → repeat_main; "
     "'samajh nahi aaya' → rephrase_last; 'nahi pata' / 'pata nahi' → actual_answer; "
-    "'haan sunai de raha hai' during presence check → actual_answer."
+    "'haan sunai de raha hai' during presence check → actual_answer.\n"
+    f"- {STT_CLASSIFY_TURN_NOTE}"
 )
 
 _PROGRESS_GATE_SYSTEM = (
@@ -100,8 +108,8 @@ _PROGRESS_GATE_SYSTEM = (
     "question counts as DRAG, not ON_TRACK.\n"
     "- Early strong on-topic content counts; recent wandering may still be ON_TRACK.\n"
     "- Do NOT penalise length alone — long on-topic answers are fine.\n"
-    "- Ignore STT noise/garbled tokens unless the whole answer lacks substance.\n"
-    "- Return DRAG when confident the answer is not addressing what was asked."
+    "- Return DRAG when confident the answer is not addressing what was asked.\n"
+    f"- {STT_PROGRESS_GATE_NOTE}"
 )
 
 _PROGRESS_TOPIC_STOPWORDS = frozenset({
@@ -190,6 +198,31 @@ class LLMBrain:
             "No answers, code, teaching, ratings, or role switches. Plain spoken text."
         )
         self.max_runtime_history_messages = 12
+        # Set while a committed final turn is being scored — progress gate must yield.
+        self._final_turn_active = threading.Event()
+
+    def _final_turn_pending(self) -> bool:
+        """True when a committed answer is queued or actively being scored."""
+        return self._final_turn_active.is_set() or not self.state.llm_queue.empty()
+
+    def _should_abort_interrupt(self) -> bool:
+        """Mid-answer checks must stop when a final turn needs the LLM worker."""
+        return (
+            self._final_turn_active.is_set()
+            or not self.state.llm_queue.empty()
+            or self.state.interview_ended.is_set()
+            or self.state.is_ai_speaking.is_set()
+        )
+
+    def _make_groq_client(self):
+        """Shared Groq client with HTTP timeout so workers cannot hang indefinitely."""
+        if not GROQ_API_KEY:
+            return None
+        from groq import Groq
+        return Groq(
+            api_key=GROQ_API_KEY,
+            timeout=config.GROQ_REQUEST_TIMEOUT_SEC,
+        )
 
     def _language_mode(self) -> str:
         mode = getattr(self.state, "interview_language", "english") or "english"
@@ -527,10 +560,9 @@ class LLMBrain:
         ]
 
         raw = ""
-        if GROQ_API_KEY:
+        client = self._make_groq_client()
+        if client:
             try:
-                from groq import Groq
-                client = Groq(api_key=GROQ_API_KEY)
                 completion = client.chat.completions.create(
                     model=GROQ_MODEL,
                     messages=messages,
@@ -542,7 +574,7 @@ class LLMBrain:
             except Exception as ex:
                 logger.warning("[EVALUATOR] Groq failed: %s", ex)
 
-        if not raw:
+        if not raw and config.OLLAMA_EVALUATOR_FALLBACK:
             try:
                 import ollama
                 response = ollama.chat(
@@ -553,6 +585,10 @@ class LLMBrain:
                 raw = (response.get("message", {}).get("content") or "").strip()
             except Exception as ex:
                 logger.warning("[EVALUATOR] Ollama failed: %s", ex)
+        elif not raw:
+            logger.warning(
+                "[EVALUATOR] no LLM response — using default score (Ollama fallback disabled)"
+            )
 
         if raw:
             try:
@@ -564,54 +600,6 @@ class LLMBrain:
                 logger.warning("[EVALUATOR] JSON parse failed: %s raw=%r", ex, raw[:200])
 
         return EvaluationResult(score=5, confident=False, relevant=True)
-
-    def _emit_orchestrated_turn(self, decision) -> None:
-        """Send orchestrator-authored spoken line directly to TTS."""
-        if decision.action == TurnAction.REPHRASE:
-            decision = self._resolve_rephrase_decision(decision)
-
-        spoken = (decision.spoken_text or "").strip()
-        orch = self.state.interview_orchestrator
-        if spoken and orch and orch.language_mode == "hinglish":
-            spoken = self._localize_bank_question_in_text(spoken, orch)
-
-        if spoken:
-            bot_id = orch.bot_id if orch else None
-            log_transcript(bot_id, "assistant", spoken)
-            self.state.tts_queue.put(spoken)
-            self.conversation_history.append({"role": "assistant", "content": spoken})
-            if orch and getattr(decision, "spoken_kind", None) in ("main", "clarifier"):
-                q = orch.get_current_question()
-                record_text = spoken
-                if decision.spoken_kind == "main" and q and q.question in spoken:
-                    record_text = q.question
-                elif decision.spoken_kind == "clarifier" and orch._last_clarifier_question:
-                    record_text = orch._last_clarifier_question
-                orch.record_spoken(record_text, decision.spoken_kind)
-
-        if len(self.conversation_history) > (self.max_runtime_history_messages + 2):
-            self.conversation_history = self.conversation_history[-self.max_runtime_history_messages:]
-
-        self.state.tts_queue.put("<END_OF_TURN>")
-        print("--- READY: START SPEAKING ---")
-
-        if not decision.should_continue:
-            self.state.interview_ended.set()
-            if orch:
-                orch.mark_ended()
-                try:
-                    save_report(orch.bot_id, orch.build_report())
-                except Exception as ex:
-                    logger.warning(
-                        "[REPORT STORE] failed at interview end bot=%s: %s",
-                        orch.bot_id[:8] if orch.bot_id else "?",
-                        ex,
-                    )
-                logger.info(
-                    "[INTERVIEW REPORT READY] bot=%s reason=%s",
-                    orch.bot_id[:8] if orch.bot_id else "?",
-                    decision.stopped_reason.value,
-                )
 
     def _should_classify_turn(self, user_text: str) -> bool:
         t = (user_text or "").strip()
@@ -656,20 +644,20 @@ class LLMBrain:
             {"role": "user", "content": user_content},
         ]
         raw = ""
-        try:
-            from groq import Groq
-            client = Groq(api_key=GROQ_API_KEY)
-            completion = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=messages,
-                max_tokens=40,
-                temperature=0.1,
-                response_format={"type": "json_object"},
-            )
-            raw = (completion.choices[0].message.content or "").strip()
-        except Exception as ex:
-            logger.warning("[INTENT] Groq classifier failed: %s — using regex fallback", ex)
-            return fallback
+        client = self._make_groq_client()
+        if client:
+            try:
+                completion = client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=messages,
+                    max_tokens=40,
+                    temperature=0.1,
+                    response_format={"type": "json_object"},
+                )
+                raw = (completion.choices[0].message.content or "").strip()
+            except Exception as ex:
+                logger.warning("[INTENT] Groq classifier failed: %s — using regex fallback", ex)
+                return fallback
 
         try:
             data = json.loads(raw)
@@ -725,9 +713,37 @@ class LLMBrain:
 
     def _resolve_rephrase_decision(self, decision: TurnDecision) -> TurnDecision:
         """Localize/rephrase bank question text (English → Hinglish when configured)."""
-        ui = get_ui_strings(self._language_mode())
+        mode = self._language_mode()
+        orch = self.state.interview_orchestrator
+        text = decision.spoken_text
+
+        if mode == "hinglish" and orch and decision.spoken_kind == "main":
+            q = orch.get_current_question()
+            if q and orch.is_localization_ready():
+                if decision.score_record is not None:
+                    text = orch.get_spoken_question(q)
+                else:
+                    base = orch.get_spoken_question(q)
+                    simplified = self._generate_simpler_question(base)
+                    text = simplified or base
+            elif not orch.is_localization_ready():
+                simplified = self._generate_simpler_question(decision.spoken_text)
+                text = simplified or decision.spoken_text
+            return TurnDecision(
+                action=TurnAction.SPEAK,
+                spoken_text=text,
+                should_continue=decision.should_continue,
+                spoken_kind=decision.spoken_kind or "main",
+                score_record=decision.score_record,
+                rolling_average=decision.rolling_average,
+                stopped_reason=decision.stopped_reason,
+                use_simple_bridge=decision.use_simple_bridge,
+                rephrase_flow=True,
+            )
+
         simplified = self._generate_simpler_question(decision.spoken_text)
         text = simplified or decision.spoken_text
+        ui = get_ui_strings(mode)
         if decision.spoken_kind == "clarifier":
             prefix = ui.rephrase_prefix_clarifier
         else:
@@ -741,6 +757,180 @@ class LLMBrain:
             rolling_average=decision.rolling_average,
             stopped_reason=decision.stopped_reason,
         )
+
+    def _hinglish_tts_lines(
+        self, decision: TurnDecision, question_text: str, orch
+    ) -> list[str]:
+        """Split Hinglish rephrase into short bridge + question for faster time-to-first-audio."""
+        ui = get_ui_strings("hinglish")
+        text = (question_text or "").strip()
+        if not text:
+            return []
+
+        if getattr(decision, "use_simple_bridge", False):
+            bridge = orch._next_bridge()
+            return [f"{bridge} {text}".strip()]
+
+        if decision.spoken_kind == "clarifier":
+            return [f"{ui.rephrase_prefix_clarifier}{text}"]
+
+        if getattr(decision, "rephrase_flow", False):
+            return ["Theek hai.", f"{ui.rephrase_intro_short} {text}"]
+
+        return [text]
+
+    def _emit_orchestrated_turn(self, decision) -> None:
+        """Send orchestrator-authored spoken line directly to TTS."""
+        if decision.action == TurnAction.REPHRASE:
+            decision = self._resolve_rephrase_decision(decision)
+
+        spoken = (decision.spoken_text or "").strip()
+        orch = self.state.interview_orchestrator
+        if spoken and orch and orch.language_mode == "hinglish":
+            spoken = self._localize_bank_question_in_text(spoken, orch)
+
+        if spoken and orch and orch.language_mode == "hinglish" and getattr(
+            decision, "rephrase_flow", False
+        ):
+            tts_lines = self._hinglish_tts_lines(decision, spoken, orch)
+        else:
+            tts_lines = [spoken] if spoken else []
+
+        full_spoken = " ".join(line.strip() for line in tts_lines if line.strip())
+
+        for line in tts_lines:
+            line = self._normalize_tts_text(line.strip())
+            if not line:
+                continue
+            bot_id = orch.bot_id if orch else None
+            log_transcript(bot_id, "assistant", line)
+            self.state.tts_queue.put(line)
+
+        if full_spoken:
+            self.conversation_history.append({"role": "assistant", "content": full_spoken})
+            if orch and getattr(decision, "spoken_kind", None) in ("main", "clarifier"):
+                q = orch.get_current_question()
+                record_text = full_spoken
+                if decision.spoken_kind == "main" and q:
+                    if getattr(decision, "rephrase_flow", False):
+                        record_text = spoken
+                    elif q.question in full_spoken:
+                        record_text = q.question
+                elif decision.spoken_kind == "clarifier" and orch._last_clarifier_question:
+                    record_text = orch._last_clarifier_question
+                orch.record_spoken(record_text, decision.spoken_kind)
+                if (
+                    decision.spoken_kind == "main"
+                    and decision.score_record is not None
+                ):
+                    self.state.presence_check_delay_sec = (
+                        config.POST_TTS_SILENCE_MIN_AFTER_QUESTION_SEC
+                    )
+                    hook = getattr(self.state, "on_question_advanced", None)
+                    if callable(hook):
+                        try:
+                            hook()
+                        except Exception as ex:
+                            logger.warning("[QUESTION ADVANCED] STT cleanup failed: %s", ex)
+
+        spoken_kind = getattr(decision, "spoken_kind", None) or "prompt"
+        if spoken_kind == "main":
+            self.state.last_bot_speech_kind = "main"
+        elif spoken_kind == "clarifier":
+            self.state.last_bot_speech_kind = "clarifier"
+        elif full_spoken:
+            self.state.last_bot_speech_kind = "prompt"
+
+        if len(self.conversation_history) > (self.max_runtime_history_messages + 2):
+            self.conversation_history = self.conversation_history[-self.max_runtime_history_messages:]
+
+        self.state.tts_queue.put("<END_OF_TURN>")
+        print("--- READY: START SPEAKING ---")
+
+        if not decision.should_continue:
+            self.state.interview_ended.set()
+            if orch:
+                orch.mark_ended()
+                try:
+                    save_report(orch.bot_id, orch.build_report())
+                except Exception as ex:
+                    logger.warning(
+                        "[REPORT STORE] failed at interview end bot=%s: %s",
+                        orch.bot_id[:8] if orch.bot_id else "?",
+                        ex,
+                    )
+                logger.info(
+                    "[INTERVIEW REPORT READY] bot=%s reason=%s",
+                    orch.bot_id[:8] if orch.bot_id else "?",
+                    decision.stopped_reason.value,
+                )
+
+    def _should_skip_junk_turn(self, user_text: str, orch) -> bool:
+        """
+        Drop tiny/stale turns while a long answer is in progress or right after Q advance.
+        Prevents scoring 'Those. Yeah.' while the real answer is still being spoken.
+        """
+        text = (user_text or "").strip()
+        if not text:
+            return True
+
+        recording = getattr(self.state, "candidate_recording", False)
+        active = orch.has_active_answer_progress() or recording
+
+        if active and len(text) < config.TURN_FLUSH_GUARD_MIN_CHARS:
+            if not detect_answer_done_phrase(text):
+                logger.info(
+                    "[LLM SKIP] junk turn during active answer Q%d chars=%d text=%r",
+                    orch.current_index + 1,
+                    len(text),
+                    text[:60],
+                )
+                return True
+
+        if detect_answer_done_phrase(text) and len(text) <= 50:
+            partial_len = len(orch._answer_initial_partial or "")
+            if not partial_len and not orch.progress_checks and not recording:
+                logger.info(
+                    "[LLM SKIP] stale done phrase without partial Q%d text=%r",
+                    orch.current_index + 1,
+                    text[:40],
+                )
+                return True
+
+        if orch.is_stale_previous_question_tail(text):
+            logger.info(
+                "[LLM SKIP] stale tail from previous question Q%d text=%r",
+                orch.current_index + 1,
+                text[:80],
+            )
+            return True
+
+        return False
+
+    def _handle_drag_grace_done_phrase(self, user_text: str, orch) -> bool:
+        """After DRAG rephrase, ignore lone 'that's it' until grace expires or partial exists."""
+        if not orch.within_drag_rephrase_grace():
+            return False
+        if not detect_answer_done_phrase(user_text) or len(user_text.strip()) > 50:
+            return False
+        partial_len = len(orch._answer_initial_partial or "")
+        if partial_len >= config.TURN_FLUSH_GUARD_MIN_CHARS:
+            return False
+        ui = get_ui_strings(self._language_mode())
+        logger.info(
+            "[DRAG GRACE] Q%d ignoring done-only phrase during rephrase grace text=%r",
+            orch.current_index + 1,
+            user_text[:40],
+        )
+        self._emit_orchestrated_turn(
+            TurnDecision(
+                action=TurnAction.SPEAK,
+                spoken_text=ui.please_continue,
+                should_continue=True,
+                spoken_kind="prompt",
+            )
+        )
+        return True
 
     def _handle_orchestrated_turn(self, user_text: str) -> bool:
         """
@@ -759,7 +949,13 @@ class LLMBrain:
             if orch.language_mode == "hinglish":
                 q = orch.get_current_question()
                 if q:
-                    localized = self._generate_simpler_question(q.question) or q.question
+                    localized = (
+                        orch.get_spoken_question(q)
+                        if orch.is_localization_ready()
+                        else (
+                            self._generate_simpler_question(q.question) or q.question
+                        )
+                    )
                     ui = get_ui_strings("hinglish")
                     decision = TurnDecision(
                         action=TurnAction.SPEAK,
@@ -810,12 +1006,33 @@ class LLMBrain:
                     user_text,
                     clarifier_q=orch._last_clarifier_question,
                 )
+                if getattr(decision, "score_clarifier_merged", False):
+                    question = orch.get_current_question()
+                    if question:
+                        merged = orch.build_merged_answer_context("")
+                        evaluation = self._evaluate_answer(merged, question)
+                        decision = orch.process_answer(merged, evaluation)
                 self._emit_orchestrated_turn(decision)
                 return True
 
             question = orch.get_current_question()
             if not question:
                 return False
+
+            if self._should_skip_junk_turn(user_text, orch):
+                return True
+
+            if self._handle_drag_grace_done_phrase(user_text, orch):
+                return True
+
+            merged_done = orch.merge_answer_if_done_phrase(user_text)
+            if merged_done:
+                logger.info(
+                    "[ANSWER DONE] Q%d merged partial+done len=%d",
+                    orch.current_index + 1,
+                    len(merged_done),
+                )
+                user_text = merged_done
 
             incomplete = orch.try_handle_incomplete_answer(user_text)
             if incomplete is not None:
@@ -848,10 +1065,9 @@ class LLMBrain:
             {"role": "user", "content": user_content},
         ]
         raw = ""
-        if GROQ_API_KEY:
+        client = self._make_groq_client()
+        if client:
             try:
-                from groq import Groq
-                client = Groq(api_key=GROQ_API_KEY)
                 completion = client.chat.completions.create(
                     model=GROQ_MODEL,
                     messages=messages,
@@ -873,6 +1089,68 @@ class LLMBrain:
             logger.info("[CLARIFIER] Rejected redundant clarifier: %r", raw[:80])
             return None
         return raw
+
+    _GENERIC_CLARIFIER_TERMS = frozenset({
+        "table", "tables", "data", "api", "apis", "information", "detail", "details",
+        "example", "project", "tool", "tools", "view", "analysis", "dataset",
+        "record", "records", "value", "values", "type", "types", "column", "columns",
+    })
+
+    @staticmethod
+    def _extract_clarifier_term(clarifier: str) -> str:
+        c = (clarifier or "").strip()
+        patterns = (
+            r"what\s+is\s+(.+?)(?:\s+in\s+|\?|$)",
+            r"how\s+(?:does|do)\s+(.+?)(?:\s+work|\?|$)",
+            r"(.+?)\s+kya\s+hai",
+            r"(.+?)\s+explain\s+kar(?:\s+sakte|\s+sakti)?(?:\s+ho)?",
+            r"(.+?)\s+kaise\s+(?:use|determine|calculate|implement|kiya|karte|ki|kare)",
+        )
+        for pat in patterns:
+            m = re.search(pat, c, re.IGNORECASE)
+            if m:
+                term = m.group(1).strip().rstrip("?.").lower()
+                if len(term) >= 3:
+                    return term
+        return ""
+
+    def _is_valid_depth_clarifier(
+        self, clarifier: str, partial: str, main_question: str
+    ) -> bool:
+        """Reject weak clarifiers (generic terms, term not in partial, overlaps main Q)."""
+        if self._is_redundant_clarifier(clarifier, main_question):
+            return False
+        term = self._extract_clarifier_term(clarifier)
+        if not term or len(term) < 3:
+            logger.info("[CLARIFIER] Rejected — no extractable term: %r", clarifier[:80])
+            return False
+        if term in self._GENERIC_CLARIFIER_TERMS:
+            logger.info("[CLARIFIER] Rejected generic term %r", term)
+            return False
+        if term in (main_question or "").lower():
+            logger.info("[CLARIFIER] Rejected — term in main question: %r", term)
+            return False
+        partial_lower = (partial or "").lower()
+        if not re.search(rf"\b{re.escape(term)}\b", partial_lower):
+            logger.info("[CLARIFIER] Rejected — term %r not found in partial", term)
+            return False
+        return True
+
+    @staticmethod
+    def _is_valid_drag_depth_question(clarifier: str, recent_segment: str) -> bool:
+        """Depth probe must reference content from the current tangent segment."""
+        c = (clarifier or "").strip().lower()
+        recent = (recent_segment or "").strip().lower()
+        if len(c) < 8 or len(recent) < 12:
+            return False
+        recent_words = {
+            w for w in re.findall(r"\b\w{4,}\b", recent)
+            if w not in _PROGRESS_TOPIC_STOPWORDS
+        }
+        if not recent_words:
+            return False
+        hits = sum(1 for w in recent_words if w in c)
+        return hits >= 1
 
     @staticmethod
     def _is_redundant_clarifier(clarifier: str, main_question: str) -> bool:
@@ -919,6 +1197,7 @@ class LLMBrain:
     ) -> dict:
         """Layered depth-vs-drag gate for mid-answer progress checks."""
         default = {"verdict": "UNCLEAR", "confidence": 0.0, "reason": "default"}
+        hinglish = self._language_mode() == "hinglish"
 
         q_words = self._question_topic_tokens(question_text)
         partial_lower = payload.full_partial.lower()
@@ -927,6 +1206,8 @@ class LLMBrain:
         structure_words = (
             "because", "therefore", "for example", "first", "then",
             "finally", "specifically", "in my project", "we used",
+            "maine", "humne", "pehle", "phir", "jahan", "theek hai",
+            "for instance", "example", "used", "implemented",
         )
         has_structure = any(w in partial_lower for w in structure_words)
         word_count = len(payload.full_partial.split())
@@ -970,9 +1251,11 @@ class LLMBrain:
         if not GROQ_API_KEY:
             return default
 
+        client = self._make_groq_client()
+        if not client:
+            return default
+
         try:
-            from groq import Groq
-            client = Groq(api_key=GROQ_API_KEY)
             user_content = (
                 f"Interview question:\n{question_text}\n\n"
                 f"Full partial (since answer started):\n{payload.full_partial[:800]}\n\n"
@@ -999,6 +1282,10 @@ class LLMBrain:
 
     def _force_complete_from_drag(self, full_partial: str) -> None:
         """Score and advance after repeated drag strikes during mid-answer check."""
+        if self._should_abort_interrupt():
+            logger.info("[FORCE COMPLETE] skipped — final turn pending")
+            return
+
         orch = self.state.interview_orchestrator
         question = orch.get_current_question() if orch else None
         if not orch or not question:
@@ -1008,6 +1295,10 @@ class LLMBrain:
             orch._answer_initial_partial = full_partial.strip()
 
         evaluation = self._evaluate_answer(full_partial, question)
+        if self._should_abort_interrupt():
+            logger.info("[FORCE COMPLETE] skipped after evaluate — final turn pending")
+            return
+
         decision = orch.force_complete_question(full_partial, evaluation)
         self._emit_orchestrated_turn(decision)
         logger.info(
@@ -1063,18 +1354,304 @@ class LLMBrain:
         return raw
 
     def _localize_bank_question_in_text(self, spoken: str, orch) -> str:
-        """Replace English bank question with Hinglish rephrase when present in spoken line."""
+        """Replace English bank question with cached Hinglish when present in spoken line."""
         q = orch.get_current_question()
         if not q or not q.question or q.question not in spoken:
             return spoken
-        localized = self._generate_simpler_question(q.question)
-        if localized:
+        localized = orch.get_spoken_question(q)
+        if localized and localized != q.question:
             return spoken.replace(q.question, localized)
         return spoken
+
+    def _normalize_tts_text(self, text: str) -> str:
+        """Light cleanup before TTS — collapse whitespace; reduce obvious STT stutter."""
+        t = re.sub(r"\s+", " ", (text or "").strip())
+        t = re.sub(r"(.)\1{2,}", r"\1\1", t)
+        return t
+
+    def _prepare_mid_answer_interrupt(self) -> None:
+        """Preserve STT buffer; skip presence check after this bot utterance."""
+        self.state.mid_answer_interrupt = True
+        hook = getattr(self.state, "on_preserve_stt_buffer", None)
+        if callable(hook):
+            try:
+                hook()
+            except Exception as ex:
+                logger.warning("[MID-ANSWER] preserve STT buffer failed: %s", ex)
+
+    def _emit_mid_answer_speech(self, text: str, orch, log_tag: str) -> None:
+        spoken = self._normalize_tts_text(text)
+        if not spoken:
+            return
+        self._prepare_mid_answer_interrupt()
+        if "DRAG" in log_tag:
+            self.state.last_bot_speech_kind = "drag"
+        else:
+            self.state.last_bot_speech_kind = "clarifier"
+        log_transcript(orch.bot_id, "assistant", spoken)
+        self.state.tts_queue.put(spoken)
+        self.state.tts_queue.put("<END_OF_TURN>")
+        logger.info(
+            "[%s] bot=%s Q%d",
+            log_tag,
+            orch.bot_id[:8] if orch.bot_id else "?",
+            orch.current_index + 1,
+        )
+
+    def _generate_focused_rephrase(
+        self, question_text: str, partial_answer: str
+    ) -> Optional[str]:
+        """One focused re-ask when the candidate drifts off-topic (strike 1)."""
+        q = (question_text or "").strip()
+        if not q:
+            return None
+        user_content = (
+            f"Interview question:\n{q}\n\n"
+            f"Candidate partial (off-topic):\n{(partial_answer or '')[:600]}"
+        )
+        messages = [
+            {"role": "system", "content": get_focused_rephrase_system(self._language_mode())},
+            {"role": "user", "content": user_content},
+        ]
+        raw = ""
+        client = self._make_groq_client()
+        if client:
+            try:
+                completion = client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=messages,
+                    max_tokens=70,
+                    temperature=0.2,
+                )
+                raw = (completion.choices[0].message.content or "").strip()
+            except Exception as ex:
+                logger.warning("[FOCUSED REPHRASE] Groq failed: %s", ex)
+        if not raw:
+            return None
+        raw = raw.split("\n")[0].strip()
+        raw = re.sub(r'^["\']|["\']$', "", raw)
+        return raw if len(raw) >= 5 else None
+
+    def _emit_drag_focused_rephrase(self, orch, q, payload) -> None:
+        base_q = q.question
+        if orch.is_localization_ready():
+            localized = orch.get_spoken_question(q)
+            if localized:
+                base_q = localized
+        focused = self._generate_focused_rephrase(base_q, payload.full_partial)
+        if self._should_abort_interrupt():
+            logger.info("[DRAG REPHRASE] skipped — final turn pending")
+            return
+        spoken_q = focused or base_q
+        if self._language_mode() == "hinglish":
+            line = f"Seedha point par aate hain. {spoken_q}"
+        else:
+            line = f"Let me focus the question. {spoken_q}"
+        orch.mark_drag_rephrase()
+        self._emit_mid_answer_speech(line, orch, "DRAG REPHRASE")
+
+    def _classify_drag_context(
+        self, payload: ProgressCheckPayload, question_text: str
+    ) -> str:
+        """
+        IN_CONTEXT = tangent still related to question domain (probe depth on tangent).
+        OFF_CONTEXT = unrelated rambling → skip to next question.
+        """
+        q_words = self._question_topic_tokens(question_text)
+        partial_lower = payload.full_partial.lower()
+        recent_lower = (payload.recent_segment or payload.full_partial or "").lower()
+        full_words = set(re.findall(r"\b\w{4,}\b", partial_lower))
+        recent_words = set(re.findall(r"\b\w{4,}\b", recent_lower))
+        full_overlap = len(q_words & full_words)
+        recent_overlap = len(q_words & recent_words)
+
+        min_overlap = config.DRAG_CONTEXT_MIN_OVERLAP
+        if recent_overlap >= min_overlap and len(recent_words) >= 4:
+            return "IN_CONTEXT"
+        if full_overlap >= min_overlap and full_overlap < config.PROGRESS_GATE_MIN_TOPIC_OVERLAP:
+            return "IN_CONTEXT"
+        if full_overlap == 0 and recent_overlap == 0:
+            return "OFF_CONTEXT"
+
+        if not GROQ_API_KEY:
+            return "OFF_CONTEXT" if full_overlap == 0 else "IN_CONTEXT"
+
+        client = self._make_groq_client()
+        if not client:
+            return "OFF_CONTEXT" if full_overlap == 0 else "IN_CONTEXT"
+
+        try:
+            user_content = (
+                f"Interview question:\n{question_text}\n\n"
+                f"Recent tangent (last ~10s of speech):\n{recent_lower[:400]}\n\n"
+                f"Full partial:\n{partial_lower[:600]}"
+            )
+            completion = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Classify whether the candidate's recent tangent is still "
+                            "IN_CONTEXT (related domain/stack/project, worth one depth probe) "
+                            "or OFF_CONTEXT (unrelated topic, rambling). "
+                            'Return ONLY JSON: {"context": "IN_CONTEXT|OFF_CONTEXT", '
+                            '"confidence": 0.0-1.0}'
+                        ),
+                    },
+                    {"role": "user", "content": user_content},
+                ],
+                max_tokens=40,
+                temperature=0.1,
+                response_format={"type": "json_object"},
+            )
+            raw = (completion.choices[0].message.content or "").strip()
+            data = json.loads(raw)
+            ctx = str(data.get("context", "")).upper()
+            if ctx in ("IN_CONTEXT", "OFF_CONTEXT"):
+                return ctx
+        except Exception as ex:
+            logger.warning("[DRAG CONTEXT] LLM classify failed: %s", ex)
+
+        return "IN_CONTEXT" if full_overlap >= min_overlap else "OFF_CONTEXT"
+
+    def _generate_drag_depth_question(
+        self,
+        question_text: str,
+        full_partial: str,
+        recent_segment: str,
+    ) -> Optional[str]:
+        """One short depth probe on the in-context tangent the candidate is discussing."""
+        recent = (recent_segment or full_partial or "").strip()
+        if len(recent) < 12:
+            return None
+        user_content = (
+            f"Original interview question (do NOT re-ask this):\n{question_text}\n\n"
+            f"Recent tangent segment:\n{recent[:500]}\n\n"
+            f"Full partial for context:\n{(full_partial or '')[:400]}"
+        )
+        messages = [
+            {"role": "system", "content": get_drag_depth_system(self._language_mode())},
+            {"role": "user", "content": user_content},
+        ]
+        raw = ""
+        client = self._make_groq_client()
+        if client:
+            try:
+                completion = client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=messages,
+                    max_tokens=45,
+                    temperature=0.2,
+                )
+                raw = (completion.choices[0].message.content or "").strip()
+            except Exception as ex:
+                logger.warning("[DRAG DEPTH] Groq failed: %s", ex)
+        if not raw or raw.upper() == "SKIP" or raw.lower().startswith("skip"):
+            return None
+        raw = raw.split("\n")[0].strip()
+        if len(raw) < 8 or len(raw) > 120:
+            return None
+        if self._is_redundant_clarifier(raw, question_text):
+            return None
+        return raw
+
+    def _skip_drag_to_next_question(
+        self, full_partial: str, orch, q, *, reason: str
+    ) -> None:
+        """Off-context DRAG — low score and advance to next question."""
+        if self._should_abort_interrupt():
+            return
+        if not orch._answer_initial_partial:
+            orch._answer_initial_partial = full_partial.strip()
+        evaluation = EvaluationResult(
+            score=config.DRAG_SKIP_SCORE,
+            confident=False,
+            relevant=False,
+            strengths="",
+            develop="Answer drifted off-topic from the question asked.",
+            fix="Listen to the question first, then answer it directly before adding tangents.",
+        )
+        logger.info(
+            "[DRAG SKIP] bot=%s Q%d reason=%r — advancing to next question",
+            orch.bot_id[:8] if orch.bot_id else "?",
+            orch.current_index + 1,
+            reason,
+        )
+        decision = orch.force_complete_question(full_partial, evaluation)
+        self._emit_orchestrated_turn(decision)
+
+    def _try_emit_drag_depth_probe(self, orch, q, payload) -> bool:
+        """Ask one in-depth question on the in-context tangent."""
+        if self._should_abort_interrupt():
+            return False
+        if orch.drag_depth_limit_reached():
+            return False
+        recent = (payload.recent_segment or payload.full_partial or "").strip()
+        depth_q = self._generate_drag_depth_question(
+            q.question, payload.full_partial, recent
+        )
+        if not depth_q:
+            return False
+        if not self._is_valid_drag_depth_question(depth_q, recent):
+            logger.info("[DRAG DEPTH] Rejected — not grounded in tangent: %r", depth_q[:80])
+            return False
+        orch.mark_drag_depth_asked(
+            payload.full_partial, depth_q, speech_sec=payload.speech_sec
+        )
+        logger.info(
+            "[DRAG DEPTH] bot=%s Q%d probe on in-context tangent: %r",
+            orch.bot_id[:8] if orch.bot_id else "?",
+            orch.current_index + 1,
+            depth_q[:80],
+        )
+        self._emit_mid_answer_speech(depth_q, orch, "DRAG DEPTH")
+        return True
+
+    def _try_emit_on_track_clarifier(self, orch, q, payload) -> bool:
+        """ON_TRACK depth probe — ask about unexplained jargon (e.g. 'What is npm?')."""
+        if self._should_abort_interrupt():
+            return False
+        min_speech = config.CLARIFIER_ON_TRACK_MIN_SPEECH_SEC
+        if payload.speech_sec < min_speech:
+            return False
+        if orch.clarifier_limit_reached():
+            return False
+        gap = payload.speech_sec - getattr(orch, "_last_clarifier_at_speech_sec", 0.0)
+        if gap < config.CLARIFIER_MIN_INTERVAL_SEC:
+            return False
+        partial = (payload.recent_segment or payload.full_partial or "").strip()
+        clarifier = self._generate_clarifier_question(partial, q.question)
+        if self._should_abort_interrupt():
+            logger.info(
+                "[DEPTH CLARIFIER] skipped — final turn pending (bot=%s Q%d)",
+                orch.bot_id[:8] if orch.bot_id else "?",
+                orch.current_index + 1,
+            )
+            return False
+        if not clarifier:
+            return False
+        if not self._is_valid_depth_clarifier(clarifier, partial, q.question):
+            return False
+        orch.mark_clarifier_asked(
+            payload.full_partial, clarifier, speech_sec=payload.speech_sec
+        )
+        logger.info(
+            "[DEPTH CLARIFIER] bot=%s Q%d %d/%d",
+            orch.bot_id[:8] if orch.bot_id else "?",
+            orch.current_index + 1,
+            orch.clarifier_count_this_question,
+            config.BOT_INTERRUPT_MAX_DEPTH_CLARIFIERS_PER_Q,
+        )
+        self._emit_mid_answer_speech(clarifier, orch, "DEPTH CLARIFIER")
+        return True
 
     def _handle_bot_interrupt_partial(self, payload) -> None:
         """Mid-answer depth-vs-drag progress gate (15s start, 10s interval)."""
         if not isinstance(payload, ProgressCheckPayload):
+            return
+
+        if self._should_abort_interrupt():
             return
 
         orch = self.state.interview_orchestrator
@@ -1089,10 +1666,25 @@ class LLMBrain:
         if not q:
             return
 
+        ok, gate_reason = orch.can_run_progress_gate(
+            is_ai_speaking=self.state.is_ai_speaking.is_set()
+        )
+        if not ok:
+            logger.debug(
+                "[PROGRESS GATE] skipped Q%d — %s",
+                orch.current_index + 1,
+                gate_reason,
+            )
+            return
+
         if not orch._answer_initial_partial:
             orch._answer_initial_partial = payload.full_partial.strip()
 
         gate = self._evaluate_answer_progress(payload, q.question)
+        if self._should_abort_interrupt():
+            logger.debug("[PROGRESS GATE] aborted after evaluate — final turn pending")
+            return
+
         verdict = gate.get("verdict", "UNCLEAR")
         confidence = float(gate.get("confidence", 0.0))
         reason = gate.get("reason", "")
@@ -1128,33 +1720,202 @@ class LLMBrain:
             reason,
         )
 
-        if verdict != "DRAG" or confidence < config.BOT_INTERRUPT_GATE_MIN_CONFIDENCE:
+        if self._should_abort_interrupt():
+            logger.debug("[PROGRESS GATE] aborted before action — final turn pending")
             return
 
-        if new_strikes == 1:
-            nudge = (
-                "I notice we're going a bit off-track — "
-                "could you bring it back to the question?"
+        min_conf = config.BOT_INTERRUPT_GATE_MIN_CONFIDENCE
+
+        if verdict == "ON_TRACK" and confidence >= min_conf:
+            if config.BOT_INTERRUPT_CLARIFIER_ON_TRACK:
+                self._try_emit_on_track_clarifier(orch, q, payload)
+            return
+
+        if verdict != "DRAG" or confidence < min_conf:
+            return
+
+        drag_context = self._classify_drag_context(payload, q.question)
+        logger.info(
+            "[DRAG CONTEXT] bot=%s Q%d strikes=%d context=%s",
+            orch.bot_id[:8] if orch.bot_id else "?",
+            orch.current_index + 1,
+            new_strikes,
+            drag_context,
+        )
+
+        if drag_context == "OFF_CONTEXT":
+            self._skip_drag_to_next_question(
+                payload.full_partial,
+                orch,
+                q,
+                reason="tangent off-context from question",
             )
-            log_transcript(orch.bot_id, "assistant", nudge)
-            self.state.tts_queue.put(nudge)
-            self.state.tts_queue.put("<END_OF_TURN>")
+            return
+
+        # IN_CONTEXT tangent — one depth probe on what they are discussing now
+        if not orch.drag_depth_limit_reached():
+            if self._try_emit_drag_depth_probe(orch, q, payload):
+                return
             logger.info(
-                "[NUDGE] bot=%s Q%d strike=1",
+                "[DRAG DEPTH] bot=%s Q%d could not generate tangent probe — skipping Q",
                 orch.bot_id[:8] if orch.bot_id else "?",
                 orch.current_index + 1,
             )
+
+        # Already probed tangent or probe failed — move on
+        self._skip_drag_to_next_question(
+            payload.full_partial,
+            orch,
+            q,
+            reason="in-context tangent already probed or still not answering main Q",
+        )
+
+    def _bot_interrupt_worker(self) -> None:
+        """
+        Mid-answer progress gate on a separate thread.
+        Yields immediately when a final answer is queued or being scored.
+        Network I/O runs without any turn lock so scoring cannot starve.
+        """
+        while self.state.is_running:
+            try:
+                if self._final_turn_pending():
+                    time.sleep(0.05)
+                    continue
+
+                try:
+                    partial = self.state.bot_interrupt_queue.get(timeout=0.3)
+                except queue.Empty:
+                    continue
+
+                if self._final_turn_pending():
+                    try:
+                        self.state.bot_interrupt_queue.put_nowait(partial)
+                    except queue.Full:
+                        logger.warning("[PROGRESS GATE] bot_interrupt_queue full — dropping check")
+                    continue
+
+                try:
+                    self._handle_bot_interrupt_partial(partial)
+                except Exception as ex:
+                    logger.exception("[PROGRESS GATE] handler failed: %s", ex)
+            except Exception as ex:
+                logger.exception("[PROGRESS GATE] worker error: %s", ex)
+                time.sleep(0.2)
+
+    def _process_final_turn(self, user_text: str, client, ollama, enqueue_spoken_error) -> None:
+        """Score a committed candidate turn and speak the orchestrator response."""
+        orch = self.state.interview_orchestrator
+        bot_id = orch.bot_id if orch else None
+        log_transcript(bot_id, "user", user_text)
+
+        wrapped_user = self._wrap_candidate_speech(user_text)
+        self.conversation_history.append({"role": "user", "content": wrapped_user})
+        if self._looks_like_jailbreak(user_text):
+            print("[AI Guard]: Jailbreak pattern detected in candidate speech.")
+
+        if self._handle_orchestrated_turn(user_text):
             return
 
-        if new_strikes >= config.BOT_INTERRUPT_DRAG_STRIKES_MAX:
-            self._force_complete_from_drag(payload.full_partial)
+        print("[AI]: ", end="", flush=True)
+
+        self.state.interrupt_flag.clear()
+
+        sentence_buffer = ""
+        full_text = ""
+        sent_to_tts: list = []
+        continue_stream = True
+
+        try:
+            request_messages = self._build_request_messages(latest_user_text=user_text)
+
+            if GROQ_API_KEY and client:
+                try:
+                    stream = client.chat.completions.create(
+                        model=GROQ_MODEL,
+                        messages=request_messages,
+                        stream=True,
+                        max_tokens=GROQ_MAX_TOKENS,
+                        temperature=GROQ_TEMPERATURE,
+                    )
+                    for chunk in stream:
+                        if self.state.interrupt_flag.is_set():
+                            print("\n[AI Interrupted by User]")
+                            break
+
+                        word = chunk.choices[0].delta.content or ""
+                        sentence_buffer, full_text, continue_stream = self._handle_stream_word(
+                            word, sentence_buffer, full_text, sent_to_tts
+                        )
+                        if not continue_stream:
+                            print("\n[AI Guard]: Blocked forbidden sentence mid-stream.")
+                            break
+
+                except Exception as groq_ex:
+                    msg = str(groq_ex).lower()
+                    is_rate_limited = ("429" in msg) or ("rate limit" in msg) or ("rate_limit" in msg)
+                    if is_rate_limited:
+                        print("\n[Groq rate-limited; falling back to Ollama]")
+                    else:
+                        print(f"\n[Groq Error]: {groq_ex}")
+
+                    response = ollama.chat(
+                        model=OLLAMA_MODEL,
+                        messages=request_messages,
+                        stream=True,
+                    )
+                    for chunk in response:
+                        if self.state.interrupt_flag.is_set():
+                            print("\n[AI Interrupted by User]")
+                            break
+
+                        word = chunk['message']['content']
+                        sentence_buffer, full_text, continue_stream = self._handle_stream_word(
+                            word, sentence_buffer, full_text, sent_to_tts
+                        )
+                        if not continue_stream:
+                            print("\n[AI Guard]: Blocked forbidden sentence mid-stream.")
+                            break
+            else:
+                response = ollama.chat(
+                    model=OLLAMA_MODEL,
+                    messages=request_messages,
+                    stream=True,
+                )
+                for chunk in response:
+                    if self.state.interrupt_flag.is_set():
+                        print("\n[AI Interrupted by User]")
+                        break
+
+                    word = chunk['message']['content']
+                    sentence_buffer, full_text, continue_stream = self._handle_stream_word(
+                        word, sentence_buffer, full_text, sent_to_tts
+                    )
+                    if not continue_stream:
+                        print("\n[AI Guard]: Blocked forbidden sentence mid-stream.")
+                        break
+
+        except Exception as e:
+            print(f"\n[LLM Error]: {e}")
+            enqueue_spoken_error("Sorry, I'm having trouble right now.")
+            return
+
+        print("\n")
+        self._finalize_turn(full_text, sentence_buffer, sent_to_tts)
+
+        orch = self.state.interview_orchestrator
+        if orch and orch.is_bootstrap_message(user_text):
+            orch.on_greeting_sent()
 
     def start(self):
-        """Worker loop for LLM response generation."""
-        if GROQ_API_KEY:
-            from groq import Groq
-            client = Groq(api_key=GROQ_API_KEY)
+        """Worker loop for committed candidate turns (llm_queue only)."""
+        client = self._make_groq_client()
         import ollama
+
+        threading.Thread(
+            target=self._bot_interrupt_worker,
+            name="BotInterruptWorker",
+            daemon=True,
+        ).start()
 
         def enqueue_spoken_error(text: str):
             try:
@@ -1166,129 +1927,38 @@ class LLMBrain:
 
         while self.state.is_running:
             try:
-                user_text = None
                 try:
                     user_text = self.state.llm_queue.get(timeout=0.3)
                 except queue.Empty:
-                    pass
-
-                if user_text is None:
-                    try:
-                        partial = self.state.bot_interrupt_queue.get_nowait()
-                        self._handle_bot_interrupt_partial(partial)
-                    except queue.Empty:
-                        pass
                     continue
+
+                preview = (user_text or "")[:80]
+                logger.info(
+                    "[LLM QUEUE RECEIVED] chars=%d remaining=%d preview=%r",
+                    len(user_text or ""),
+                    self.state.llm_queue.qsize(),
+                    preview,
+                )
 
                 if self.state.interview_ended.is_set():
+                    logger.warning(
+                        "[LLM DROP] reason=interview_ended chars=%d preview=%r",
+                        len(user_text or ""),
+                        preview,
+                    )
                     continue
 
-                orch = self.state.interview_orchestrator
-                bot_id = orch.bot_id if orch else None
-                log_transcript(bot_id, "user", user_text)
-
-                wrapped_user = self._wrap_candidate_speech(user_text)
-                self.conversation_history.append({"role": "user", "content": wrapped_user})
-                if self._looks_like_jailbreak(user_text):
-                    print("[AI Guard]: Jailbreak pattern detected in candidate speech.")
-
-                # Structured interview path (scoring + question bank)
-                if self._handle_orchestrated_turn(user_text):
-                    continue
-
-                print("[AI]: ", end="", flush=True)
-
-                self.state.interrupt_flag.clear()
-
-                sentence_buffer = ""
-                full_text = ""
-                sent_to_tts: list = []
-                continue_stream = True
-
+                logger.info("[LLM DEQUEUE] processing %d chars", len(user_text or ""))
+                self._final_turn_active.set()
                 try:
-                    request_messages = self._build_request_messages(latest_user_text=user_text)
+                    self._process_final_turn(
+                        user_text, client, ollama, enqueue_spoken_error
+                    )
+                finally:
+                    self._final_turn_active.clear()
 
-                    if GROQ_API_KEY:
-                        try:
-                            stream = client.chat.completions.create(
-                                model=GROQ_MODEL,
-                                messages=request_messages,
-                                stream=True,
-                                max_tokens=GROQ_MAX_TOKENS,
-                                temperature=GROQ_TEMPERATURE,
-                            )
-                            for chunk in stream:
-                                if self.state.interrupt_flag.is_set():
-                                    print("\n[AI Interrupted by User]")
-                                    break
-
-                                word = chunk.choices[0].delta.content or ""
-                                sentence_buffer, full_text, continue_stream = self._handle_stream_word(
-                                    word, sentence_buffer, full_text, sent_to_tts
-                                )
-                                if not continue_stream:
-                                    print("\n[AI Guard]: Blocked forbidden sentence mid-stream.")
-                                    break
-
-                        except Exception as groq_ex:
-                            msg = str(groq_ex).lower()
-                            is_rate_limited = ("429" in msg) or ("rate limit" in msg) or ("rate_limit" in msg)
-                            if is_rate_limited:
-                                print("\n[Groq rate-limited; falling back to Ollama]")
-                            else:
-                                print(f"\n[Groq Error]: {groq_ex}")
-
-                            response = ollama.chat(
-                                model=OLLAMA_MODEL,
-                                messages=request_messages,
-                                stream=True,
-                            )
-                            for chunk in response:
-                                if self.state.interrupt_flag.is_set():
-                                    print("\n[AI Interrupted by User]")
-                                    break
-
-                                word = chunk['message']['content']
-                                sentence_buffer, full_text, continue_stream = self._handle_stream_word(
-                                    word, sentence_buffer, full_text, sent_to_tts
-                                )
-                                if not continue_stream:
-                                    print("\n[AI Guard]: Blocked forbidden sentence mid-stream.")
-                                    break
-                    else:
-                        response = ollama.chat(
-                            model=OLLAMA_MODEL,
-                            messages=request_messages,
-                            stream=True,
-                        )
-                        for chunk in response:
-                            if self.state.interrupt_flag.is_set():
-                                print("\n[AI Interrupted by User]")
-                                break
-
-                            word = chunk['message']['content']
-                            sentence_buffer, full_text, continue_stream = self._handle_stream_word(
-                                word, sentence_buffer, full_text, sent_to_tts
-                            )
-                            if not continue_stream:
-                                print("\n[AI Guard]: Blocked forbidden sentence mid-stream.")
-                                break
-
-                except Exception as e:
-                    print(f"\n[LLM Error]: {e}")
-                    enqueue_spoken_error("Sorry, I'm having trouble right now.")
-                    continue
-
-                print("\n")
-                self._finalize_turn(full_text, sentence_buffer, sent_to_tts)
-
-                # After bootstrap greeting, move to await_intro phase
-                orch = self.state.interview_orchestrator
-                if orch and orch.is_bootstrap_message(user_text):
-                    orch.on_greeting_sent()
-
-            except queue.Empty:
-                continue
             except Exception as e:
+                self._final_turn_active.clear()
+                logger.exception("[LLM] turn worker error: %s", e)
                 print(f"\n[LLM Error]: {e}")
                 print("--- READY: START SPEAKING ---")

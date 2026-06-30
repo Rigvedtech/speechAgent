@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import threading
+import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field, asdict
 from enum import Enum
@@ -167,7 +168,17 @@ _SHORT_COMPLETE_ANSWER = re.compile(
         r"\b(yes|yeah|yep|yup|correct|right|sure|absolutely)\b",
         r"\bi\s+(can|do|have|would|will)\b",
         r"\bthat'?s\s+(correct|right|fine|okay|ok)\b",
+        r"\bthat'?s\s+(it|all)\b",
+        r"^\s*bas\s*[\.\!\?]*$",
+        r"^\s*ठीक\s+है\s*[\.\!\?]*$",
     ]),
+    re.IGNORECASE,
+)
+
+# Standalone or trailing answer-completion cues (STT + LLM scoring path)
+_ANSWER_DONE_PHRASE = re.compile(
+    r"(?:that'?s\s+(?:it|all)|^\s*done\s*[\.\!\?]*$|^\s*bas\s*[\.\!\?]*$|"
+    r"^\s*ठीक\s+है\s*[\.\!\?]*$|that'?s\s+it\s*[\.\!\?]*\s*$)",
     re.IGNORECASE,
 )
 
@@ -292,6 +303,12 @@ class TurnDecision:
     stopped_reason: StoppedReason = StoppedReason.NONE
     # main | clarifier | prompt — used to track last spoken question for repeat
     spoken_kind: Optional[str] = None
+    # Hinglish: short bridge only (good score); False = full rephrase intro
+    use_simple_bridge: bool = False
+    # True when orchestrator routed through REPHRASE (Hinglish TTS line split)
+    rephrase_flow: bool = False
+    # After depth clarifier: score merged answer instead of "continue kijiye"
+    score_clarifier_merged: bool = False
 
 
 @dataclass
@@ -301,6 +318,18 @@ class ProgressCheckPayload:
     recent_segment: str
     speech_sec: float
     check_num: int
+
+
+_TOPIC_STOPWORDS = frozenset({
+    "what", "when", "where", "which", "with", "from", "that", "this", "have",
+    "your", "about", "would", "could", "should", "their", "there", "been",
+    "were", "will", "does", "using", "used", "explain", "describe", "tell",
+})
+
+
+def _question_topic_tokens(question_text: str) -> set:
+    words = re.findall(r"\b\w{4,}\b", (question_text or "").lower())
+    return {w for w in words if w not in _TOPIC_STOPWORDS}
 
 
 def normalize_difficulty(raw: str) -> str:
@@ -434,6 +463,20 @@ def detect_turn_intent_fallback(text: str, awaiting_clarifier: bool) -> str:
     return TurnIntent.ACTUAL_ANSWER.value
 
 
+def detect_answer_done_phrase(text: str) -> bool:
+    """True when the utterance signals the candidate is done (possibly alone)."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if len(t) <= 40 and re.match(
+        r"^(?:that'?s\s+(?:it|all)|done|bas|ठीक\s+है)\s*[\.\!\?]*$",
+        t,
+        re.IGNORECASE,
+    ):
+        return True
+    return bool(_ANSWER_DONE_PHRASE.search(t))
+
+
 def detect_short_complete_answer(text: str) -> bool:
     """True when a short utterance is a complete thought, not a cut-off fragment."""
     t = (text or "").strip()
@@ -493,6 +536,8 @@ def detect_incomplete_answer(text: str) -> bool:
     if not t:
         return True
     if detect_inability_answer(t):
+        return False
+    if detect_answer_done_phrase(t):
         return False
     if detect_short_complete_answer(t):
         return False
@@ -643,14 +688,65 @@ class InterviewOrchestrator:
 
     # Progress gate (depth vs drag) — reset each new main question
     drag_strikes: int = 0
+    drag_rephrase_count: int = 0
+    drag_depth_count: int = 0
+    _last_clarifier_at_speech_sec: float = 0.0
     progress_checks: List[dict] = field(default_factory=list)
     force_completed: bool = False
+    last_drag_rephrase_at: float = 0.0
+    last_main_question_playback_at: float = 0.0
+    last_mid_answer_bot_speech_at: float = 0.0
+    question_advanced_at: float = 0.0
+    _previous_question_text: str = ""
 
     answer_records: List[AnswerRecord] = field(default_factory=list)
     _rolling: RollingScoreTracker = field(default_factory=lambda: RollingScoreTracker(
         config.ROLLING_WINDOW
     ))
-    _lock: threading.Lock = field(default_factory=threading.Lock)
+    # RLock: mark_clarifier_asked and other methods nest lock acquisition safely.
+    _lock: threading.RLock = field(default_factory=threading.RLock)
+    # Hinglish: id -> spoken question (pre-localized at join); English uses bank text
+    _spoken_question_cache: Dict[str, str] = field(default_factory=dict)
+    # not_needed | pending | ready | failed
+    localization_status: str = "not_needed"
+    localization_error: str = ""
+
+    def is_localization_ready(self) -> bool:
+        if self.language_mode != "hinglish":
+            return True
+        return self.localization_status == "ready"
+
+    def get_spoken_question(self, q: Optional["BankQuestion"]) -> str:
+        if not q:
+            return ""
+        if self.language_mode != "hinglish":
+            return q.question
+        return self._spoken_question_cache.get(q.id, q.question)
+
+    def planned_questions_summary(self) -> List[dict]:
+        """Interview plan for API responses (slot order, bank + spoken text)."""
+        return [
+            {
+                "slot": i + 1,
+                "id": q.id,
+                "difficulty": q.normalized_difficulty,
+                "source": q.source,
+                "question": q.question,
+                "spoken_question": self.get_spoken_question(q),
+            }
+            for i, q in enumerate(self.planned_questions)
+        ]
+
+    def apply_spoken_cache(self, cache: Dict[str, str], *, status: str = "ready") -> None:
+        with self._lock:
+            self._spoken_question_cache.update(cache)
+            self.localization_status = status
+            self.localization_error = ""
+
+    def mark_localization_failed(self, error: str) -> None:
+        with self._lock:
+            self.localization_status = "failed"
+            self.localization_error = (error or "unknown")[:500]
 
     @classmethod
     def create(
@@ -816,6 +912,7 @@ class InterviewOrchestrator:
                 spoken_text=target,
                 should_continue=True,
                 spoken_kind="clarifier",
+                rephrase_flow=True,
             )
         return self._on_rephrase_question()
 
@@ -928,6 +1025,7 @@ class InterviewOrchestrator:
             spoken_text=q.question,
             should_continue=True,
             spoken_kind="main",
+            rephrase_flow=True,
         )
 
     def on_greeting_sent(self) -> None:
@@ -994,6 +1092,19 @@ class InterviewOrchestrator:
                 self._last_spoken_question = q.question
                 self._last_spoken_kind = "main"
 
+            if self.should_score_after_clarifier_reply(answer_text):
+                logger.info(
+                    "[CLARIFIER REPLY] Q%d substantive — scoring merged answer (skip continue prompt)",
+                    self.current_index + 1,
+                )
+                return TurnDecision(
+                    action=TurnAction.SPEAK,
+                    spoken_text="",
+                    should_continue=True,
+                    spoken_kind="prompt",
+                    score_clarifier_merged=True,
+                )
+
             spoken = self._ui().continue_after_clarifier
             return TurnDecision(
                 action=TurnAction.SPEAK,
@@ -1002,14 +1113,18 @@ class InterviewOrchestrator:
                 spoken_kind="prompt",
             )
 
-    def mark_clarifier_asked(self, partial_text: str, clarifier_q: str = "") -> None:
+    def mark_clarifier_asked(
+        self, partial_text: str, clarifier_q: str = "", speech_sec: float = 0.0
+    ) -> None:
         with self._lock:
             self.awaiting_clarifier_reply = True
             self.clarifier_count_this_question += 1
+            self._last_clarifier_at_speech_sec = max(0.0, speech_sec)
             self._last_clarifier_partial = (partial_text or "").strip()
             self._last_clarifier_question = (clarifier_q or "").strip()
             if self._last_clarifier_question:
-                self.record_spoken(self._last_clarifier_question, "clarifier")
+                self._last_spoken_question = self._last_clarifier_question
+                self._last_spoken_kind = "clarifier"
             if not self._answer_initial_partial:
                 self._answer_initial_partial = (partial_text or "").strip()
             logger.info(
@@ -1021,8 +1136,168 @@ class InterviewOrchestrator:
             )
 
     def clarifier_limit_reached(self) -> bool:
-        """True when max clarifiers for this question have been used."""
-        return self.clarifier_count_this_question >= config.BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q
+        """True when max ON_TRACK depth clarifiers for this question have been used."""
+        return (
+            self.clarifier_count_this_question
+            >= config.BOT_INTERRUPT_MAX_DEPTH_CLARIFIERS_PER_Q
+        )
+
+    def mark_drag_rephrase(self) -> None:
+        """Record a DRAG-focused rephrase — grace before scoring done-only turns."""
+        self.last_drag_rephrase_at = time.monotonic()
+        self.drag_rephrase_count += 1
+        self.answer_continuation_count = 0
+
+    def drag_rephrase_limit_reached(self) -> bool:
+        return self.drag_rephrase_count >= config.BOT_INTERRUPT_DRAG_REPHRASE_MAX
+
+    def drag_depth_limit_reached(self) -> bool:
+        return self.drag_depth_count >= config.BOT_INTERRUPT_MAX_DRAG_DEPTH_PER_Q
+
+    def mark_drag_depth_asked(
+        self, partial_text: str, depth_q: str = "", speech_sec: float = 0.0
+    ) -> None:
+        """Record a mid-answer depth probe on in-context DRAG tangent."""
+        with self._lock:
+            self.drag_depth_count += 1
+            self.awaiting_clarifier_reply = True
+            self._last_clarifier_at_speech_sec = max(0.0, speech_sec)
+            self._last_clarifier_partial = (partial_text or "").strip()
+            self._last_clarifier_question = (depth_q or "").strip()
+            if self._last_clarifier_question:
+                self._last_spoken_question = self._last_clarifier_question
+                self._last_spoken_kind = "clarifier"
+            if not self._answer_initial_partial:
+                self._answer_initial_partial = (partial_text or "").strip()
+            logger.info(
+                "[DRAG DEPTH ASKED] bot=%s Q%d depth=%d/%d",
+                self.bot_id[:8] if self.bot_id else "?",
+                self.current_index + 1,
+                self.drag_depth_count,
+                config.BOT_INTERRUPT_MAX_DRAG_DEPTH_PER_Q,
+            )
+
+    def within_drag_rephrase_grace(self) -> bool:
+        if self.last_drag_rephrase_at <= 0:
+            return False
+        return (
+            time.monotonic() - self.last_drag_rephrase_at
+            < config.DRAG_REPHRASE_SCORE_GRACE_SEC
+        )
+
+    def has_active_answer_progress(self) -> bool:
+        """True when mid-answer progress checks or partial context indicate an in-flight answer."""
+        if self.awaiting_clarifier_reply:
+            return True
+        if self.progress_checks:
+            return True
+        if len(self._answer_initial_partial or "") >= config.TURN_FLUSH_GUARD_MIN_CHARS:
+            return True
+        if self.answer_continuation_count > 0:
+            return True
+        return False
+
+    def mark_question_advanced(self, previous_question_text: str) -> None:
+        """Record when we move to the next bank question — enables stale-tail guard."""
+        self._previous_question_text = (previous_question_text or "").strip()
+        self.question_advanced_at = time.monotonic()
+
+    def mark_main_question_playback_done(self) -> None:
+        self.last_main_question_playback_at = time.monotonic()
+
+    def mark_mid_answer_bot_playback_done(self) -> None:
+        self.last_mid_answer_bot_speech_at = time.monotonic()
+
+    def within_main_question_interrupt_cooldown(self) -> bool:
+        """Block depth/DRAG probes right after a new main question (think time)."""
+        if self.last_main_question_playback_at <= 0:
+            return False
+        if self.progress_checks:
+            return False
+        if len(self._answer_initial_partial or "") >= config.TURN_FLUSH_GUARD_MIN_CHARS:
+            return False
+        elapsed = time.monotonic() - self.last_main_question_playback_at
+        return elapsed < config.MAIN_QUESTION_INTERRUPT_COOLDOWN_SEC
+
+    def within_mid_answer_bot_cooldown(self) -> bool:
+        if self.last_mid_answer_bot_speech_at <= 0:
+            return False
+        return (
+            time.monotonic() - self.last_mid_answer_bot_speech_at
+            < config.MID_ANSWER_BOT_COOLDOWN_SEC
+        )
+
+    def within_stale_answer_guard(self) -> bool:
+        if self.question_advanced_at <= 0:
+            return False
+        return (
+            time.monotonic() - self.question_advanced_at
+            < config.STALE_ANSWER_GUARD_SEC
+        )
+
+    def is_stale_previous_question_tail(self, text: str) -> bool:
+        """Drop short tail commits that still match the previous question topic."""
+        if not self.within_stale_answer_guard():
+            return False
+        t = (text or "").strip()
+        if not t or len(t) >= config.STALE_ANSWER_MAX_CHARS:
+            return False
+        if not self._previous_question_text:
+            return False
+        curr = self.get_current_question()
+        if not curr:
+            return False
+        text_tokens = set(re.findall(r"\b\w{4,}\b", t.lower()))
+        prev_overlap = len(_question_topic_tokens(self._previous_question_text) & text_tokens)
+        curr_overlap = len(_question_topic_tokens(curr.question) & text_tokens)
+        if prev_overlap >= 2 and prev_overlap > curr_overlap:
+            return True
+        return False
+
+    def should_score_after_clarifier_reply(self, answer_text: str) -> bool:
+        """Skip redundant 'continue kijiye' when clarifier reply completes the answer."""
+        t = (answer_text or "").strip()
+        if not t:
+            return False
+        if detect_answer_done_phrase(t):
+            return True
+        if len(t) >= config.CLARIFIER_REPLY_SCORE_MIN_CHARS:
+            return True
+        if len(t.split()) >= config.MIN_ANSWER_WORDS:
+            return True
+        partial_len = len(self._answer_initial_partial or "")
+        if partial_len >= config.TURN_FLUSH_GUARD_MIN_CHARS and len(t) >= 20:
+            return True
+        return False
+
+    def can_run_progress_gate(self, *, is_ai_speaking: bool = False) -> tuple:
+        """Single gate for mid-answer depth/DRAG — prevents overlapping bot speech."""
+        if is_ai_speaking:
+            return False, "bot_speaking"
+        if self.awaiting_clarifier_reply:
+            return False, "awaiting_clarifier"
+        if self.within_main_question_interrupt_cooldown():
+            return False, "main_q_cooldown"
+        if self.within_mid_answer_bot_cooldown():
+            return False, "mid_answer_cooldown"
+        if self.within_drag_rephrase_grace() and self.drag_rephrase_count > 0:
+            return False, "drag_rephrase_grace"
+        return True, ""
+
+    def merge_answer_if_done_phrase(self, answer_text: str) -> Optional[str]:
+        """
+        When the candidate says only a completion cue, merge with accumulated partial
+        so scoring uses the full answer instead of 'That's it.' alone.
+        """
+        t = (answer_text or "").strip()
+        if not detect_answer_done_phrase(t):
+            return None
+        partial = (self._answer_initial_partial or "").strip()
+        if not partial and not self.progress_checks:
+            return None
+        if len(t) <= 50 and partial:
+            return self.build_merged_answer_context("")
+        return self.build_merged_answer_context(t)
 
     def build_merged_answer_context(self, final_answer: str) -> str:
         """Combine initial partial + clarifier Q&As + final continuation for scoring."""
@@ -1075,8 +1350,11 @@ class InterviewOrchestrator:
                 f"{entry['verdict']} (confidence={entry['confidence']:.2f}) — "
                 f"{entry['reason']}"
             )
-        if self.force_completed or self.drag_strikes >= config.BOT_INTERRUPT_DRAG_STRIKES_MAX:
-            lines.append("Force-completed: yes (candidate went off-topic after repeated drag)")
+        if self.force_completed or self.drag_depth_limit_reached():
+            lines.append(
+                "Force-completed: yes (candidate went off-topic; "
+                f"{self.drag_depth_count} in-context depth probe(s))"
+            )
         return "\n".join(lines)
 
     def force_complete_question(
@@ -1139,6 +1417,7 @@ class InterviewOrchestrator:
                     rolling_avg,
                 )
 
+            self.mark_question_advanced(q.question)
             self.current_index += 1
             next_q = self.get_current_question()
 
@@ -1147,6 +1426,8 @@ class InterviewOrchestrator:
 
             spoken = f"Okay, thank you. Let's continue. {next_q.question}"
             if self.language_mode == "hinglish":
+                # Always use simple bridge for NEW questions — rephrase intro only for
+                # explicit user-requested rephrases of the SAME question.
                 return TurnDecision(
                     action=TurnAction.REPHRASE,
                     spoken_text=next_q.question,
@@ -1154,6 +1435,8 @@ class InterviewOrchestrator:
                     rolling_average=rolling_avg,
                     should_continue=True,
                     spoken_kind="main",
+                    use_simple_bridge=True,
+                    rephrase_flow=True,
                 )
             return TurnDecision(
                 action=TurnAction.SPEAK,
@@ -1173,8 +1456,12 @@ class InterviewOrchestrator:
         self._clarifier_thread = []
         self._answer_initial_partial = ""
         self.drag_strikes = 0
+        self.drag_rephrase_count = 0
+        self.drag_depth_count = 0
+        self._last_clarifier_at_speech_sec = 0.0
         self.progress_checks = []
         self.force_completed = False
+        self.last_drag_rephrase_at = 0.0
         self._reset_question_meta_state()
 
     def _reset_question_meta_state(self) -> None:
@@ -1212,6 +1499,8 @@ class InterviewOrchestrator:
         if self.phase != InterviewPhase.CORE:
             return None
         if detect_short_complete_answer(answer_text):
+            return None
+        if detect_answer_done_phrase(answer_text):
             return None
         if not detect_incomplete_answer(answer_text):
             return None
@@ -1304,6 +1593,7 @@ class InterviewOrchestrator:
                     rolling_avg,
                 )
 
+            self.mark_question_advanced(q.question)
             self.current_index += 1
             next_q = self.get_current_question()
 
@@ -1312,6 +1602,8 @@ class InterviewOrchestrator:
 
             spoken = f"{self._next_bridge()} {next_q.question}"
             if self.language_mode == "hinglish":
+                # Always use simple bridge for NEW questions — rephrase intro only for
+                # explicit user-requested rephrases of the SAME question.
                 return TurnDecision(
                     action=TurnAction.REPHRASE,
                     spoken_text=next_q.question,
@@ -1319,6 +1611,8 @@ class InterviewOrchestrator:
                     rolling_average=rolling_avg,
                     should_continue=True,
                     spoken_kind="main",
+                    use_simple_bridge=True,
+                    rephrase_flow=True,
                 )
             return TurnDecision(
                 action=TurnAction.SPEAK,
@@ -1551,13 +1845,20 @@ def parse_bank_questions(raw_list: List[dict]) -> List[BankQuestion]:
     return bank
 
 
-EVALUATOR_SYSTEM_PROMPT = (
-    "You are an interview answer evaluator. Return ONLY valid JSON, no markdown. "
-    "Score the candidate answer 0-10 for a technical screening interview. "
-    "Fields: score (int 0-10), confident (bool), relevant (bool), "
-    "strengths (short string), develop (area to improve), fix (actionable tip). "
-    "Be fair: partial answers can be 5-7; strong specific answers 8-10; "
-    "off-topic or empty 0-4. confident=false if vague, unsure, or filler-heavy. "
-    "If progress_notes are present: note off-topic drift in develop/fix; "
-    "score based on substantive content, not filler or repeated generalities."
-)
+def _evaluator_system_prompt() -> str:
+    from system_prompt import STT_EVALUATOR_NOTE
+
+    return (
+        "You are an interview answer evaluator. Return ONLY valid JSON, no markdown. "
+        "Score the candidate answer 0-10 for a technical screening interview. "
+        "Fields: score (int 0-10), confident (bool), relevant (bool), "
+        "strengths (short string), develop (area to improve), fix (actionable tip). "
+        "Be fair: partial answers can be 5-7; strong specific answers 8-10; "
+        "off-topic or empty 0-4. confident=false if vague, unsure, or filler-heavy. "
+        "If progress_notes are present: note off-topic drift in develop/fix; "
+        "score based on substantive content, not filler or repeated generalities. "
+        f"{STT_EVALUATOR_NOTE}"
+    )
+
+
+EVALUATOR_SYSTEM_PROMPT = _evaluator_system_prompt()

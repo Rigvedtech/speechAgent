@@ -52,6 +52,13 @@ class MeetingSession:
     _silence_watch_task: Optional[asyncio.Task] = None
     _presence_checks_this_question: int = 0
     _presence_check_q_index: int = -1
+    # Persistent asyncio loop owned by the TTS worker thread
+    tts_loop: Optional[asyncio.AbstractEventLoop] = None
+    # True after end_of_turn sent — silence check starts only on next playback_done
+    _awaiting_turn_playback: bool = False
+    # Stored at join; used when POST /api/start triggers greeting
+    pending_greeting_message: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
 
     def __post_init__(self):
         """Initialize processing components that don't need Sarvam config."""
@@ -233,6 +240,30 @@ class SessionManager:
 
             session.stt_engine = STTEngine(session.state, sarvam_engine=sarvam_stt)
             session.state.on_candidate_speech = lambda s=session: self.on_candidate_speech(s)
+            session.state.on_candidate_speech_started = (
+                lambda s=session: self.on_candidate_speech_started(s)
+            )
+            session.state.on_preserve_stt_buffer = (
+                lambda s=session: (
+                    s.stt_engine.preserve_answer_in_progress()
+                    if s.stt_engine
+                    else None
+                )
+            )
+            session.state.on_restore_stt_buffer = (
+                lambda s=session: (
+                    s.stt_engine.restore_answer_in_progress()
+                    if s.stt_engine
+                    else None
+                )
+            )
+            session.state.on_question_advanced = (
+                lambda s=session: (
+                    s.stt_engine._sync_turn_question_index()
+                    if s.stt_engine
+                    else None
+                )
+            )
 
             if config.STT_FALLBACK_ENABLED and config.WHISPER_PRELOAD_ENABLED:
                 threading.Thread(
@@ -349,10 +380,12 @@ class SessionManager:
         # FIX 2: Create persistent event loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+        session.tts_loop = loop
+
         try:
             loop.run_until_complete(self._tts_worker_async(session, loop))
         finally:
+            session.tts_loop = None
             loop.close()
             logger.info(f"TTS worker stopped for bot {session.bot_id[:8]}")
     
@@ -401,6 +434,7 @@ class SessionManager:
                         session._speaking_fallback_task.cancel()
                         session._speaking_fallback_task = None
                     self.cancel_silence_check(session)
+                    session._awaiting_turn_playback = False
                     # Tell the browser to flush its ring buffer immediately
                     if (session.use_webpage
                             and session.audio_sender
@@ -440,10 +474,17 @@ class SessionManager:
                         session._speaking_fallback_task = None
 
                     if session.use_webpage:
-                        # Webpage mode: browser sends playback_done when buffer drains.
-                        # The WS handler (api_server.py) clears is_ai_speaking at that point.
-                        # This fallback task clears it after 30 s if the browser never responds
-                        # (e.g. disconnected, browser crash) so STT is never permanently blocked.
+                        # Tell browser the server finished sending audio for this turn.
+                        # Silence watcher starts only after debounced playback_done.
+                        session._awaiting_turn_playback = True
+                        if (
+                            session.audio_sender
+                            and session.audio_sender.webpage_ctrl_sender
+                        ):
+                            session.audio_sender.webpage_ctrl_sender(
+                                {"type": "end_of_turn"}
+                            )
+                        # Fallback if browser never sends playback_done
                         session._speaking_fallback_task = asyncio.ensure_future(
                             self._speaking_fallback(session, timeout=30.0)
                         )
@@ -487,8 +528,9 @@ class SessionManager:
                     turn_sentences.append(text.strip())
                     continue
                 
-                # WebRTC mode: stream each sentence immediately for lower latency
+                # WebRTC / webpage mode: stream each sentence immediately for lower latency
                 self.cancel_silence_check(session)
+                session._awaiting_turn_playback = False
                 session.state.is_ai_speaking.set()
                 
                 if session.audio_sender:
@@ -586,6 +628,8 @@ class SessionManager:
                 return
             if session.state.is_ai_speaking.is_set():
                 return
+            if session._awaiting_turn_playback:
+                return
 
             orch = session.state.interview_orchestrator
             if orch is None:
@@ -644,7 +688,12 @@ class SessionManager:
             return
 
         self.cancel_silence_check(session)
-        wait = delay if delay is not None else config.POST_TTS_SILENCE_CHECK_SEC
+        override = getattr(session.state, "presence_check_delay_sec", None)
+        if override is not None:
+            wait = override
+            session.state.presence_check_delay_sec = None
+        else:
+            wait = delay if delay is not None else config.POST_TTS_SILENCE_CHECK_SEC
 
         def _create_task() -> None:
             session._silence_watch_task = asyncio.ensure_future(
@@ -657,10 +706,38 @@ class SessionManager:
         """Called when browser finishes playing bot audio — start silence watcher."""
         session.state.is_ai_speaking.clear()
         session.state.last_playback_done_at = time.monotonic()
-        self.schedule_silence_check(session)
+        orch = session.state.interview_orchestrator
+        bot_kind = getattr(session.state, "last_bot_speech_kind", "")
+        if orch is not None:
+            if bot_kind == "main":
+                orch.mark_main_question_playback_done()
+            elif bot_kind in ("clarifier", "drag"):
+                orch.mark_mid_answer_bot_playback_done()
+        if session._awaiting_turn_playback:
+            session._awaiting_turn_playback = False
+            mid_answer = getattr(session.state, "mid_answer_interrupt", False)
+            if mid_answer:
+                session.state.mid_answer_interrupt = False
+                hook = getattr(session.state, "on_restore_stt_buffer", None)
+                if callable(hook):
+                    try:
+                        hook()
+                    except Exception as ex:
+                        logger.warning(
+                            f"Bot {session.bot_id[:8]} STT restore after mid-answer failed: {ex}"
+                        )
+            else:
+                self.schedule_silence_check(session)
+        if session.audio_sender and session.tts_loop:
+            session.audio_sender.ensure_sarvam_connected_sync(session.tts_loop)
         logger.info(
             f"[audio-stream] playback_done — STT unblocked for bot {session.bot_id[:8]}…"
         )
+
+    def on_candidate_speech_started(self, session: MeetingSession) -> None:
+        """VAD detected speech — cancel pending presence check (before STT completes)."""
+        session.state.pending_presence_check = False
+        self.cancel_silence_check(session)
 
     def on_candidate_speech(self, session: MeetingSession) -> None:
         """Track candidate activity and cancel pending silence check."""
@@ -783,6 +860,27 @@ class SessionManager:
         logger.info(f"\n[RECALL TRANSCRIPT] '{text}'")
         session.state.llm_queue.put(text)
 
+    def _apply_tts_language_sync(self, session: MeetingSession, language_code: str) -> bool:
+        """Reconnect Sarvam TTS on the TTS worker loop (not the HTTP loop)."""
+        if not session.audio_sender:
+            return False
+        tts_loop = session.tts_loop
+        if not tts_loop or not tts_loop.is_running():
+            for _ in range(50):
+                tts_loop = session.tts_loop
+                if tts_loop and tts_loop.is_running():
+                    break
+                time.sleep(0.05)
+        if not tts_loop or not tts_loop.is_running():
+            logger.warning(
+                "[TTS LANG] bot=%s TTS worker loop not ready — language stored only",
+                session.bot_id[:8],
+            )
+            if session.audio_sender.sarvam_engine:
+                session.audio_sender.sarvam_engine.update_language_code(language_code)
+            return False
+        return session.audio_sender.apply_tts_language_sync(language_code, tts_loop)
+
     async def apply_language_profile(self, session: MeetingSession, language_mode: str) -> None:
         """
         Apply STT/TTS language settings for this interview session.
@@ -798,7 +896,7 @@ class SessionManager:
             )
 
         if session.audio_sender is not None:
-            await session.audio_sender.apply_tts_language(profile.speech.tts_language)
+            self._apply_tts_language_sync(session, profile.speech.tts_language)
 
         logger.info(
             "[LANGUAGE] bot=%s mode=%s stt=%s/%s tts=%s whisper_fb=%s",
@@ -809,6 +907,58 @@ class SessionManager:
             profile.speech.tts_language,
             profile.speech.whisper_fallback,
         )
+
+    def configure_interview_session(
+        self,
+        session: MeetingSession,
+        orchestrator,
+        language_mode: str,
+        greeting_message: Optional[str] = None,
+    ) -> None:
+        """Attach orchestrator at join; interview speech begins on POST /api/start."""
+        session.state.interview_orchestrator = orchestrator
+        session.state.interview_ended.clear()
+        session.state.interview_language = language_mode
+        session.pending_greeting_message = greeting_message
+        if language_mode == "hinglish":
+            orchestrator.localization_status = "pending"
+        else:
+            orchestrator.localization_status = "not_needed"
+
+    def start_question_localization(self, session: MeetingSession) -> None:
+        """Background batch Groq localization for Hinglish (runs during lobby wait)."""
+        orch = session.state.interview_orchestrator
+        if not orch or orch.language_mode != "hinglish":
+            return
+        if orch.localization_status not in ("pending", "failed"):
+            return
+
+        bot_id = session.bot_id
+
+        def _run() -> None:
+            try:
+                from question_localizer import localize_planned_questions
+
+                cache = localize_planned_questions(
+                    orch.planned_questions, orch.language_mode
+                )
+                orch.apply_spoken_cache(cache)
+                logger.info(
+                    "[LOCALIZE] bot=%s ready planned=%d",
+                    bot_id[:8],
+                    len(orch.planned_questions),
+                )
+            except Exception as ex:
+                orch.mark_localization_failed(str(ex))
+                logger.error(
+                    "[LOCALIZE] bot=%s failed: %s", bot_id[:8], ex, exc_info=True
+                )
+
+        threading.Thread(
+            target=_run,
+            daemon=True,
+            name=f"localize-{bot_id[:8]}",
+        ).start()
 
     def get_session(self, bot_id: str) -> Optional[MeetingSession]:
         """
@@ -823,40 +973,47 @@ class SessionManager:
         with self.sessions_lock:
             return self.sessions.get(bot_id)
     
-    def end_session(self, bot_id: str):
+    def _clear_meeting_mapping_for_bot(self, bot_id: str, meeting_url: Optional[str] = None):
+        """Remove meeting_url → bot_id entries for this bot."""
+        if meeting_url:
+            meeting_key = normalize_meeting_url(meeting_url)
+            if self.meeting_to_bot.get(meeting_key) == bot_id:
+                del self.meeting_to_bot[meeting_key]
+                logger.info(f"Removed meeting URL mapping for {meeting_key[:50]}...")
+                return
+        for key, mapped_id in list(self.meeting_to_bot.items()):
+            if mapped_id == bot_id:
+                del self.meeting_to_bot[key]
+                logger.info(f"Removed meeting URL mapping for {key[:50]}...")
+
+    def end_session(self, bot_id: str) -> bool:
         """
         End a meeting session and cleanup resources.
-        Includes WebRTC disconnection if applicable.
-        
-        Args:
-            bot_id: Bot ID to end session for
+        Always attempts to remove the Recall bot, even if local session is missing.
+
+        Returns:
+            True if Recall confirmed bot removal (or already ended).
         """
         with self.sessions_lock:
             session = self.sessions.get(bot_id)
-            
-            if not session:
-                logger.warning(f"No session found for bot {bot_id}")
-                return
-            
+
+        if session:
             logger.info(f"Ending session for bot {bot_id}")
             self.cancel_silence_check(session)
             close_session(bot_id)
-            
-            # Mark as inactive
             session.is_active = False
             session.state.is_running = False
 
-            # Disconnect Sarvam TTS before STT teardown
             if (
                 session.audio_sender
                 and getattr(session.audio_sender, "sarvam_engine", None)
             ):
                 try:
                     sarvam_tts = session.audio_sender.sarvam_engine
-                    loop = config.main_event_loop
-                    if loop and loop.is_running():
+                    tts_loop = session.tts_loop
+                    if tts_loop and tts_loop.is_running():
                         future = asyncio.run_coroutine_threadsafe(
-                            sarvam_tts.disconnect(), loop
+                            sarvam_tts.disconnect(), tts_loop
                         )
                         future.result(timeout=5)
                     else:
@@ -870,8 +1027,7 @@ class SessionManager:
                     logger.error(
                         f"Error disconnecting Sarvam TTS for bot {bot_id[:8]}: {e}"
                     )
-            
-            # Stop Sarvam STT background loop
+
             if session.sarvam_stt_engine is not None:
                 try:
                     session.sarvam_stt_engine.stop_session_loop()
@@ -879,7 +1035,6 @@ class SessionManager:
                 except Exception as e:
                     logger.error(f"Error stopping Sarvam STT for bot {bot_id[:8]}: {e}")
 
-            # Disconnect WebRTC if applicable
             if session.webrtc_manager and session.use_webrtc:
                 try:
                     logger.info(f"Disconnecting WebRTC for bot {bot_id[:8]}")
@@ -891,28 +1046,64 @@ class SessionManager:
                         loop.close()
                 except Exception as e:
                     logger.error(f"Error disconnecting WebRTC for bot {bot_id[:8]}: {e}")
-            
-            # DUPLICATE PREVENTION: Remove meeting URL mapping
-            meeting_key = normalize_meeting_url(session.meeting_url)
-            if self.meeting_to_bot.get(meeting_key) == bot_id:
-                del self.meeting_to_bot[meeting_key]
-                logger.info(f"Removed meeting URL mapping for {meeting_key[:50]}...")
-            
-            # Delete bot from Recall.ai
-            try:
-                self.recall_service.delete_bot(bot_id)
-            except Exception as e:
-                logger.error(f"Failed to delete bot {bot_id}: {e}")
-            
-            # Wait for threads to finish (with timeout)
+
             for thread in session.processing_threads:
                 thread.join(timeout=2.0)
-            
-            # Remove from sessions
-            del self.sessions[bot_id]
-            
-            logger.info(f"Session {bot_id} ended and cleaned up")
-    
+
+            with self.sessions_lock:
+                self._clear_meeting_mapping_for_bot(bot_id, session.meeting_url)
+                if bot_id in self.sessions:
+                    del self.sessions[bot_id]
+        else:
+            logger.warning(
+                f"No local session for bot {bot_id[:8]} — will still delete from Recall"
+            )
+            with self.sessions_lock:
+                self._clear_meeting_mapping_for_bot(bot_id)
+
+        recall_removed = False
+        try:
+            recall_removed = self.recall_service.remove_bot(bot_id)
+            if recall_removed:
+                logger.info(f"Recall bot {bot_id[:8]} removed from meeting")
+            else:
+                logger.warning(
+                    f"Could not remove Recall bot {bot_id[:8]} from meeting"
+                )
+        except Exception as e:
+            logger.error(f"Failed to remove bot {bot_id} from Recall: {e}")
+
+        logger.info(f"Session {bot_id} ended and cleaned up")
+        return recall_removed
+
+    def cleanup_stale_lobby_bots(self, max_age_sec: float):
+        """Remove bots stuck in lobby before interview start (never admitted / abandoned)."""
+        now = time.time()
+        with self.sessions_lock:
+            candidates = [
+                (bot_id, session)
+                for bot_id, session in self.sessions.items()
+                if session.is_active
+                and not session.state.is_started.is_set()
+                and not session.state.interview_ended.is_set()
+                and (now - session.created_at) >= max_age_sec
+            ]
+
+        for bot_id, _session in candidates:
+            try:
+                phase, _ = self.recall_service.get_bot_phase(bot_id)
+            except Exception as e:
+                logger.warning(
+                    f"Lobby janitor: could not verify bot {bot_id[:8]}: {e}"
+                )
+                continue
+
+            if phase in ("lobby", "joining", "unknown"):
+                logger.info(
+                    f"Lobby timeout ({int(max_age_sec // 60)} min) — removing bot {bot_id[:8]}"
+                )
+                self.end_session(bot_id)
+
     def get_active_sessions(self) -> Dict[str, MeetingSession]:
         """
         Get all active sessions.

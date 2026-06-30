@@ -56,7 +56,10 @@ OLLAMA_MODEL = _env_str("OLLAMA_MODEL", "llama3.2:3b")
 GROQ_MODEL = _env_str("GROQ_MODEL", "llama-3.1-8b-instant")
 GROQ_TEMPERATURE = _env_float("GROQ_TEMPERATURE", 0.3)
 GROQ_MAX_TOKENS = _env_int("GROQ_MAX_TOKENS", 90)
+GROQ_REQUEST_TIMEOUT_SEC = _env_float("GROQ_REQUEST_TIMEOUT_SEC", 45.0)
 GROQ_API_KEY = _env_str("GROQ_API_KEY", "")
+# Ollama fallback for evaluator can block 60s+ if Ollama is down — off by default in production.
+OLLAMA_EVALUATOR_FALLBACK = _env_bool("OLLAMA_EVALUATOR_FALLBACK", False)
 
 if GROQ_API_KEY and GROQ_API_KEY != "your_api_key_here":
     print("[LLM] Backend: Groq API (ultra-low latency)")
@@ -82,11 +85,31 @@ SARVAM_STT_ENABLED = _env_str("SARVAM_STT_ENABLED", "true").lower() == "true"
 
 # Sarvam STT collector tuning (production defaults for fuller turns)
 SARVAM_STT_COLLECT_DEADLINE_SEC = _env_float("SARVAM_STT_COLLECT_DEADLINE_SEC", 10.0)
-SARVAM_STT_TRAILING_SILENCE_SEC = _env_float("SARVAM_STT_TRAILING_SILENCE_SEC", 0.9)
-SARVAM_STT_WAIT_AFTER_END_SEC = _env_float("SARVAM_STT_WAIT_AFTER_END_SEC", 0.6)
+SARVAM_STT_COLLECT_DEADLINE_MAX_SEC = _env_float("SARVAM_STT_COLLECT_DEADLINE_MAX_SEC", 60.0)
+SARVAM_STT_TRANSCRIBE_TIMEOUT_SEC = _env_float("SARVAM_STT_TRANSCRIBE_TIMEOUT_SEC", 12.0)
+SARVAM_STT_TRANSCRIBE_TIMEOUT_MAX_SEC = _env_float("SARVAM_STT_TRANSCRIBE_TIMEOUT_MAX_SEC", 90.0)
+SARVAM_STT_TRAILING_SILENCE_SEC = _env_float("SARVAM_STT_TRAILING_SILENCE_SEC", 0.55)
+SARVAM_STT_WAIT_AFTER_END_SEC = _env_float("SARVAM_STT_WAIT_AFTER_END_SEC", 0.35)
+
+
+def sarvam_collect_deadline_sec(utterance_duration: float) -> float:
+    """Scale Sarvam transcript collection window with answer length."""
+    base = SARVAM_STT_COLLECT_DEADLINE_SEC
+    scaled = utterance_duration * 0.35 + 8.0
+    return min(max(base, scaled), SARVAM_STT_COLLECT_DEADLINE_MAX_SEC)
+
+
+def sarvam_transcribe_timeout_sec(utterance_duration: float) -> float:
+    """Scale blocking transcribe_sync timeout with answer length."""
+    base = SARVAM_STT_TRANSCRIBE_TIMEOUT_SEC
+    scaled = utterance_duration * 0.45 + 10.0
+    return min(max(base, scaled), SARVAM_STT_TRANSCRIBE_TIMEOUT_MAX_SEC)
 
 # Endpointing split by engine (keeps Whisper behavior stable)
-SARVAM_LOCAL_SILENCE_SEC = _env_float("SARVAM_LOCAL_SILENCE_SEC", 1.4)
+SARVAM_LOCAL_SILENCE_SEC = _env_float("SARVAM_LOCAL_SILENCE_SEC", 1.15)
+
+# Hinglish: short bridge ("Theek hai.") when score >= threshold; full rephrase intro below
+HINGLISH_SIMPLE_BRIDGE_MIN_SCORE = _env_int("HINGLISH_SIMPLE_BRIDGE_MIN_SCORE", 7)
 WHISPER_LOCAL_SILENCE_SEC = _env_float("WHISPER_LOCAL_SILENCE_SEC", 1.0)
 
 # Quality gate: for long utterances, reject ultra-short Sarvam finals and fallback
@@ -178,9 +201,37 @@ BOT_INTERRUPT_MIN_SPEECH_SEC = _env_float("BOT_INTERRUPT_MIN_SPEECH_SEC", 15.0)
 BOT_INTERRUPT_CHECK_INTERVAL_SEC = _env_float("BOT_INTERRUPT_CHECK_INTERVAL_SEC", 10.0)
 BOT_INTERRUPT_SHORT_ANSWER_MAX_SEC = _env_float("BOT_INTERRUPT_SHORT_ANSWER_MAX_SEC", 13.0)
 BOT_INTERRUPT_MIN_PARTIAL_SEC = _env_float("BOT_INTERRUPT_MIN_PARTIAL_SEC", 2.5)
-BOT_INTERRUPT_DRAG_STRIKES_MAX = _env_int("BOT_INTERRUPT_DRAG_STRIKES_MAX", 2)
+# DRAG (off-topic): min 1 rephrase before force-complete; max rephrases per question
+BOT_INTERRUPT_DRAG_REPHRASE_MIN = _env_int("BOT_INTERRUPT_DRAG_REPHRASE_MIN", 1)
+BOT_INTERRUPT_DRAG_REPHRASE_MAX = _env_int("BOT_INTERRUPT_DRAG_REPHRASE_MAX", 2)
+# Legacy alias — force-complete after DRAG_REPHRASE_MAX rephrases exhausted
+BOT_INTERRUPT_DRAG_STRIKES_MAX = _env_int(
+    "BOT_INTERRUPT_DRAG_STRIKES_MAX", BOT_INTERRUPT_DRAG_REPHRASE_MAX + 1
+)
 BOT_INTERRUPT_GATE_MIN_CONFIDENCE = _env_float("BOT_INTERRUPT_GATE_MIN_CONFIDENCE", 0.75)
-BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q = _env_int("BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q", 2)
+# ON_TRACK depth clarifiers (e.g. "What is npm?" when they mention express without explaining npm)
+BOT_INTERRUPT_MAX_DEPTH_CLARIFIERS_PER_Q = _env_int(
+    "BOT_INTERRUPT_MAX_DEPTH_CLARIFIERS_PER_Q", 2
+)
+BOT_INTERRUPT_MIN_DEPTH_CLARIFIERS_PER_Q = _env_int(
+    "BOT_INTERRUPT_MIN_DEPTH_CLARIFIERS_PER_Q", 0
+)
+BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q = _env_int(
+    "BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q",
+    BOT_INTERRUPT_MAX_DEPTH_CLARIFIERS_PER_Q,
+)
+# Mid-answer ON_TRACK depth clarifiers (unexplained jargon); DRAG stays separate
+BOT_INTERRUPT_CLARIFIER_ON_TRACK = _env_bool("BOT_INTERRUPT_CLARIFIER_ON_TRACK", True)
+CLARIFIER_MIN_SPEECH_SEC = _env_float("CLARIFIER_MIN_SPEECH_SEC", 25.0)
+CLARIFIER_ON_TRACK_MIN_SPEECH_SEC = _env_float("CLARIFIER_ON_TRACK_MIN_SPEECH_SEC", 18.0)
+CLARIFIER_MIN_INTERVAL_SEC = _env_float("CLARIFIER_MIN_INTERVAL_SEC", 20.0)
+# Long CORE answers: longer VAD pause + merge window so one answer is not split into many LLM turns
+CORE_ANSWER_MERGE_WINDOW_SEC = _env_float("CORE_ANSWER_MERGE_WINDOW_SEC", 15.0)
+CORE_LONG_ANSWER_SPEECH_SEC = _env_float("CORE_LONG_ANSWER_SPEECH_SEC", 18.0)
+CORE_LONG_ANSWER_SILENCE_SEC = _env_float("CORE_LONG_ANSWER_SILENCE_SEC", 2.2)
+CORE_ANSWER_MAX_HOLD_SEC = _env_float("CORE_ANSWER_MAX_HOLD_SEC", 45.0)
+# Allow Whisper fallback when Sarvam fails in Hinglish (final answers only)
+HINGLISH_WHISPER_FALLBACK = _env_bool("HINGLISH_WHISPER_FALLBACK", True)
 
 # Meta-requests during Q&A (repeat / rephrase question — not scored)
 MAX_QUESTION_REPEATS = _env_int("MAX_QUESTION_REPEATS", 2)
@@ -195,8 +246,39 @@ INCOMPLETE_ANSWER_CHECK_ENABLED = _env_bool("INCOMPLETE_ANSWER_CHECK_ENABLED", T
 
 # Post-TTS silence: confirm candidate can hear after bot finishes speaking
 POST_TTS_SILENCE_CHECK_ENABLED = _env_bool("POST_TTS_SILENCE_CHECK_ENABLED", True)
-POST_TTS_SILENCE_CHECK_SEC = _env_float("POST_TTS_SILENCE_CHECK_SEC", 5.0)
+POST_TTS_SILENCE_CHECK_SEC = _env_float("POST_TTS_SILENCE_CHECK_SEC", 18.0)
+# Minimum wait after a new main question before presence check (think time)
+POST_TTS_SILENCE_MIN_AFTER_QUESTION_SEC = _env_float(
+    "POST_TTS_SILENCE_MIN_AFTER_QUESTION_SEC", 18.0
+)
 MAX_PRESENCE_CHECKS_PER_QUESTION = _env_int("MAX_PRESENCE_CHECKS_PER_QUESTION", 1)
+
+# STT: do not flush/score tiny held turns while a long answer is in progress
+TURN_FLUSH_GUARD_MIN_CHARS = _env_int("TURN_FLUSH_GUARD_MIN_CHARS", 30)
+TURN_FLUSH_DEFER_SEC = _env_float("TURN_FLUSH_DEFER_SEC", 8.0)
+
+# After DRAG rephrase, wait before scoring a lone "that's it" / done phrase
+DRAG_REPHRASE_SCORE_GRACE_SEC = _env_float("DRAG_REPHRASE_SCORE_GRACE_SEC", 15.0)
+# DRAG handling: in-context tangent → one depth probe; off-context → skip to next Q
+DRAG_SKIP_SCORE = _env_int("DRAG_SKIP_SCORE", 2)
+BOT_INTERRUPT_MAX_DRAG_DEPTH_PER_Q = _env_int("BOT_INTERRUPT_MAX_DRAG_DEPTH_PER_Q", 1)
+DRAG_CONTEXT_MIN_OVERLAP = _env_int("DRAG_CONTEXT_MIN_OVERLAP", 1)
+# No mid-answer interrupts until this many seconds after a new main question finishes
+MAIN_QUESTION_INTERRUPT_COOLDOWN_SEC = _env_float(
+    "MAIN_QUESTION_INTERRUPT_COOLDOWN_SEC", 25.0
+)
+# No back-to-back bot mid-answer speech (depth clarifier / DRAG rephrase)
+MID_ANSWER_BOT_COOLDOWN_SEC = _env_float("MID_ANSWER_BOT_COOLDOWN_SEC", 18.0)
+# Reject tail fragments from the previous question shortly after advancing
+STALE_ANSWER_GUARD_SEC = _env_float("STALE_ANSWER_GUARD_SEC", 12.0)
+STALE_ANSWER_MAX_CHARS = _env_int("STALE_ANSWER_MAX_CHARS", 220)
+# Score clarifier reply directly instead of "continue kijiye" when reply is substantive
+CLARIFIER_REPLY_SCORE_MIN_CHARS = _env_int("CLARIFIER_REPLY_SCORE_MIN_CHARS", 40)
+
+# Intro phase: do not advance to Q1 on a short greeting-only pause
+INTRO_MIN_CHARS = _env_int("INTRO_MIN_CHARS", 80)
+INTRO_MIN_SPEECH_SEC = _env_float("INTRO_MIN_SPEECH_SEC", 20.0)
+INTRO_MERGE_WINDOW_SEC = _env_float("INTRO_MERGE_WINDOW_SEC", 10.0)
 
 # Latency: preload Whisper at session start (avoids ~2s first-fallback delay)
 WHISPER_PRELOAD_ENABLED = _env_bool("WHISPER_PRELOAD_ENABLED", True)

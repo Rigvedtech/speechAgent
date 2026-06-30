@@ -1,0 +1,4 @@
+# Transcript bot=6509cc8d-9612-4dac-8287-6bdf7bc818cb started=20260624_184250
+18:43:41 [AI]: Hello Athrav, welcome. I'm Prabhat, your interviewer today. Before we begin, could you please introduce yourself briefly?
+18:43:54 [You]: Yeah, hello Prabhak.
+18:43:54 [AI]: Thank you for introducing yourself, Athrav. Can you walk me through the basic steps you'd take to create a simple REST API endpoint using Node.js and Express.js?

@@ -167,14 +167,54 @@ class IntegratedAudioSender:
             logger.warning("Sarvam TTS pre-connect failed — will retry on first speak")
         return connected
 
+    def ensure_sarvam_connected_sync(
+        self, tts_loop: "asyncio.AbstractEventLoop"
+    ) -> None:
+        """Fire-and-forget pre-connect on the TTS worker loop (e.g. when candidate turn starts)."""
+        import asyncio
+
+        if not self.use_sarvam or not self.sarvam_engine or self.using_fallback:
+            return
+        if not tts_loop or not tts_loop.is_running():
+            return
+        asyncio.run_coroutine_threadsafe(
+            self.ensure_sarvam_connected(), tts_loop
+        )
+
     async def apply_tts_language(self, language_code: str) -> bool:
-        """Update Sarvam TTS language and reconnect WebSocket."""
+        """Update Sarvam TTS language and reconnect WebSocket (TTS worker loop only)."""
         if not self.use_sarvam or not self.sarvam_engine:
             return False
         self.sarvam_engine.update_language_code(language_code)
         ok = await self.sarvam_engine.reconnect_with_settings()
         logger.info("[TTS LANG] Sarvam language=%s reconnected=%s", language_code, ok)
         return ok
+
+    def apply_tts_language_sync(
+        self, language_code: str, tts_loop: "asyncio.AbstractEventLoop"
+    ) -> bool:
+        """Thread-safe: reconnect Sarvam TTS on the TTS worker event loop."""
+        import asyncio
+
+        if not self.use_sarvam or not self.sarvam_engine:
+            return False
+        if not tts_loop or not tts_loop.is_running():
+            logger.warning("[TTS LANG] TTS worker loop not running — language stored only")
+            self.sarvam_engine.update_language_code(language_code)
+            return False
+        self.sarvam_engine.update_language_code(language_code)
+        future = asyncio.run_coroutine_threadsafe(
+            self.sarvam_engine.reconnect_with_settings(), tts_loop
+        )
+        try:
+            ok = future.result(timeout=15)
+            logger.info(
+                "[TTS LANG] Sarvam language=%s reconnected=%s", language_code, ok
+            )
+            return ok
+        except Exception as ex:
+            logger.warning("[TTS LANG] Sarvam reconnect failed: %s", ex)
+            return False
     
     async def send_text_to_bot(self, bot_id: str, text: str, state=None) -> bool:
         """

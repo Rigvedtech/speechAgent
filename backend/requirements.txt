@@ -17,6 +17,7 @@ google-genai>=1.14.0
 # Recall.ai Integration
 websockets>=12.0
 requests>=2.31.0
+python-multipart>=0.0.9
 aiohttp>=3.9.0
 
 # WebRTC Output Media API

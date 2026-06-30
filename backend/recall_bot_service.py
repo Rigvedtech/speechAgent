@@ -64,6 +64,81 @@ def normalize_meeting_url(url: str) -> str:
     ))
 
 
+def resolve_meeting_url_for_recall(url: str) -> str:
+    """
+    Convert Teams launcher/deeplink URLs to direct meet links Recall accepts.
+    Zoom and Google Meet URLs are passed through unchanged.
+    """
+    import re
+    from urllib.parse import parse_qs, urlparse, unquote, urlencode, urlunparse
+
+    raw = (url or "").strip()
+    if not raw:
+        raise ValueError("Meeting URL is required")
+
+    resolved = raw
+    parsed = urlparse(resolved)
+    host = (parsed.netloc or "").lower()
+    path = unquote(parsed.path or "")
+
+    if "/dl/launcher" in path or path.endswith("launcher.html"):
+        inner_values = parse_qs(parsed.query).get("url")
+        if not inner_values or not inner_values[0]:
+            raise ValueError(
+                "Teams launcher link is missing the meeting path. Copy the direct link "
+                "from Teams (https://teams.microsoft.com/meet/...) instead."
+            )
+        inner = unquote(inner_values[0])
+        inner = inner.replace("/_#/", "/").replace("/#/", "/")
+        if inner.startswith("http://") or inner.startswith("https://"):
+            resolved = inner
+        elif inner.startswith("/"):
+            resolved = f"https://teams.microsoft.com{inner}"
+        else:
+            resolved = f"https://teams.microsoft.com/{inner.lstrip('/')}"
+        parsed = urlparse(resolved)
+        host = (parsed.netloc or "").lower()
+        path = unquote(parsed.path or "")
+
+    if "teams.live.com" in host and "/meet/" in path:
+        meet_id = re.search(r"/meet/(\d+)", path, re.I)
+        if meet_id:
+            qs = parse_qs(parsed.query)
+            p = (qs.get("p") or [None])[0]
+            if p:
+                return f"https://teams.live.com/meet/{meet_id.group(1)}?p={p}"
+            return f"https://teams.live.com/meet/{meet_id.group(1)}"
+
+    if "teams.microsoft.com" in host or "teams.live.com" in host:
+        meet_id = re.search(r"/meet/(\d+)", path, re.I)
+        if meet_id:
+            qs = parse_qs(parsed.query)
+            p = (qs.get("p") or [None])[0]
+            base = "teams.live.com" if "teams.live.com" in host else "teams.microsoft.com"
+            if p:
+                return f"https://{base}/meet/{meet_id.group(1)}?p={p}"
+            return f"https://{base}/meet/{meet_id.group(1)}"
+        if "/l/meetup-join/" in path:
+            clean = urlunparse((
+                parsed.scheme or "https",
+                parsed.netloc,
+                path.rstrip("/"),
+                "",
+                urlencode(parse_qs(parsed.query), doseq=True),
+                "",
+            ))
+            return clean
+
+    if "zoom.us" in host or "meet.google.com" in host:
+        return raw.split("#")[0].rstrip("/")
+
+    raise ValueError(
+        "Unsupported meeting URL. Paste a direct Teams link like "
+        "https://teams.microsoft.com/meet/44674673636181?p=... "
+        "(not the teams.microsoft.com/dl/launcher/... wrapper)."
+    )
+
+
 def get_latest_status_code(bot_status: Dict[str, Any]) -> str:
     """Latest Recall status code from status_changes or top-level status."""
     changes = bot_status.get("status_changes") or []
@@ -331,7 +406,7 @@ class RecallBotService:
     
     def delete_bot(self, bot_id: str) -> bool:
         """
-        Delete a bot and end its meeting participation.
+        Delete a scheduled bot that has not yet joined a call.
         
         Args:
             bot_id: Bot ID to delete
@@ -352,6 +427,51 @@ class RecallBotService:
         except requests.HTTPError as e:
             logger.error(f"Failed to delete bot: {e.response.text}")
             return False
+
+    def leave_call(self, bot_id: str) -> bool:
+        """
+        Remove a bot that has started joining or is in the meeting/lobby.
+        Required when DELETE returns cannot_delete_bot.
+        """
+        try:
+            response = requests.post(
+                f"{self.BASE_URL}/bot/{bot_id}/leave_call/",
+                headers=self.headers,
+                timeout=10
+            )
+            response.raise_for_status()
+            logger.info(f"Bot {bot_id[:8]} left call successfully")
+            return True
+        except requests.HTTPError as e:
+            logger.error(f"Failed to leave call for bot {bot_id[:8]}: {e.response.text}")
+            return False
+
+    def remove_bot(self, bot_id: str) -> bool:
+        """
+        Remove bot from Recall — delete if not joined, leave_call if in lobby/meeting.
+        """
+        try:
+            phase, status_code = self.get_bot_phase(bot_id)
+        except Exception as e:
+            logger.warning(
+                f"Could not verify bot {bot_id[:8]} phase: {e} — trying leave_call"
+            )
+            if self.leave_call(bot_id):
+                return True
+            return self.delete_bot(bot_id)
+
+        if phase == "ended":
+            logger.info(f"Bot {bot_id[:8]} already ended (status={status_code})")
+            return True
+
+        if phase in ("lobby", "joining", "in_meeting"):
+            if self.leave_call(bot_id):
+                return True
+            return self.delete_bot(bot_id)
+
+        if self.delete_bot(bot_id):
+            return True
+        return self.leave_call(bot_id)
     
     @staticmethod
     def _mp3_duration_seconds(audio_data: bytes) -> float:

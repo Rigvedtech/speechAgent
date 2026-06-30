@@ -9,17 +9,20 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Literal
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, field_validator
 from dotenv import load_dotenv
 import uvicorn
+import requests
 
 from recall_bot_service import (
     RecallBotService,
     BotConfig,
     normalize_meeting_url,
+    resolve_meeting_url_for_recall,
     bot_phase_message,
 )
 from session_manager import SessionManager
@@ -27,6 +30,8 @@ from audio_receiver import AudioReceiver
 from transcript_log import log_transcript
 from report_html import render_not_completed_html, render_report_html
 from report_service import resolve_interview_report
+from report_store import list_reports
+from n8n_extraction import extract_jd_cv_files
 from language_profiles import resolve_language_mode, get_ui_strings
 import config as app_config
 import ws_hub
@@ -43,9 +48,35 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI
 app = FastAPI(title="Recall.ai Bot API", version="1.0.0")
 
+_cors_origins = os.getenv(
+    "CORS_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173",
+).split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors_origins if o.strip()],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
+
 # Serve audio-worklet-processor.js and other static assets
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# Initialize services and env config (before startup handlers)
+recall_service = RecallBotService()
+session_manager = SessionManager(recall_service)
+
+BOT_NAME = os.getenv("BOT_NAME", "Prabhat")
+LOBBY_TIMEOUT_MINUTES = int(os.getenv("LOBBY_TIMEOUT_MINUTES", "15"))
+PUBLIC_WEBSOCKET_URL = os.getenv("PUBLIC_WEBSOCKET_URL")
+WEBSOCKET_PORT = int(os.getenv("WEBSOCKET_PORT", "8765"))
+
+# TTS Configuration
+TTS_RATE = os.getenv("TTS_RATE", "+35%")
+TTS_REDUCE_PAUSES = os.getenv("TTS_REDUCE_PAUSES", "true").lower() == "true"
+
 
 @app.on_event("startup")
 async def _capture_main_loop():
@@ -62,28 +93,67 @@ async def _capture_main_loop():
     import config as _cfg
     _cfg.main_event_loop = asyncio.get_running_loop()
     logger.info("[startup] Main event loop captured in config.main_event_loop")
+    asyncio.create_task(_lobby_janitor_loop())
+
+
+async def _lobby_janitor_loop():
+    """Periodically remove bots abandoned in the lobby before interview start."""
+    interval_sec = 60
+    max_age_sec = LOBBY_TIMEOUT_MINUTES * 60
+    logger.info(
+        f"[janitor] Lobby cleanup every {interval_sec}s "
+        f"(timeout={LOBBY_TIMEOUT_MINUTES} min)"
+    )
+    while True:
+        await asyncio.sleep(interval_sec)
+        try:
+            session_manager.cleanup_stale_lobby_bots(max_age_sec)
+        except Exception as e:
+            logger.error(f"[janitor] Lobby cleanup failed: {e}")
+
+
+@app.on_event("shutdown")
+async def _shutdown_sessions():
+    logger.info("[shutdown] Cleaning up active bot sessions")
+    session_manager.shutdown_all()
 
 # All WebSocket hub state and broadcast helpers live in ws_hub.py
 # (avoids the Python __main__ double-module problem — see ws_hub.py for details)
 
-# Initialize services
-recall_service = RecallBotService()
-session_manager = SessionManager(recall_service)
-
-# Get config from env
-BOT_NAME = os.getenv("BOT_NAME", "Prabhat")
-PUBLIC_WEBSOCKET_URL = os.getenv("PUBLIC_WEBSOCKET_URL")
-WEBSOCKET_PORT = int(os.getenv("WEBSOCKET_PORT", "8765"))
-
-# TTS Configuration
-TTS_RATE = os.getenv("TTS_RATE", "+35%")
-TTS_REDUCE_PAUSES = os.getenv("TTS_REDUCE_PAUSES", "true").lower() == "true"
-
-
 # Request/Response Models
+class QuestionBankItem(BaseModel):
+    id: str
+    difficulty: str
+    source: str
+    question: str
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def coerce_id_to_str(cls, v):
+        if v is None:
+            raise ValueError("id is required")
+        return str(v).strip()
+
+
 class JoinMeetingRequest(BaseModel):
     meeting_url: str
     bot_name: Optional[str] = None
+    candidate_name: Optional[str] = None
+    jdText: Optional[str] = None
+    cvText: Optional[str] = None
+    questions: Optional[List[QuestionBankItem]] = None
+    language_mode: Optional[Literal["english", "hinglish"]] = None
+    greeting_message: Optional[str] = None
+    replace_existing: bool = False
+
+
+class PlannedQuestionSummary(BaseModel):
+    slot: int
+    id: str
+    difficulty: str
+    source: str
+    question: str
+    spoken_question: str
 
 
 class JoinMeetingResponse(BaseModel):
@@ -93,6 +163,11 @@ class JoinMeetingResponse(BaseModel):
     meeting_url: str
     status: str
     message: Optional[str] = None
+    interview_configured: bool = False
+    language_mode: Optional[str] = None
+    localization_status: Optional[str] = None
+    questions_planned: Optional[int] = None
+    planned_questions: Optional[List[PlannedQuestionSummary]] = None
 
 
 class LeaveResponse(BaseModel):
@@ -106,6 +181,19 @@ class StatusResponse(BaseModel):
     status: str
     meeting_url: Optional[str]
     is_active: bool
+    recall_phase: Optional[str] = None
+    interview_configured: bool = False
+    interview_started: bool = False
+    localization_status: Optional[str] = None
+    ready_to_start: bool = False
+    questions_planned: Optional[int] = None
+    candidate_name: Optional[str] = None
+    language_mode: Optional[str] = None
+    planned_questions: Optional[List[PlannedQuestionSummary]] = None
+    current_question_slot: Optional[int] = None
+    questions_scored: Optional[int] = None
+    interview_phase: Optional[str] = None
+    interview_ended: Optional[bool] = None
 
 
 # ─── Output Media Webpage ────────────────────────────────────────────────────
@@ -169,6 +257,69 @@ async def audio_stream_ws(websocket: WebSocket, page_session_id: str):
 
 # ─── API Endpoints ────────────────────────────────────────────────────────────
 
+def _interview_config_provided(request: JoinMeetingRequest) -> bool:
+    return bool(
+        request.candidate_name
+        or request.jdText
+        or request.cvText
+        or request.questions
+        or request.language_mode
+    )
+
+
+def _validate_interview_config(request: JoinMeetingRequest) -> tuple[str, str, str, list, str]:
+    """Validate full interview payload on join. Returns (candidate, jd, cv, bank, language)."""
+    candidate_name = (request.candidate_name or "").strip()
+    jd_text = (request.jdText or "").strip()
+    cv_text = (request.cvText or "").strip()
+    if not candidate_name:
+        raise HTTPException(status_code=400, detail="candidate_name is required")
+    if not jd_text:
+        raise HTTPException(status_code=400, detail="jdText is required")
+    if not cv_text:
+        raise HTTPException(status_code=400, detail="cvText is required")
+    if not request.questions:
+        raise HTTPException(status_code=400, detail="questions list cannot be empty")
+    try:
+        resolved_language = resolve_language_mode(request.language_mode)
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    from interview_engine import parse_bank_questions
+
+    try:
+        bank = parse_bank_questions([q.model_dump() for q in request.questions])
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    return candidate_name, jd_text, cv_text, bank, resolved_language
+
+
+async def _attach_interview_to_session(
+    session,
+    bot_id: str,
+    candidate_name: str,
+    jd_text: str,
+    cv_text: str,
+    bank,
+    resolved_language: str,
+    greeting_message: Optional[str],
+) -> None:
+    from interview_engine import InterviewOrchestrator
+
+    orchestrator = InterviewOrchestrator.create(
+        bot_id=bot_id,
+        candidate_name=candidate_name,
+        jd_text=jd_text,
+        cv_text=cv_text,
+        bank=bank,
+        language_mode=resolved_language,
+    )
+    session_manager.configure_interview_session(
+        session, orchestrator, resolved_language, greeting_message
+    )
+    await session_manager.apply_language_profile(session, resolved_language)
+    session_manager.start_question_localization(session)
+
+
 @app.post("/api/join", response_model=JoinMeetingResponse)
 async def join_meeting(request: JoinMeetingRequest):
     """
@@ -176,9 +327,21 @@ async def join_meeting(request: JoinMeetingRequest):
     One bot per meeting URL — duplicate joins return 409 with a clear message.
     """
     bot_name = request.bot_name or BOT_NAME
-    meeting_url = request.meeting_url.strip()
-    if not meeting_url:
+    raw_meeting_url = request.meeting_url.strip()
+    if not raw_meeting_url:
         raise HTTPException(status_code=400, detail="meeting_url is required")
+
+    try:
+        meeting_url = resolve_meeting_url_for_recall(raw_meeting_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if meeting_url != raw_meeting_url:
+        logger.info(
+            "Resolved meeting URL: %s... -> %s...",
+            raw_meeting_url[:55],
+            meeting_url[:55],
+        )
 
     meeting_key = normalize_meeting_url(meeting_url)
 
@@ -214,6 +377,12 @@ async def join_meeting(request: JoinMeetingRequest):
 
         if phase == "ended":
             session_manager.cleanup_stale_bot(existing_bot_id, meeting_url)
+        elif request.replace_existing:
+            logger.info(
+                f"Replacing existing bot {existing_bot_id[:8]} for meeting "
+                f"(phase={phase})"
+            )
+            session_manager.end_session(existing_bot_id)
         else:
             raise HTTPException(
                 status_code=409,
@@ -291,6 +460,43 @@ async def join_meeting(request: JoinMeetingRequest):
             bot_id, meeting_url, bot_data=bot_data, use_webpage=use_webpage
         )
 
+        session = session_manager.get_session(bot_id)
+        interview_configured = False
+        localization_status = None
+        questions_planned = None
+        resolved_language = None
+        orch = None
+
+        if session and _interview_config_provided(request):
+            if not all(
+                [request.candidate_name, request.jdText, request.cvText, request.questions]
+            ):
+                session_manager.end_session(bot_id)
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Partial interview config on join. Provide candidate_name, "
+                        "jdText, cvText, questions, and optional language_mode together."
+                    ),
+                )
+            candidate_name, jd_text, cv_text, bank, resolved_language = (
+                _validate_interview_config(request)
+            )
+            await _attach_interview_to_session(
+                session,
+                bot_id,
+                candidate_name,
+                jd_text,
+                cv_text,
+                bank,
+                resolved_language,
+                request.greeting_message,
+            )
+            interview_configured = True
+            orch = session.state.interview_orchestrator
+            localization_status = orch.localization_status if orch else None
+            questions_planned = len(orch.planned_questions) if orch else None
+
         if bot_data.get("media_url"):
             logger.info(f"Bot '{bot_name}' created with WebRTC streaming. ID: {bot_id}")
         else:
@@ -302,68 +508,70 @@ async def join_meeting(request: JoinMeetingRequest):
             bot_name=bot_name,
             meeting_url=meeting_url,
             status="joining",
-            message="Bot created and joining the meeting.",
+            message=(
+                "Bot created and joining the meeting. Interview configured — "
+                "call POST /api/start when the bot is admitted and you are ready."
+                if interview_configured
+                else "Bot created and joining the meeting."
+            ),
+            interview_configured=interview_configured,
+            language_mode=resolved_language,
+            localization_status=localization_status,
+            questions_planned=questions_planned,
+            planned_questions=(
+                orch.planned_questions_summary() if orch else None
+            ),
         )
 
     except HTTPException:
         session_manager.release_meeting_reservation(meeting_url)
         raise
+    except requests.HTTPError as e:
+        session_manager.release_meeting_reservation(meeting_url)
+        recall_detail = e.response.text if e.response is not None else str(e)
+        try:
+            recall_detail = e.response.json()
+        except Exception:
+            pass
+        logger.error(f"Recall rejected meeting URL: {recall_detail}")
+        raise HTTPException(
+            status_code=400,
+            detail=recall_detail if isinstance(recall_detail, str) else recall_detail,
+        ) from e
     except Exception as e:
         session_manager.release_meeting_reservation(meeting_url)
         logger.error(f"Failed to create bot: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-class QuestionBankItem(BaseModel):
-    id: str
-    difficulty: str
-    source: str
-    question: str
-
-    @field_validator("id", mode="before")
-    @classmethod
-    def coerce_id_to_str(cls, v):
-        if v is None:
-            raise ValueError("id is required")
-        return str(v).strip()
-
-
 class StartInterviewRequest(BaseModel):
-    candidate_name: str
-    jdText: str
-    cvText: str
-    questions: List[QuestionBankItem]
+    """Optional body for POST /api/start — interview config should be sent on join."""
     greeting_message: Optional[str] = None
+    # Legacy: full config on start if join did not include interview setup
+    candidate_name: Optional[str] = None
+    jdText: Optional[str] = None
+    cvText: Optional[str] = None
+    questions: Optional[List[QuestionBankItem]] = None
     language_mode: Optional[Literal["english", "hinglish"]] = None
 
 
 @app.post("/api/start/{bot_id}")
 async def start_interview(bot_id: str, request: StartInterviewRequest = None):
     """
-    Start the interview with injected JD, resume, and question bank.
+    Begin speaking — send greeting and open the interview.
 
-    Request Body:
-    {
-        "candidate_name": "Pranay",
-        "jdText": "...",
-        "cvText": "...",
-        "questions": [
-            {"id": "q1", "difficulty": "Low", "source": "jd", "question": "..."}
-        ],
-        "greeting_message": "optional custom greeting instruction",
-        "language_mode": "english | hinglish (optional — defaults to DEFAULT_INTERVIEW_LANGUAGE)"
-    }
+    Interview config (JD, CV, questions, language) should be sent on POST /api/join.
+    This endpoint verifies the bot is in_meeting and setup is ready, then speaks.
     """
     try:
-        # Get session
         session = session_manager.get_session(bot_id)
-        
+
         if not session:
             raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
-        
+
         if not session.is_active:
             raise HTTPException(status_code=400, detail="Bot session is not active")
-        
+
         if session.state.is_started.is_set():
             raise HTTPException(
                 status_code=409,
@@ -374,52 +582,70 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
                 },
             )
 
-        if request is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Request body required: candidate_name, jdText, cvText, questions",
+        body = request or StartInterviewRequest()
+        orchestrator = session.state.interview_orchestrator
+
+        # Legacy path: config on start when join did not configure interview
+        if orchestrator is None:
+            if not all([body.candidate_name, body.jdText, body.cvText, body.questions]):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Interview not configured. Send candidate_name, jdText, cvText, "
+                        "questions on POST /api/join, or include them in this start request."
+                    ),
+                )
+            candidate_name = (body.candidate_name or "").strip()
+            jd_text = (body.jdText or "").strip()
+            cv_text = (body.cvText or "").strip()
+            try:
+                resolved_language = resolve_language_mode(body.language_mode)
+            except ValueError as ve:
+                raise HTTPException(status_code=400, detail=str(ve))
+            from interview_engine import InterviewOrchestrator, parse_bank_questions
+
+            try:
+                bank = parse_bank_questions([q.model_dump() for q in body.questions])
+                orchestrator = InterviewOrchestrator.create(
+                    bot_id=bot_id,
+                    candidate_name=candidate_name,
+                    jd_text=jd_text,
+                    cv_text=cv_text,
+                    bank=bank,
+                    language_mode=resolved_language,
+                )
+            except ValueError as ve:
+                raise HTTPException(status_code=400, detail=str(ve))
+            session_manager.configure_interview_session(
+                session, orchestrator, resolved_language, body.greeting_message
             )
+            await session_manager.apply_language_profile(session, resolved_language)
+            session_manager.start_question_localization(session)
 
-        candidate_name = (request.candidate_name or "").strip()
-        jd_text = (request.jdText or "").strip()
-        cv_text = (request.cvText or "").strip()
+        resolved_language = session.state.interview_language or "english"
+        greeting_message = body.greeting_message or session.pending_greeting_message
 
-        if not candidate_name:
-            raise HTTPException(status_code=400, detail="candidate_name is required")
-        if not jd_text:
-            raise HTTPException(status_code=400, detail="jdText is required")
-        if not cv_text:
-            raise HTTPException(status_code=400, detail="cvText is required")
-        if not request.questions:
-            raise HTTPException(status_code=400, detail="questions list cannot be empty")
+        if orchestrator.language_mode == "hinglish":
+            if orchestrator.localization_status == "pending":
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "message": "Hinglish question localization still in progress. Retry shortly.",
+                        "bot_id": bot_id,
+                        "localization_status": "pending",
+                    },
+                )
+            if orchestrator.localization_status == "failed":
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "message": "Hinglish localization failed during join setup.",
+                        "bot_id": bot_id,
+                        "localization_status": "failed",
+                        "error": orchestrator.localization_error,
+                    },
+                )
 
-        try:
-            resolved_language = resolve_language_mode(request.language_mode)
-        except ValueError as ve:
-            raise HTTPException(status_code=400, detail=str(ve))
-
-        from interview_engine import InterviewOrchestrator, parse_bank_questions
-
-        try:
-            bank = parse_bank_questions([q.model_dump() for q in request.questions])
-            orchestrator = InterviewOrchestrator.create(
-                bot_id=bot_id,
-                candidate_name=candidate_name,
-                jd_text=jd_text,
-                cv_text=cv_text,
-                bank=bank,
-                language_mode=resolved_language,
-            )
-        except ValueError as ve:
-            raise HTTPException(status_code=400, detail=str(ve))
-
-        session.state.interview_orchestrator = orchestrator
-        session.state.interview_ended.clear()
-        session.state.interview_language = resolved_language
-
-        await session_manager.apply_language_profile(session, resolved_language)
-
-        # Bot must be admitted to the meeting before interview starts
         try:
             phase, status_code = recall_service.get_bot_phase(bot_id)
         except Exception as e:
@@ -464,17 +690,12 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
                     "recall_status": status_code,
                 },
             )
-        
-        # Get candidate name from injected session data
-        candidate_name = orchestrator.candidate_name
-        
-        # Fixed professional greeting — bypasses LLM to guarantee consistent interview tone
-        # Custom greeting_message (from API caller) goes via LLM as before
-        if request.greeting_message:
-            greeting_instruction = request.greeting_message
 
+        candidate_name = orchestrator.candidate_name
+
+        if greeting_message:
             session.state.is_started.set()
-            session.state.llm_queue.put(greeting_instruction)
+            session.state.llm_queue.put(greeting_message)
         else:
             ui = get_ui_strings(resolved_language)
             greeting_text = ui.greeting_template.format(
@@ -487,7 +708,6 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
             session.state.tts_queue.put(greeting_text)
             session.state.tts_queue.put("<END_OF_TURN>")
 
-            # Advance orchestrator phase directly (no LLM bootstrap needed)
             orchestrator.on_greeting_sent()
 
             logger.info(
@@ -510,15 +730,53 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
             "candidate_name": candidate_name,
             "language_mode": resolved_language,
             "questions_planned": len(orchestrator.planned_questions),
+            "planned_questions": orchestrator.planned_questions_summary(),
             "planned_question_ids": [q.id for q in orchestrator.planned_questions],
             "phase": orchestrator.phase.value,
+            "localization_status": orchestrator.localization_status,
         }
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Failed to start interview: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/extract-jd-cv")
+async def extract_jd_cv(
+    jd_file: Optional[UploadFile] = File(None),
+    cv_file: Optional[UploadFile] = File(None),
+):
+    """
+    Proxy JD/CV uploads to n8n (N8N_URI in .env) and return normalized text + questions.
+    Frontend → backend → n8n → backend → frontend.
+    """
+    logger.info("[EXTRACT] received jd=%s cv=%s", bool(jd_file), bool(cv_file))
+    jd_bytes = await jd_file.read() if jd_file and jd_file.filename else None
+    cv_bytes = await cv_file.read() if cv_file and cv_file.filename else None
+
+    if not jd_bytes and not cv_bytes:
+        raise HTTPException(status_code=400, detail="Upload at least one document (JD or CV)")
+
+    try:
+        result = await asyncio.to_thread(
+            extract_jd_cv_files,
+            jd_bytes=jd_bytes,
+            jd_filename=jd_file.filename if jd_file else None,
+            cv_bytes=cv_bytes,
+            cv_filename=cv_file.filename if cv_file else None,
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=502, detail=str(ve))
+
+    return {"success": True, **result}
+
+
+@app.get("/api/reports")
+async def list_interview_reports():
+    """List persisted interview report summaries, newest first."""
+    return {"reports": list_reports()}
 
 
 @app.get("/api/interview/{bot_id}/report")
@@ -563,6 +821,32 @@ async def get_interview_report_html(bot_id: str):
     return HTMLResponse(content=render_report_html(report), status_code=200)
 
 
+@app.post("/api/interviews/{bot_id}/cancel", response_model=LeaveResponse)
+async def cancel_interview_setup(bot_id: str):
+    """
+    Cancel interview setup — removes bot from meeting lobby before or during setup.
+    """
+    try:
+        logger.info(f"Cancelling interview setup for bot {bot_id}")
+        recall_removed = session_manager.end_session(bot_id)
+        if not recall_removed:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Interview cancelled locally but the bot may still be in the "
+                    "meeting lobby. Click Cancel again or deny the bot in Teams."
+                ),
+            )
+        return LeaveResponse(
+            success=True,
+            bot_id=bot_id,
+            message="Interview setup cancelled; bot removed from meeting",
+        )
+    except Exception as e:
+        logger.error(f"Failed to cancel interview setup: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.delete("/api/leave/{bot_id}", response_model=LeaveResponse)
 async def leave_meeting(bot_id: str):
     """
@@ -581,8 +865,15 @@ async def leave_meeting(bot_id: str):
     try:
         logger.info(f"Removing bot {bot_id} from meeting")
         
-        # End session
-        session_manager.end_session(bot_id)
+        recall_removed = session_manager.end_session(bot_id)
+        if not recall_removed:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "Session ended locally but the bot may still be in the meeting. "
+                    "Try again or remove it from Teams."
+                ),
+            )
         
         return LeaveResponse(
             success=True,
@@ -593,6 +884,21 @@ async def leave_meeting(bot_id: str):
     except Exception as e:
         logger.error(f"Failed to leave meeting: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _resolve_meeting_url(status_data: dict, session) -> Optional[str]:
+    """Recall may return meeting_url as a string or a nested object."""
+    if session and getattr(session, "meeting_url", None):
+        return session.meeting_url
+    raw = status_data.get("meeting_url")
+    if isinstance(raw, str) and raw.strip():
+        return raw.strip()
+    if isinstance(raw, dict):
+        for key in ("meeting_url", "url", "join_url", "meeting_link"):
+            val = raw.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return None
 
 
 @app.get("/api/status/{bot_id}", response_model=StatusResponse)
@@ -612,17 +918,54 @@ async def get_bot_status(bot_id: str):
     }
     """
     try:
-        # Get from Recall.ai API
         status_data = recall_service.get_bot_status(bot_id)
-        
-        # Get local session
         session = session_manager.get_session(bot_id)
-        
+        recall_phase = None
+        try:
+            recall_phase, _ = recall_service.get_bot_phase(bot_id)
+        except Exception:
+            pass
+
+        orch = session.state.interview_orchestrator if session else None
+        interview_configured = orch is not None
+        localization_status = orch.localization_status if orch else None
+        ready_to_start = (
+            bool(session and session.is_active and orch and not session.state.is_started.is_set())
+            and recall_phase == "in_meeting"
+            and (orch.is_localization_ready() if orch else False)
+        )
+
+        interview_started = session.state.is_started.is_set() if session else False
+        interview_ended = session.state.interview_ended.is_set() if session else False
+        current_slot = None
+        questions_scored = None
+        planned_questions = None
+        interview_phase = None
+        if orch:
+            planned_questions = orch.planned_questions_summary()
+            questions_scored = len(orch.answer_records)
+            interview_phase = orch.phase.value
+            if interview_started and not interview_ended:
+                current_slot = orch.current_index + 1
+
         return StatusResponse(
             bot_id=bot_id,
             status=status_data.get("status_changes", [{}])[-1].get("code", "unknown") if status_data.get("status_changes") else "unknown",
-            meeting_url=status_data.get("meeting_url"),
-            is_active=session.is_active if session else False
+            meeting_url=_resolve_meeting_url(status_data, session),
+            is_active=session.is_active if session else False,
+            recall_phase=recall_phase,
+            interview_configured=interview_configured,
+            interview_started=interview_started,
+            localization_status=localization_status,
+            ready_to_start=ready_to_start,
+            questions_planned=len(orch.planned_questions) if orch else None,
+            candidate_name=orch.candidate_name if orch else None,
+            language_mode=session.state.interview_language if session else None,
+            planned_questions=planned_questions,
+            current_question_slot=current_slot,
+            questions_scored=questions_scored,
+            interview_phase=interview_phase,
+            interview_ended=interview_ended,
         )
         
     except Exception as e:
@@ -660,6 +1003,17 @@ async def list_active_sessions():
                 "interview_ended": session.state.interview_ended.is_set(),
                 "interview_phase": (
                     session.state.interview_orchestrator.phase.value
+                    if session.state.interview_orchestrator
+                    else None
+                ),
+                "localization_status": (
+                    session.state.interview_orchestrator.localization_status
+                    if session.state.interview_orchestrator
+                    else None
+                ),
+                "language_mode": session.state.interview_language,
+                "candidate_name": (
+                    session.state.interview_orchestrator.candidate_name
                     if session.state.interview_orchestrator
                     else None
                 ),
@@ -769,7 +1123,8 @@ async def health_check():
         "status": "healthy",
         "service": "recall-bot-api",
         "websocket_url": PUBLIC_WEBSOCKET_URL,
-        "bot_name": BOT_NAME
+        "bot_name": BOT_NAME,
+        "lobby_timeout_minutes": LOBBY_TIMEOUT_MINUTES,
     }
 
 

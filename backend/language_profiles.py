@@ -1,7 +1,7 @@
 """
 Interview language profiles — English (default) and full Hinglish mode.
 
-Selected at POST /api/start via language_mode; stored on session.state.
+Selected at POST /api/join via language_mode; stored on session.state.
 """
 
 from __future__ import annotations
@@ -35,6 +35,7 @@ class UIStrings:
     rephrase_limit: str
     rephrase_prefix_main: str
     rephrase_prefix_clarifier: str
+    rephrase_intro_short: str
     presence_confirm_ack: str
     intro_thanks: str
     stt_retry_prompt: str
@@ -43,6 +44,7 @@ class UIStrings:
     closing_abuse: str
     abuse_warning: str
     greeting_template: str
+    nudge: str
     presence_phrases: Tuple[str, ...]
     bridge_phrases: Tuple[str, ...]
 
@@ -70,6 +72,7 @@ _ENGLISH_UI = UIStrings(
     ),
     rephrase_prefix_main="No problem. Let me ask it more simply: ",
     rephrase_prefix_clarifier="Let me put it more simply: ",
+    rephrase_intro_short="Let me ask it more simply: ",
     presence_confirm_ack="Great, please go ahead with your answer when you're ready.",
     intro_thanks="Thank you for introducing yourself, {name}. {question}",
     stt_retry_prompt="Sorry, I didn't catch that clearly. Could you please say that again?",
@@ -89,6 +92,7 @@ _ENGLISH_UI = UIStrings(
         "Hello {name}, welcome. I'm {bot_name}, your interviewer today. "
         "Before we begin, could you please introduce yourself briefly?"
     ),
+    nudge="Let's bring the focus back to the question whenever you're ready.",
     presence_phrases=(
         "Can you hear me clearly?",
         "Just checking — are you still there?",
@@ -113,6 +117,7 @@ _HINGLISH_UI = UIStrings(
     ),
     rephrase_prefix_main="Theek hai. Main ise thoda simple tareeke se puchta hoon: ",
     rephrase_prefix_clarifier="Main ise thoda simple tareeke se puchta hoon: ",
+    rephrase_intro_short="Main ise thoda simple tareeke se puchta hoon: ",
     presence_confirm_ack="Theek hai, jab aap ready hon tab apna jawab dijiye.",
     intro_thanks="Intro dene ke liye dhanyavaad, {name}. {question}",
     stt_retry_prompt="Sorry, awaaz clear nahi aayi. Kya aap dobara bol sakte hain?",
@@ -132,6 +137,7 @@ _HINGLISH_UI = UIStrings(
         "Namaste {name}, welcome. Main {bot_name} hoon, aaj aapka interviewer. "
         "Shuru karne se pehle, kripya apna brief introduction dijiye."
     ),
+    nudge="Koi baat nahi — jab ready hon, sawal par wapas aate hain.",
     presence_phrases=(
         "Kya aap mujhe clearly sun pa rahe hain?",
         "Bas check kar raha hoon — kya aap abhi bhi hain?",
@@ -155,7 +161,7 @@ def _hinglish_speech() -> SpeechProfile:
         stt_language=config.LANG_HINGLISH_STT_LANGUAGE,
         stt_mode=config.LANG_HINGLISH_STT_MODE,
         tts_language=config.LANG_HINGLISH_TTS_LANGUAGE,
-        whisper_fallback=False,
+        whisper_fallback=config.HINGLISH_WHISPER_FALLBACK,
     )
 
 

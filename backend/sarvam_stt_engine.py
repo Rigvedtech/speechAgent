@@ -419,11 +419,14 @@ class SarvamSTTEngine:
         self,
         audio_float32,
         sample_rate: int = 16000,
-        timeout: float = 8.0,
+        timeout: Optional[float] = None,
+        collect_deadline: Optional[float] = None,
     ) -> Optional[str]:
         """
         Synchronous transcription — send full utterance, flush, await transcript.
         Safe to call from any thread.
+
+        timeout / collect_deadline should scale with utterance length for long answers.
         """
         if not self._loop or not self._loop.is_running():
             logger.warning("Sarvam STT session loop not running — skipping")
@@ -434,22 +437,46 @@ class SarvamSTTEngine:
             logger.error(f"Sarvam STT float→int16 conversion error: {e}")
             return None
 
+        import config as _cfg
+        effective_timeout = timeout if timeout is not None else _cfg.SARVAM_STT_TRANSCRIBE_TIMEOUT_SEC
+        effective_collect = (
+            collect_deadline
+            if collect_deadline is not None
+            else _cfg.SARVAM_STT_COLLECT_DEADLINE_SEC
+        )
+
         future = asyncio.run_coroutine_threadsafe(
-            self._run_transcribe_batch(audio_bytes, sample_rate), self._loop
+            self._run_transcribe_batch(
+                audio_bytes, sample_rate, collect_deadline_seconds=effective_collect
+            ),
+            self._loop,
         )
         try:
-            return future.result(timeout=timeout)
+            return future.result(timeout=effective_timeout)
         except Exception as e:
-            logger.warning(f"Sarvam STT transcribe_sync error: {e}")
+            logger.warning(
+                "Sarvam STT transcribe_sync error (timeout=%.1fs): %s",
+                effective_timeout,
+                e,
+            )
             if self._loop and self._loop.is_running():
                 asyncio.run_coroutine_threadsafe(self._cancel_batch_task(), self._loop)
             return None
 
-    async def _run_transcribe_batch(self, audio_bytes: bytes, sample_rate: int) -> Optional[str]:
+    async def _run_transcribe_batch(
+        self,
+        audio_bytes: bytes,
+        sample_rate: int,
+        collect_deadline_seconds: Optional[float] = None,
+    ) -> Optional[str]:
         """Wrap batch transcription in a tracked task for cancellation."""
         await self._cancel_batch_task()
         self._batch_task = asyncio.create_task(
-            self._transcribe_batch(audio_bytes, sample_rate)
+            self._transcribe_batch(
+                audio_bytes,
+                sample_rate,
+                collect_deadline_seconds=collect_deadline_seconds,
+            )
         )
         try:
             return await self._batch_task
@@ -523,7 +550,12 @@ class SarvamSTTEngine:
             logger.info(f"[Sarvam STT] Final transcript: '{full_text}'")
         return full_text or None
 
-    async def _transcribe_batch(self, audio_bytes: bytes, sample_rate: int) -> Optional[str]:
+    async def _transcribe_batch(
+        self,
+        audio_bytes: bytes,
+        sample_rate: int,
+        collect_deadline_seconds: Optional[float] = None,
+    ) -> Optional[str]:
         """Send utterance in 100ms chunks, flush, await final transcript."""
         if not await self.ensure_connected():
             logger.error("Sarvam STT not connected for batch transcription")
@@ -558,11 +590,19 @@ class SarvamSTTEngine:
                     return None
                 await self.ws.send(json.dumps({"type": "flush"}))
 
+            collect_deadline = (
+                collect_deadline_seconds
+                if collect_deadline_seconds is not None
+                else self.config.collect_deadline_seconds
+            )
             logger.debug(
-                f"Sarvam STT: sent {sent_chunks} chunks + flush ({len(audio_bytes)} bytes)"
+                "Sarvam STT: sent %d chunks + flush (%d bytes, collect=%.1fs)",
+                sent_chunks,
+                len(audio_bytes),
+                collect_deadline,
             )
             return await self._collect_transcript_until_final(
-                deadline_seconds=self.config.collect_deadline_seconds
+                deadline_seconds=collect_deadline
             )
 
         except asyncio.CancelledError:

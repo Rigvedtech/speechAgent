@@ -160,10 +160,10 @@ def render_report_html(report: Dict[str, Any]) -> str:
 
     transcript_block = ""
     if transcript:
-        lines = "".join(f"<div class='t-line'>{_esc(line)}</div>" for line in transcript[-40:])
+        lines = "".join(f"<div class='t-line'>{_esc(line)}</div>" for line in transcript)
         transcript_block = f"""
         <section class="section">
-          <h2>Conversation transcript</h2>
+          <h2>Conversation transcript ({len(transcript)} lines)</h2>
           <div class="transcript">{lines}</div>
         </section>
         """

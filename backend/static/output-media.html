@@ -155,6 +155,31 @@ let ws          = null;
 let wsRetry     = 0;
 const MAX_RETRY = 5;
 let isSpeaking  = false;
+let turnEnded   = false;
+let playbackDoneTimer = null;
+const PLAYBACK_DONE_DEBOUNCE_MS = 300;
+
+function schedulePlaybackDone() {
+  if (!isSpeaking || !turnEnded) return;
+  if (playbackDoneTimer) clearTimeout(playbackDoneTimer);
+  playbackDoneTimer = setTimeout(() => {
+    playbackDoneTimer = null;
+    if (!turnEnded) return;
+    setStatus('connected', 'Listening…');
+    turnEnded = false;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'playback_done' }));
+      console.info('[voice-agent] playback_done sent to server');
+    }
+  }, PLAYBACK_DONE_DEBOUNCE_MS);
+}
+
+function cancelPlaybackDoneTimer() {
+  if (playbackDoneTimer) {
+    clearTimeout(playbackDoneTimer);
+    playbackDoneTimer = null;
+  }
+}
 
 /* ─── UI helpers ──────────────────────────────── */
 function setStatus(state, text) {
@@ -208,14 +233,9 @@ async function initAudio() {
   // Monitor buffer level from worklet
   workletNode.port.onmessage = (e) => {
     if (e.data.type === 'bufferLevel') {
-      if (e.data.count === 0 && isSpeaking) {
-        // Buffer drained — playback finished.
-        // Tell the server so it can unmute STT immediately (accurate to ~5 ms).
-        setStatus('connected', 'Listening…');
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'playback_done' }));
-          console.info('[voice-agent] playback_done sent to server');
-        }
+      if (e.data.count === 0 && isSpeaking && turnEnded) {
+        // Debounce: streaming gaps between MP3 chunks can briefly empty the buffer.
+        schedulePlaybackDone();
       }
       if (e.data.pct > 90) {
         console.warn(`[voice-agent] Buffer near full: ${e.data.pct}% (${e.data.count}/${e.data.capacity} samples)`);
@@ -269,9 +289,15 @@ async function connect() {
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'start_speaking') {
+          turnEnded = false;
+          cancelPlaybackDoneTimer();
           setStatus('speaking', 'Speaking…');
           // Do NOT flush here — sentences append seamlessly in the ring buffer.
+        } else if (msg.type === 'end_of_turn') {
+          turnEnded = true;
         } else if (msg.type === 'flush') {
+          turnEnded = false;
+          cancelPlaybackDoneTimer();
           // User interrupted mid-speech — discard buffered audio immediately
           workletNode.port.postMessage({ type: 'flush' });
           setStatus('connected', 'Listening…');
@@ -287,6 +313,7 @@ async function connect() {
 
     // Binary frame → raw Int16 PCM
     if (event.data instanceof ArrayBuffer && event.data.byteLength > 0) {
+      cancelPlaybackDoneTimer();
       setStatus('speaking', 'Speaking…');
       workletNode.port.postMessage(event.data, [event.data]);   // zero-copy transfer
     }
