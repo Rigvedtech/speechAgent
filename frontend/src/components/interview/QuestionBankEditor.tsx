@@ -10,12 +10,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { Alert } from '@/components/ui/alert'
-import {
-  REQUIRED_COUNTS,
-  checkBankCoverage,
-  type JoinFormValues,
-} from '@/schemas/join-form.schema'
+import { cn } from '@/lib/utils'
+import type { JoinFormValues } from '@/schemas/join-form.schema'
 
 const defaultRow = {
   id: '1',
@@ -24,11 +20,14 @@ const defaultRow = {
   question: '',
 }
 
-export function QuestionBankEditor() {
+interface QuestionBankEditorProps {
+  fillHeight?: boolean
+}
+
+export function QuestionBankEditor({ fillHeight = false }: QuestionBankEditorProps) {
   const { control, register, setValue, watch } = useFormContext<JoinFormValues>()
   const { fields, append, remove } = useFieldArray({ control, name: 'questions' })
   const questions = watch('questions')
-  const coverage = checkBankCoverage(questions ?? [])
 
   const handleImport = () => {
     const raw = window.prompt('Paste JSON array of questions:')
@@ -49,12 +48,14 @@ export function QuestionBankEditor() {
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div>
+    <div className={cn('flex flex-col', fillHeight && 'min-h-0 flex-1')}>
+      <div className="mb-3 flex shrink-0 flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0 space-y-1">
           <Label>Question bank</Label>
-          <p className="text-xs text-muted-foreground">
-            Backend selects 10 questions: 4 Low, 3 Hard, 3 Intermediate
+          <p className="text-xs leading-relaxed text-muted-foreground">
+           The bot asks{' '}
+            <span className="font-medium text-foreground">10 during the interview</span> — 4 Low,
+            3 Hard, and 3 Intermediate — picked from this bank.
           </p>
         </div>
         <div className="flex gap-2">
@@ -74,18 +75,12 @@ export function QuestionBankEditor() {
         </div>
       </div>
 
-      <Alert className={coverage.ok ? 'border-success/30 bg-success/5' : 'border-warning/30 bg-warning/5'}>
-        <p className="text-sm">
-          Coverage: Low {coverage.counts.Low}/{REQUIRED_COUNTS.Low}, Hard{' '}
-          {coverage.counts.Hard}/{REQUIRED_COUNTS.Hard}, Intermediate{' '}
-          {coverage.counts.Intermediate}/{REQUIRED_COUNTS.Intermediate}
-        </p>
-        {!coverage.ok && (
-          <p className="mt-1 text-xs text-warning">{coverage.missing.join(' · ')}</p>
+      <div
+        className={cn(
+          'space-y-3 overflow-y-auto overflow-x-hidden pr-1',
+          fillHeight ? 'min-h-0 flex-1' : 'max-h-[min(52vh,440px)]',
         )}
-      </Alert>
-
-      <div className="space-y-3">
+      >
         {fields.map((field, index) => (
           <div
             key={field.id}

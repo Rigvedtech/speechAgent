@@ -31,6 +31,7 @@ export const joinFormSchema = z.object({
   bot_name: z.string().optional(),
   candidate_name: z.string().trim().min(2, 'Name must be at least 2 characters').max(100),
   language_mode: z.enum(['english', 'hinglish']),
+  position_name: z.string().trim().min(2, 'Position name must be at least 2 characters').max(120),
   jdText: z.string().trim().min(100, 'Job description must be at least 100 characters'),
   cvText: z.string().trim().min(50, 'Resume must be at least 50 characters'),
   greeting_message: z.string().optional(),
@@ -38,6 +39,41 @@ export const joinFormSchema = z.object({
 })
 
 export type JoinFormValues = z.infer<typeof joinFormSchema>
+
+export const step1Fields = ['candidate_name', 'language_mode'] as const
+export const step2Fields = ['position_name'] as const
+export const step4Fields = ['meeting_url', 'bot_name'] as const
+
+export function isStep1Ready(values: Pick<JoinFormValues, 'candidate_name'>, cvFile: File | null) {
+  return values.candidate_name.trim().length >= 2 && cvFile !== null
+}
+
+export function isStep2Ready(values: Pick<JoinFormValues, 'position_name'>, jdFile: File | null) {
+  return values.position_name.trim().length >= 2 && jdFile !== null
+}
+
+export function isStep1bReady(values: Pick<JoinFormValues, 'cvText'>) {
+  return values.cvText.trim().length >= 50
+}
+
+export function isStep2bReady(values: Pick<JoinFormValues, 'jdText'>) {
+  return values.jdText.trim().length >= 100
+}
+
+export function isStep3TextReady(values: Pick<JoinFormValues, 'jdText' | 'cvText'>) {
+  if (values.jdText.trim().length < 100) return false
+  if (values.cvText.trim().length < 50) return false
+  return true
+}
+
+export function isStep3Ready(values: Pick<JoinFormValues, 'jdText' | 'cvText' | 'questions'>) {
+  if (!isStep3TextReady(values)) return false
+  return checkBankCoverage(values.questions).ok
+}
+
+export function isStep4Ready(meetingUrl: string) {
+  return z.string().url().safeParse(meetingUrl.trim()).success
+}
 
 export function normalizeDifficulty(d: string): 'Low' | 'Hard' | 'Intermediate' {
   const lower = d.toLowerCase()

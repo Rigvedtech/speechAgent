@@ -1,9 +1,11 @@
 import { NavLink, Outlet, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { LayoutDashboard, PlusCircle, FileText } from 'lucide-react'
+import { LayoutDashboard, PlusCircle, FileText, Moon, Sun } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getHealth } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
+import { useTheme } from '@/hooks/useTheme'
+import { PrabhatMark } from '@/components/brand/PrabhatMark'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
@@ -12,12 +14,15 @@ const navItems = [
 ]
 
 const pageTitles: Record<string, string> = {
-  '/': 'Dashboard',
-  '/interviews/new': 'New Interview',
+  '/': 'Overview',
+  '/interviews/new': 'Schedule interview',
   '/reports': 'Reports',
 }
 
 function resolveTitle(pathname: string) {
+  if (pathname === '/interviews/new') {
+    return 'Schedule interview'
+  }
   if (pathname.startsWith('/interviews/') && pathname.endsWith('/report')) {
     return 'Interview Report'
   }
@@ -30,6 +35,7 @@ function resolveTitle(pathname: string) {
 export function AppShell() {
   const location = useLocation()
   const title = resolveTitle(location.pathname)
+  const { theme, toggleTheme } = useTheme()
 
   const health = useQuery({
     queryKey: queryKeys.health,
@@ -39,14 +45,32 @@ export function AppShell() {
   })
 
   const online = health.isSuccess && health.data?.status === 'healthy'
+  const isInterviewWizard = location.pathname === '/interviews/new'
+  const isLiveSession =
+    /^\/interviews\/[^/]+$/.test(location.pathname) &&
+    !location.pathname.endsWith('/report')
+  const isReportsPage = location.pathname === '/reports'
+  const isReportDetailPage = /^\/interviews\/[^/]+\/report$/.test(location.pathname)
+  const isFixedHeightPage =
+    isInterviewWizard || isLiveSession || isReportsPage || isReportDetailPage
 
   return (
-    <div className="flex min-h-screen">
-      <aside className="no-print w-60 shrink-0 border-r border-border bg-muted/50">
-        <div className="flex h-14 items-center border-b border-border px-5">
-          <span className="text-base font-semibold">SpeechAgent</span>
+    <div className="flex min-h-screen bg-background">
+      {/* Sticky sidebar — same tone as header (unified shell, not black vs white) */}
+      <aside className="no-print sticky top-0 flex h-screen w-56 shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
+        <div className="flex h-14 shrink-0 items-center border-b border-sidebar-border px-2">
+          <div className="flex min-w-0 items-center gap-2.5 px-3">
+            <PrabhatMark className="h-4 w-auto shrink-0" />
+            <span className="truncate text-xl font-semibold leading-none tracking-wide text-sidebar-foreground">
+              PRABHAT
+              <span className="text-[#7c3aed] dark:text-[#a78bfa]" aria-hidden>
+                .
+              </span>
+            </span>
+          </div>
         </div>
-        <nav className="flex flex-col gap-1 p-3">
+
+        <nav className="flex flex-1 flex-col gap-0.5 p-2">
           {navItems.map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
@@ -54,32 +78,80 @@ export function AppShell() {
               end={end}
               className={({ isActive }) =>
                 cn(
-                  'flex items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors',
+                  'surface-hover flex items-center gap-2.5 rounded-md px-3 py-2.5 text-base',
                   isActive
-                    ? 'bg-card font-medium text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:bg-card hover:text-foreground',
+                    ? 'bg-sidebar-active font-medium text-sidebar-foreground'
+                    : 'text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-foreground',
                 )
               }
             >
-              <Icon className="h-4 w-4" />
+              <Icon className="h-4 w-4 shrink-0" strokeWidth={1.5} />
               {label}
             </NavLink>
           ))}
         </nav>
+
+        <div className="shrink-0 border-t border-sidebar-border p-2">
+          <div
+            className={cn(
+              'flex items-center gap-2.5 rounded-md px-3 py-2.5',
+              online ? 'bg-success/5' : 'bg-destructive/5',
+            )}
+            role="status"
+            aria-live="polite"
+          >
+            <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+              <span
+                className={cn(
+                  'h-2 w-2 rounded-full',
+                  online ? 'bg-success shadow-[0_0_6px_rgba(34,197,94,0.45)]' : 'bg-destructive',
+                )}
+                aria-hidden
+              />
+            </span>
+            <span
+              className={cn(
+                'text-xs font-medium leading-none',
+                online ? 'text-sidebar-foreground' : 'text-sidebar-muted',
+              )}
+            >
+              {online ? 'Server is up' : 'Server is down'}
+            </span>
+          </div>
+        </div>
       </aside>
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <header className="no-print flex h-14 items-center justify-between border-b border-border bg-card px-6">
-          <h1 className="text-lg font-semibold">{title}</h1>
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span
-              className={cn('h-2 w-2 rounded-full', online ? 'bg-success' : 'bg-destructive')}
-            />
-            {online ? 'Backend online' : 'Backend offline'}
-          </div>
+      <div className="flex h-screen min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="no-print z-10 flex h-14 shrink-0 items-center justify-between border-b border-sidebar-border bg-sidebar px-6 backdrop-blur-sm">
+          <h1 className="truncate text-base font-semibold leading-none tracking-tight">{title}</h1>
+
+          <button
+            type="button"
+            onClick={toggleTheme}
+            className="surface-hover inline-flex h-8 w-8 items-center justify-center rounded-md border border-border bg-card text-foreground hover:bg-muted"
+            aria-label={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
+            title={theme === 'light' ? 'Dark mode' : 'Light mode'}
+          >
+            {theme === 'light' ? (
+              <Moon className="h-4 w-4" strokeWidth={1.5} />
+            ) : (
+              <Sun className="h-4 w-4" strokeWidth={1.5} />
+            )}
+          </button>
         </header>
-        <main className="flex-1 px-6 py-8">
-          <div className="mx-auto max-w-[1100px]">
+
+        <main
+          className={cn(
+            'flex-1 px-6',
+            isFixedHeightPage ? 'min-h-0 overflow-hidden py-4' : 'overflow-y-auto py-8',
+          )}
+        >
+          <div
+            className={cn(
+              'mx-auto max-w-[1100px]',
+              isFixedHeightPage && 'flex h-full min-h-0 flex-col',
+            )}
+          >
             <Outlet />
           </div>
         </main>

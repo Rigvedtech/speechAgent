@@ -22,6 +22,7 @@ interface QuestionPlanListProps {
   questionsScored?: number
   languageMode?: string
   localizationStatus?: string
+  fillHeight?: boolean
 }
 
 export function QuestionPlanList({
@@ -30,6 +31,7 @@ export function QuestionPlanList({
   questionsScored,
   languageMode,
   localizationStatus,
+  fillHeight = false,
 }: QuestionPlanListProps) {
   const showSpoken =
     languageMode === 'hinglish' && localizationStatus === 'ready'
@@ -41,7 +43,12 @@ export function QuestionPlanList({
   }
 
   return (
-    <div className="flex max-h-[calc(100vh-12rem)] flex-col gap-0 overflow-y-auto rounded-lg border border-border bg-card">
+    <div
+      className={cn(
+        'flex flex-col gap-0 overflow-y-auto rounded-lg border border-border bg-card',
+        fillHeight ? 'min-h-0 flex-1' : 'max-h-[calc(100vh-12rem)]',
+      )}
+    >
       {questions.map((q) => {
         const state = rowState(q.slot, currentQuestionSlot, questionsScored)
         const displayText = showSpoken ? q.spoken_question || q.question : q.question

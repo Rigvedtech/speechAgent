@@ -25,7 +25,7 @@ Serve `dist/` via Nginx or static hosting. Set `VITE_API_BASE_URL` to your API o
 
 ### JD/CV extraction (n8n)
 
-Configure `N8N_URI` in **backend** `.env` (not frontend). The UI calls `POST /api/extract-jd-cv`; the backend forwards files to n8n and returns extracted text + questions.
+Configure `N8N_CV_URI`, `N8N_JD_URI`, and `N8N_QUESTIONS_URI` in **backend** `.env`. The UI calls `POST /api/extract-cv`, `POST /api/extract-jd`, and `POST /api/generate-questions`; the backend forwards to n8n and returns extracted text + questions.
 
 ## Routes
 

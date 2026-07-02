@@ -406,7 +406,7 @@ class LLMBrain:
             "could you walk me through a recent project you worked on, your role, "
             "and the main challenge you solved?"
         )
-
+        
     def _sentence_complete(self, sentence_buffer: str) -> bool:
         s = sentence_buffer.strip()
         return (

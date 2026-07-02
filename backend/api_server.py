@@ -31,7 +31,7 @@ from transcript_log import log_transcript
 from report_html import render_not_completed_html, render_report_html
 from report_service import resolve_interview_report
 from report_store import list_reports
-from n8n_extraction import extract_jd_cv_files
+from n8n_extraction import extract_cv_file, extract_jd_file, generate_questions
 from language_profiles import resolve_language_mode, get_ui_strings
 import config as app_config
 import ws_hub
@@ -743,29 +743,71 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/extract-jd-cv")
-async def extract_jd_cv(
-    jd_file: Optional[UploadFile] = File(None),
-    cv_file: Optional[UploadFile] = File(None),
-):
-    """
-    Proxy JD/CV uploads to n8n (N8N_URI in .env) and return normalized text + questions.
-    Frontend → backend → n8n → backend → frontend.
-    """
-    logger.info("[EXTRACT] received jd=%s cv=%s", bool(jd_file), bool(cv_file))
-    jd_bytes = await jd_file.read() if jd_file and jd_file.filename else None
-    cv_bytes = await cv_file.read() if cv_file and cv_file.filename else None
+class GenerateQuestionsRequest(BaseModel):
+    jdText: str
+    cvText: str
+    candidate_name: Optional[str] = None
+    language_mode: Optional[str] = None
 
-    if not jd_bytes and not cv_bytes:
-        raise HTTPException(status_code=400, detail="Upload at least one document (JD or CV)")
+
+@app.post("/api/extract-cv")
+async def extract_cv(cv_file: UploadFile = File(...)):
+    """Proxy CV upload to n8n (N8N_CV_URI) and return normalized resume text."""
+    logger.info("[EXTRACT-CV] received cv=%s", bool(cv_file))
+    if not cv_file.filename:
+        raise HTTPException(status_code=400, detail="Upload a CV file")
+
+    cv_bytes = await cv_file.read()
+    if not cv_bytes:
+        raise HTTPException(status_code=400, detail="CV file is empty")
 
     try:
         result = await asyncio.to_thread(
-            extract_jd_cv_files,
-            jd_bytes=jd_bytes,
-            jd_filename=jd_file.filename if jd_file else None,
+            extract_cv_file,
             cv_bytes=cv_bytes,
-            cv_filename=cv_file.filename if cv_file else None,
+            cv_filename=cv_file.filename,
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=502, detail=str(ve))
+
+    return {"success": True, **result}
+
+
+@app.post("/api/extract-jd")
+async def extract_jd(jd_file: UploadFile = File(...)):
+    """Proxy JD upload to n8n (N8N_JD_URI) and return normalized job description text."""
+    logger.info("[EXTRACT-JD] received jd=%s", bool(jd_file))
+    if not jd_file.filename:
+        raise HTTPException(status_code=400, detail="Upload a JD file")
+
+    jd_bytes = await jd_file.read()
+    if not jd_bytes:
+        raise HTTPException(status_code=400, detail="JD file is empty")
+
+    try:
+        result = await asyncio.to_thread(
+            extract_jd_file,
+            jd_bytes=jd_bytes,
+            jd_filename=jd_file.filename,
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=502, detail=str(ve))
+
+    return {"success": True, **result}
+
+
+@app.post("/api/generate-questions")
+async def generate_questions_endpoint(body: GenerateQuestionsRequest):
+    """Forward confirmed JD/CV text to n8n (N8N_QUESTIONS_URI) and return question bank."""
+    logger.info("[GENERATE-QUESTIONS] jd_len=%s cv_len=%s", len(body.jdText), len(body.cvText))
+
+    try:
+        result = await asyncio.to_thread(
+            generate_questions,
+            jd_text=body.jdText,
+            cv_text=body.cvText,
+            candidate_name=body.candidate_name,
+            language_mode=body.language_mode,
         )
     except ValueError as ve:
         raise HTTPException(status_code=502, detail=str(ve))

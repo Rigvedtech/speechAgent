@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { Loader2 } from 'lucide-react'
+import { Check, Copy, Loader2 } from 'lucide-react'
 import { useBotStatus } from '@/hooks/useBotStatus'
 import { cancelInterviewSetup, getHealth, leaveMeeting, startInterview } from '@/lib/api'
 import { ApiError } from '@/lib/api-client'
@@ -38,6 +38,7 @@ export function LiveSessionPage() {
   const lobbyTimeoutMin = health.data?.lobby_timeout_minutes ?? 15
   const [error, setError] = useState<string | null>(null)
   const [leaveOpen, setLeaveOpen] = useState(false)
+  const [meetingLinkCopied, setMeetingLinkCopied] = useState(false)
   const initialQuestions =
     (location.state as { plannedQuestions?: PlannedQuestion[] } | null)?.plannedQuestions ?? []
   const [cachedQuestions, setCachedQuestions] = useState<PlannedQuestion[]>(initialQuestions)
@@ -110,6 +111,16 @@ export function LiveSessionPage() {
 
   const setupNotStarted = !data?.interview_started && !data?.interview_ended
 
+  const copyMeetingUrl = async (url: string) => {
+    try {
+      await navigator.clipboard.writeText(url)
+      setMeetingLinkCopied(true)
+      window.setTimeout(() => setMeetingLinkCopied(false), 2000)
+    } catch {
+      setError('Could not copy meeting link')
+    }
+  }
+
   const lobbyBanner =
     data?.recall_phase === 'lobby' && setupNotStarted
       ? `Bot is in the lobby. Admit it from Teams before starting. If not started within ${lobbyTimeoutMin} minutes, it will leave automatically.`
@@ -180,13 +191,13 @@ export function LiveSessionPage() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden">
       {(error || lobbyBanner || localizingBanner) && (
         <Alert
           className={
             lobbyBanner || localizingBanner
-              ? 'border-warning/30 bg-warning/5'
-              : 'border-destructive/30 bg-destructive/5'
+              ? 'shrink-0 border-warning/30 bg-warning/5 py-2.5 text-xs leading-snug'
+              : 'shrink-0 border-destructive/30 bg-destructive/5 text-xs leading-snug text-destructive'
           }
         >
           {error ?? lobbyBanner ?? localizingBanner}
@@ -194,16 +205,16 @@ export function LiveSessionPage() {
       )}
 
       {data?.interview_ended && (
-        <Alert className="border-success/30 bg-success/5">
+        <Alert className="shrink-0 border-success/30 bg-success/5 text-xs leading-snug">
           Interview ended.{' '}
-          <Button asChild variant="link" className="h-auto p-0">
+          <Button asChild variant="link" className="h-auto p-0 text-xs">
             <Link to={`/interviews/${botId}/report`}>View report</Link>
           </Button>
         </Alert>
       )}
 
-      <div className="grid gap-6 lg:grid-cols-[340px_1fr]">
-        <Card>
+      <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[340px_1fr]">
+        <Card className="flex flex-col overflow-hidden">
           <CardHeader>
             <CardTitle className="text-base">
               {data?.candidate_name ?? 'Candidate'}
@@ -265,21 +276,44 @@ export function LiveSessionPage() {
               )}
             </div>
 
-            <div className="space-y-2 text-xs text-muted-foreground">
+            <div className="space-y-2 text-[11px] leading-snug text-muted-foreground">
               <p>
                 Progress: {data?.questions_scored ?? 0}/{data?.questions_planned ?? '—'}{' '}
                 scored
               </p>
               {data?.meeting_url && (
-                <p>Meeting: {truncate(data.meeting_url, 48)}</p>
+                <div>
+                  <p className="mb-1 font-medium">Meeting</p>
+                  <div className="flex items-center gap-1">
+                    <p className="min-w-0 flex-1 truncate" title={data.meeting_url}>
+                      {truncate(data.meeting_url, 48)}
+                    </p>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
+                      title={meetingLinkCopied ? 'Copied' : 'Copy meeting link'}
+                      aria-label={meetingLinkCopied ? 'Meeting link copied' : 'Copy meeting link'}
+                      onClick={() => copyMeetingUrl(data.meeting_url!)}
+                    >
+                      {meetingLinkCopied ? (
+                        <Check className="h-3.5 w-3.5 text-success" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                  </div>
+                </div>
               )}
             </div>
           </CardContent>
         </Card>
 
-        <div>
-          <h2 className="mb-3 text-sm font-medium">Interview plan</h2>
+        <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+          <h2 className="mb-2 shrink-0 text-sm font-medium">Interview plan</h2>
           <QuestionPlanList
+            fillHeight
             questions={questions}
             currentQuestionSlot={data?.current_question_slot}
             questionsScored={data?.questions_scored}
