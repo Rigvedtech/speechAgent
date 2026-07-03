@@ -1,11 +1,13 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { ArrowLeft, Printer } from 'lucide-react'
+import { ArrowLeft, Copy, MessageSquare, Printer } from 'lucide-react'
 import { getInterviewReport } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { markSessionCompleted } from '@/lib/session-store'
 import { ApiError } from '@/lib/api-client'
+import { buildFeedbackUrl } from '@/lib/feedback-url'
+import { FeedbackViewDialog } from '@/components/feedback/FeedbackViewDialog'
 import { ScoreSummary } from '@/components/report/ScoreSummary'
 import { ReportInsights } from '@/components/report/ReportInsights'
 import { QuestionScoreCard } from '@/components/report/QuestionScoreCard'
@@ -19,6 +21,8 @@ import { Badge } from '@/components/ui/badge'
 export function ReportPage() {
   const { botId = '' } = useParams()
   const navigate = useNavigate()
+  const [feedbackOpen, setFeedbackOpen] = useState(false)
+  const [feedbackLinkCopied, setFeedbackLinkCopied] = useState(false)
 
   const reportQuery = useQuery({
     queryKey: queryKeys.report(botId),
@@ -119,10 +123,38 @@ export function ReportPage() {
           </div>
         </div>
 
-        <Button variant="outline" size="sm" onClick={() => window.print()}>
-          <Printer className="h-4 w-4" />
-          Print
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => setFeedbackOpen(true)}
+          >
+            <MessageSquare className="h-4 w-4" />
+            Feedback
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(buildFeedbackUrl(botId))
+                setFeedbackLinkCopied(true)
+                window.setTimeout(() => setFeedbackLinkCopied(false), 2000)
+              } catch {
+                /* clipboard unavailable */
+              }
+            }}
+          >
+            <Copy className="h-4 w-4" />
+            {feedbackLinkCopied ? 'Copied' : 'Copy feedback link'}
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => window.print()}>
+            <Printer className="h-4 w-4" />
+            Print
+          </Button>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 space-y-6 overflow-y-auto pr-1">
@@ -149,6 +181,13 @@ export function ReportPage() {
       </div>
 
       <ReportPrintView report={report} />
+
+      <FeedbackViewDialog
+        botId={botId}
+        candidateName={report.candidate_name}
+        open={feedbackOpen}
+        onOpenChange={setFeedbackOpen}
+      />
     </>
   )
 }

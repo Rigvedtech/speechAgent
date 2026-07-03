@@ -1,0 +1,22 @@
+# Transcript bot=47630574-450a-4976-9821-934a57eb2d52 started=20260702_125742
+12:58:25 [AI]: Hello Aman, welcome. I'm Prabhat, your interviewer today. Before we begin, could you please introduce yourself briefly?
+12:59:40 [You]: Mm- Hello Prabhat, I am Pranay. I have completed my bachelor's degree in computer application. Right now working as a Hello Project Engineer AI in Rigved Technology
+12:59:40 [AI]: Thank you for introducing yourself, Aman. Can you walk me through your process for creating a test case based on a business requirement document?
+12:59:55 [AI]: Just checking — are you still there?
+13:00:11 [You]: Sorry, aman you repeat the question?
+13:00:11 [AI]: Sure. The question is: Can you walk me through your process for creating a test case based on a business requirement document?
+13:00:40 [You]: So basically I check the business requirement document and create the test case using the unit test case and the Following module test case, so first I understand the business requirement, what is it, analyze that document. Understand it and after that I create the test cases.
+13:00:41 [AI]: Alright. On your Nuvama Wealth project, you mentioned implementing sanity testing using the 'BOTm automation framework'. Can you tell me more about this framework and what your specific role was in its implementation?
+13:01:11 [You]: So in test cases, BOT automation framework is very best framework. Work, BU team, automation framework is used for a test casing. No mobile we are used to For the test, that's it.
+13:01:12 [AI]: Got it. When you start on a new feature, how do you go about creating a comprehensive set of test scenarios to ensure good test coverage?
+13:01:40 [You]: The best test coverage is to have a cover the every module of the software. After that, you have to implement it. In test cases First understand the framework and understand the component and after it you have to test it.
+13:01:41 [AI]: Okay. You've listed several types of testing on your resume. In your own words, what's the difference between smoke testing and regression testing, and when would you perform each?
+13:02:13 [You]: Mock testing is basically we do the small testing. And in that we have to add a small components for attesting and in the regression we Instead of testing individual model, we test the whole. the software That's it.
+13:02:14 [AI]: Sure. Your resume says you validated high-frequency trading workflows. What were the most significant challenges in testing a system like that, particularly around order execution and data validation?
+13:02:32 [You]: I don't know
+13:02:47 [You]: Sorry, I don't know.
+13:02:57 [You]: Hello Hello Hello
+13:03:14 [You]: So basically I use a norms for a testing and I use Test for it That's it.
+13:03:15 [AI]: Understood. Walk me through your process for executing a suite of test cases. How do you track which tests have passed, which have failed, and which are blocked?
+13:03:43 [You]: So basically I write a script for it, after writing script I run that script. And run it on in the module and after that I will check. So that's it.
+13:03:44 [AI]: Thank you for your time today. We'll wrap up here. The team will be in touch with next steps.

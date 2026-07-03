@@ -1,5 +1,5 @@
 import { Link } from 'react-router-dom'
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useActiveSessions } from '@/hooks/useActiveSessions'
 import { useQuery } from '@tanstack/react-query'
 import {
@@ -18,6 +18,8 @@ import {
   STOPPED_LABELS,
 } from '@/lib/dashboard-stats'
 import { KpiCard } from '@/components/dashboard/KpiCard'
+import { FeedbackViewDialog } from '@/components/feedback/FeedbackViewDialog'
+import { FeedbackRowButton } from '@/components/feedback/FeedbackRowButton'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -25,6 +27,8 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { formatScore, truncate } from '@/lib/utils'
 
 export function DashboardPage() {
+  const [feedbackBotId, setFeedbackBotId] = useState<string | null>(null)
+  const [feedbackCandidate, setFeedbackCandidate] = useState<string | undefined>()
   const sessions = useActiveSessions()
   const reports = useQuery({
     queryKey: queryKeys.reports,
@@ -225,9 +229,18 @@ export function DashboardPage() {
                             : '—'}
                         </td>
                         <td className="py-3">
-                          <Button asChild variant="outline" size="sm">
-                            <Link to={`/interviews/${row.bot_id}/report`}>Report</Link>
-                          </Button>
+                          <div className="flex flex-wrap gap-2">
+                            <Button asChild variant="outline" size="sm">
+                              <Link to={`/interviews/${row.bot_id}/report`}>Report</Link>
+                            </Button>
+                            <FeedbackRowButton
+                              hasFeedback={row.has_feedback}
+                              onViewSubmitted={() => {
+                                setFeedbackBotId(row.bot_id)
+                                setFeedbackCandidate(row.candidate_name)
+                              }}
+                            />
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -238,6 +251,17 @@ export function DashboardPage() {
           </CardContent>
         </Card>
       )}
+      <FeedbackViewDialog
+        botId={feedbackBotId ?? ''}
+        candidateName={feedbackCandidate}
+        open={Boolean(feedbackBotId)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setFeedbackBotId(null)
+            setFeedbackCandidate(undefined)
+          }
+        }}
+      />
     </div>
   )
 }

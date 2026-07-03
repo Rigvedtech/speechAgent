@@ -1,4 +1,5 @@
 import { request } from '@/lib/api-client'
+import type { FeedbackFormValues } from '@/schemas/feedback-form.schema'
 import type {
   JoinMeetingRequest,
   JoinMeetingResponse,
@@ -9,6 +10,9 @@ import type {
   ReportsListResponse,
   InterviewReportResponse,
   HealthResponse,
+  FeedbackContextResponse,
+  FeedbackResponse,
+  SubmitFeedbackResponse,
 } from '@/types/api'
 
 export function joinMeeting(body: JoinMeetingRequest) {
@@ -51,4 +55,19 @@ export function getInterviewReport(botId: string) {
 
 export function getHealth() {
   return request<HealthResponse>('/health')
+}
+
+export function getFeedbackContext(botId: string) {
+  return request<FeedbackContextResponse>(`/api/feedback/${botId}/context`)
+}
+
+export function getFeedback(botId: string) {
+  return request<FeedbackResponse>(`/api/feedback/${botId}`)
+}
+
+export function submitFeedback(botId: string, body: FeedbackFormValues) {
+  return request<SubmitFeedbackResponse>(`/api/feedback/${botId}`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
 }

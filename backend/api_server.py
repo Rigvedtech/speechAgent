@@ -30,7 +30,8 @@ from audio_receiver import AudioReceiver
 from transcript_log import log_transcript
 from report_html import render_not_completed_html, render_report_html
 from report_service import resolve_interview_report
-from report_store import list_reports
+from report_store import list_reports, load_report
+from feedback_store import feedback_exists, load_feedback, save_feedback
 from n8n_extraction import extract_cv_file, extract_jd_file, generate_questions
 from language_profiles import resolve_language_mode, get_ui_strings
 import config as app_config
@@ -194,6 +195,49 @@ class StatusResponse(BaseModel):
     questions_scored: Optional[int] = None
     interview_phase: Optional[str] = None
     interview_ended: Optional[bool] = None
+
+
+class SubmitFeedbackRequest(BaseModel):
+    overall_rating: int
+    clarity_rating: int
+    tech_issues: Literal["none", "minor", "major"]
+    improve_text: str
+    would_repeat: Optional[Literal["yes", "maybe", "no"]] = None
+
+    @field_validator("overall_rating", "clarity_rating")
+    @classmethod
+    def rating_range(cls, v: int) -> int:
+        if not 1 <= v <= 5:
+            raise ValueError("rating must be between 1 and 5")
+        return v
+
+    @field_validator("improve_text")
+    @classmethod
+    def improve_nonempty(cls, v: str) -> str:
+        text = (v or "").strip()
+        if not text:
+            raise ValueError("improve_text is required")
+        if len(text) > 500:
+            raise ValueError("improve_text must be at most 500 characters")
+        return text
+
+
+def _feedback_bot_context(bot_id: str) -> dict:
+    """Resolve interview identity for feedback; 404 if bot unknown."""
+    session = session_manager.get_session(bot_id)
+    report = load_report(bot_id)
+    if not session and not report:
+        raise HTTPException(status_code=404, detail="Interview not found")
+
+    candidate_name = None
+    if session:
+        if session.state.interview_orchestrator:
+            candidate_name = session.state.interview_orchestrator.candidate_name
+        elif session.scheduled_candidate_name:
+            candidate_name = session.scheduled_candidate_name
+    if not candidate_name and report:
+        candidate_name = report.get("candidate_name")
+    return {"bot_id": bot_id, "candidate_name": candidate_name}
 
 
 # ─── Output Media Webpage ────────────────────────────────────────────────────
@@ -818,7 +862,55 @@ async def generate_questions_endpoint(body: GenerateQuestionsRequest):
 @app.get("/api/reports")
 async def list_interview_reports():
     """List persisted interview report summaries, newest first."""
-    return {"reports": list_reports()}
+    summaries = list_reports()
+    for row in summaries:
+        bid = row.get("bot_id")
+        row["has_feedback"] = feedback_exists(bid) if bid else False
+    return {"reports": summaries}
+
+
+@app.get("/api/feedback/{bot_id}/context")
+async def get_feedback_context(bot_id: str):
+    """Public: validate feedback link and whether form was already submitted."""
+    ctx = _feedback_bot_context(bot_id)
+    return {
+        "success": True,
+        "bot_id": bot_id,
+        "candidate_name": ctx.get("candidate_name"),
+        "already_submitted": feedback_exists(bot_id),
+    }
+
+
+@app.get("/api/feedback/{bot_id}")
+async def get_interview_feedback(bot_id: str):
+    """Recruiter/admin: load submitted candidate feedback for an interview."""
+    _feedback_bot_context(bot_id)
+    feedback = load_feedback(bot_id)
+    if not feedback:
+        raise HTTPException(status_code=404, detail="No feedback submitted yet")
+    return {"success": True, "feedback": feedback}
+
+
+@app.post("/api/feedback/{bot_id}")
+async def submit_interview_feedback(bot_id: str, body: SubmitFeedbackRequest):
+    """Public: candidate submits post-interview feedback (one per bot_id)."""
+    ctx = _feedback_bot_context(bot_id)
+    if feedback_exists(bot_id):
+        raise HTTPException(status_code=409, detail="Feedback already submitted")
+
+    try:
+        save_feedback(
+            bot_id,
+            {
+                **body.model_dump(),
+                "candidate_name": ctx.get("candidate_name"),
+            },
+        )
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+    logger.info("[FEEDBACK] bot=%s overall=%s clarity=%s", bot_id[:8], body.overall_rating, body.clarity_rating)
+    return {"success": True, "message": "Thank you for your feedback"}
 
 
 @app.get("/api/interview/{bot_id}/report")

@@ -22,6 +22,7 @@ import {
 import { isTeamsLauncherUrl, MEETING_URL_HINT } from '@/lib/meeting-url'
 import {
   checkBankCoverage,
+  formatCandidateDisplayName,
   isStep1Ready,
   isStep1bReady,
   isStep2Ready,
@@ -29,6 +30,7 @@ import {
   isStep3Ready,
   isStep4Ready,
   joinFormSchema,
+  splitFullName,
   toApiQuestions,
   type JoinFormValues,
 } from '@/schemas/join-form.schema'
@@ -66,7 +68,8 @@ const DEFAULT_BOT_NAME = 'Prabhat'
 const defaultValues: JoinFormValues = {
   meeting_url: '',
   bot_name: DEFAULT_BOT_NAME,
-  candidate_name: '',
+  candidate_first_name: '',
+  candidate_last_name: '',
   language_mode: 'english',
   position_name: '',
   jdText: '',
@@ -179,7 +182,10 @@ export function NewInterviewPage() {
     clearInterviewDraft()
     upsertSession({
       botId: data.bot_id,
-      candidateName: form.getValues('candidate_name'),
+      candidateName: formatCandidateDisplayName(
+        form.getValues('candidate_first_name'),
+        form.getValues('candidate_last_name'),
+      ),
       meetingUrl: data.meeting_url,
       languageMode: data.language_mode ?? form.getValues('language_mode'),
       createdAt: new Date().toISOString(),
@@ -228,7 +234,7 @@ export function NewInterviewPage() {
   const questionsMutation = useMutation({
     mutationFn: () =>
       generateQuestionsFromText(form.getValues('jdText'), form.getValues('cvText'), {
-        candidateName: form.getValues('candidate_name'),
+        candidateName: form.getValues('candidate_first_name'),
         languageMode: form.getValues('language_mode'),
       }),
   })
@@ -242,8 +248,12 @@ export function NewInterviewPage() {
       raw_text: result.cvText,
     }
     setCvStructured(structured)
-    if (result.candidateName && !form.getValues('candidate_name').trim()) {
-      form.setValue('candidate_name', result.candidateName, { shouldValidate: true })
+    if (result.candidateName && !form.getValues('candidate_first_name').trim()) {
+      const { first, last } = splitFullName(result.candidateName)
+      form.setValue('candidate_first_name', first, { shouldValidate: true })
+      if (last) {
+        form.setValue('candidate_last_name', last, { shouldValidate: true })
+      }
     }
   }
 
@@ -298,7 +308,7 @@ export function NewInterviewPage() {
     joinMutation.mutate({
       meeting_url: data.meeting_url.trim(),
       bot_name: DEFAULT_BOT_NAME,
-      candidate_name: data.candidate_name.trim(),
+      candidate_name: data.candidate_first_name.trim(),
       jdText: data.jdText.trim(),
       cvText: data.cvText.trim(),
       questions: toApiQuestions(data.questions),
@@ -323,7 +333,7 @@ export function NewInterviewPage() {
     setError(null)
 
     if (step === 1) {
-      const ok = await form.trigger(['candidate_name', 'language_mode'])
+      const ok = await form.trigger(['candidate_first_name', 'candidate_last_name', 'language_mode'])
       if (!ok || !step1Ready || !cvFile) return
       try {
         const result = await extractCvMutation.mutateAsync()
@@ -469,19 +479,35 @@ export function NewInterviewPage() {
                   description="Who is being interviewed and which language the bot should use."
                 >
                   <div className="space-y-4">
-                    <div>
-                      <Label htmlFor="candidate_name">Candidate name</Label>
-                      <Input
-                        id="candidate_name"
-                        className="mt-1.5 select-text"
-                        placeholder="e.g. Priya Sharma"
-                        {...form.register('candidate_name')}
-                      />
-                      {form.formState.errors.candidate_name && (
-                        <p className="mt-1 text-xs text-destructive">
-                          {form.formState.errors.candidate_name.message}
-                        </p>
-                      )}
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div>
+                        <Label htmlFor="candidate_first_name">First name</Label>
+                        <Input
+                          id="candidate_first_name"
+                          className="mt-1.5 select-text"
+                          placeholder="e.g. Rakesh"
+                          {...form.register('candidate_first_name')}
+                        />
+                        {form.formState.errors.candidate_first_name && (
+                          <p className="mt-1 text-xs text-destructive">
+                            {form.formState.errors.candidate_first_name.message}
+                          </p>
+                        )}
+                      </div>
+                      <div>
+                        <Label htmlFor="candidate_last_name">Last name</Label>
+                        <Input
+                          id="candidate_last_name"
+                          className="mt-1.5 select-text"
+                          placeholder="e.g. Sharma"
+                          {...form.register('candidate_last_name')}
+                        />
+                        {form.formState.errors.candidate_last_name && (
+                          <p className="mt-1 text-xs text-destructive">
+                            {form.formState.errors.candidate_last_name.message}
+                          </p>
+                        )}
+                      </div>
                     </div>
 
                     <div>
@@ -636,7 +662,12 @@ export function NewInterviewPage() {
                 <div className="space-y-5">
                   <Alert className="border-border bg-muted/30 py-2.5">
                     <p className="text-xs">
-                      <span className="font-medium">{values.candidate_name || 'Candidate'}</span>
+                      <span className="font-medium">
+                        {formatCandidateDisplayName(
+                          values.candidate_first_name,
+                          values.candidate_last_name,
+                        )}
+                      </span>
                       {' · '}
                       {values.position_name || 'Role'}
                       {' · '}

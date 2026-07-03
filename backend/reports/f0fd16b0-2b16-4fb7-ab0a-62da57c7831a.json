@@ -1,0 +1,227 @@
+{
+  "candidate_name": "Aman",
+  "bot_id": "f0fd16b0-2b16-4fb7-ab0a-62da57c7831a",
+  "phase": "ended",
+  "stopped_reason": "low_recent_average",
+  "questions_planned": 10,
+  "questions_scored": 6,
+  "abuse_warnings": 0,
+  "continue_threshold": 5.5,
+  "rolling_window": 6,
+  "last_4_average": 4.83,
+  "overall_average": 4.83,
+  "per_question": [
+    {
+      "question_index": 1,
+      "question_id": "1",
+      "difficulty": "Low",
+      "source": "jd",
+      "question_text": "Can you walk me through your process for creating test cases when you're given a Business Requirement Document?",
+      "answer_text": "Initial answer:\nSo, basically when I have the business requirement document is provided to me initially I will go through the post document for documentation process and follow by following them I will create what a blueprint of the test case model where I have provided a test case ID and we asked about what...\n\n[Clarifier 1]\n  Interviewer asked: What is a test case ID?\n  Candidate replied: Okay So basically, when I had the business This requirement document is provided to me. Initially, I will go through the document documentation process. And follow by following them, I'll create a What a blueprint of the test case model where I have provided a test case ID. And Several what? Columns are available there. but before that And, In the test case ID, I have to mention if I am preparing multiple test cases. I have to provide each and every test case a particular ID that is called a test case ID.",
+      "score": 7,
+      "confident": true,
+      "relevant": true,
+      "strengths": "clear process",
+      "develop": "provide more specifics on test case creation",
+      "fix": "elaborate on how BRD analysis informs test case design",
+      "abuse_flag": false
+    },
+    {
+      "question_index": 2,
+      "question_id": "11",
+      "difficulty": "Hard",
+      "source": "resume",
+      "question_text": "On your Nuvama Wealth project, you mentioned testing high-frequency trading workflows in NEST Trader. Can you walk me through a specific, complex order execution workflow you tested and what the critical validation points were?",
+      "answer_text": "Initial answer:\nSo, basically in the auto maintenance system when I am I have basically worked in the next data platform and there I have basically if I am going to make an order I have to take the PC library details that I have available in the auto maintenance system and that before making an order, I have two layers.\n\n[Clarifier 1]\n  Interviewer asked: What statements were applied besides quantity and price?\n  Candidate replied: Okay, so basically, in the auto management system, When I'm I basically worked in the Next Data Platform. They are I have basically If I'm going to make an order I have to check the each and every details are available in the order management system. And before before making an order. I have to I aman, Prepare what? The quantity, the price. And each and every segment. And The securities also. and applying those. I will make an order And",
+      "score": 4,
+      "confident": false,
+      "relevant": true,
+      "strengths": "attempted to provide context",
+      "develop": "staying on topic and providing specific details about complex order execution workflows",
+      "fix": "clearly outline the workflow and critical validation points, avoiding vague statements and focusing on the technical aspects of the question",
+      "abuse_flag": false
+    },
+    {
+      "question_index": 3,
+      "question_id": "6",
+      "difficulty": "Intermediate",
+      "source": "jd",
+      "question_text": "When you're analyzing a functional document for testability, what are some common red flags or ambiguities you look for that might cause issues down the line?",
+      "answer_text": "Okay if I'm analyzing a functional document for testability, I will see each and every details are provided to me. And I will check if there is a negative I'll check the negative testing as well as the positive testing. And within that I will check If If there is any bugs or any issue occurs I'll take that immediately.",
+      "score": 4,
+      "confident": false,
+      "relevant": true,
+      "strengths": "attempted to address testing aspects",
+      "develop": "identifying specific red flags or ambiguities in functional documents",
+      "fix": "provide concrete examples of red flags, such as unclear requirements or incomplete test scenarios",
+      "abuse_flag": false
+    },
+    {
+      "question_index": 4,
+      "question_id": "4",
+      "difficulty": "Low",
+      "source": "resume",
+      "question_text": "Your resume mentions several types of testing. Could you explain in your own words the difference between smoke testing and sanity testing, and when you would perform each?",
+      "answer_text": "Initial answer:\nSo, basically when the developer gives us the testar a build, initially you have to do that smoke testing, smoke testing is basically the we have to check there, the important he just add a present and properly working properly or not and\n\n[Clarifier 1]\n  Interviewer asked: What is testar?\n  Candidate replied: Okay, so basically when the developer gives gives us the gives the test array build and Initially you have to do the smoke testing. Smoke testing is basically We have to check there. The important features are present and Properly working properly or not And For example",
+      "score": 6,
+      "confident": false,
+      "relevant": true,
+      "strengths": "attempted to explain smoke testing",
+      "develop": "provide clear definitions and examples for both smoke and sanity testing, and clarify technical terms",
+      "fix": "practice explaining technical concepts clearly and concisely, and be prepared to define key terms",
+      "abuse_flag": false
+    },
+    {
+      "question_index": 5,
+      "question_id": "12",
+      "difficulty": "Hard",
+      "source": "resume",
+      "question_text": "For the 5Paisa project, you focused on RMS test cases for margin calculation. What was your strategy for testing these calculations? Can you give an example of a specific edge case you tested to ensure the margin logic was correct?",
+      "answer_text": "Okay, so when I'm validating in the RMS For 5 plus 5 project There I basically do the Risk Management System Operation",
+      "score": 6,
+      "confident": false,
+      "relevant": true,
+      "strengths": "attempted to address RMS testing",
+      "develop": "providing specific examples and technical details for margin calculation test cases",
+      "fix": "clearly articulate the strategy and edge cases tested, avoiding vague statements",
+      "abuse_flag": false
+    },
+    {
+      "question_index": 6,
+      "question_id": "10",
+      "difficulty": "Intermediate",
+      "source": "resume",
+      "question_text": "Describe a situation where you and a developer disagreed on the severity or validity of a bug you reported. How did you handle that conversation and come to a resolution?",
+      "answer_text": "Initial answer:\nI will basically do what, even when I have raised a defect, I will capture the proof or the video or image immediately or my format if I report, if the developer denies that it is not a defect or it is not above, I will ensure him and then discuss.\n\nFinal continuation:\nOkay, I will basically do what, even when I have raised a defect, I will capture the proof or the video or image immediately or my format if I report. If the developer denies that it is not a defect or it is not above, I will ensure him and then discuss with my team or my test lab. And again I will regenerate the test, the test is original the defect and check if there",
+      "score": 2,
+      "confident": false,
+      "relevant": false,
+      "strengths": "",
+      "develop": "Answer drifted off-topic from the question asked.",
+      "fix": "Listen to the question first, then answer it directly before adding tangents.",
+      "abuse_flag": false
+    }
+  ],
+  "planned_questions": [
+    {
+      "slot": 1,
+      "id": "1",
+      "difficulty": "Low",
+      "source": "jd",
+      "question": "Can you walk me through your process for creating test cases when you're given a Business Requirement Document?",
+      "asked": true
+    },
+    {
+      "slot": 2,
+      "id": "11",
+      "difficulty": "Hard",
+      "source": "resume",
+      "question": "On your Nuvama Wealth project, you mentioned testing high-frequency trading workflows in NEST Trader. Can you walk me through a specific, complex order execution workflow you tested and what the critical validation points were?",
+      "asked": true
+    },
+    {
+      "slot": 3,
+      "id": "6",
+      "difficulty": "Intermediate",
+      "source": "jd",
+      "question": "When you're analyzing a functional document for testability, what are some common red flags or ambiguities you look for that might cause issues down the line?",
+      "asked": true
+    },
+    {
+      "slot": 4,
+      "id": "4",
+      "difficulty": "Low",
+      "source": "resume",
+      "question": "Your resume mentions several types of testing. Could you explain in your own words the difference between smoke testing and sanity testing, and when you would perform each?",
+      "asked": true
+    },
+    {
+      "slot": 5,
+      "id": "12",
+      "difficulty": "Hard",
+      "source": "resume",
+      "question": "For the 5Paisa project, you focused on RMS test cases for margin calculation. What was your strategy for testing these calculations? Can you give an example of a specific edge case you tested to ensure the margin logic was correct?",
+      "asked": true
+    },
+    {
+      "slot": 6,
+      "id": "10",
+      "difficulty": "Intermediate",
+      "source": "resume",
+      "question": "Describe a situation where you and a developer disagreed on the severity or validity of a bug you reported. How did you handle that conversation and come to a resolution?",
+      "asked": true
+    },
+    {
+      "slot": 7,
+      "id": "2",
+      "difficulty": "Low",
+      "source": "jd",
+      "question": "Tell me about your experience with installing new software builds from a development team. What's the first thing you typically do after an installation?",
+      "asked": false
+    },
+    {
+      "slot": 8,
+      "id": "13",
+      "difficulty": "Hard",
+      "source": "resume",
+      "question": "You mentioned using a 'BOTm automation framework' for sanity testing. What was your specific role with this framework? Did you write or modify test scripts, or were you primarily executing them? What kind of defects did this automation help you find?",
+      "asked": false
+    },
+    {
+      "slot": 9,
+      "id": "9",
+      "difficulty": "Intermediate",
+      "source": "jd",
+      "question": "Imagine you've executed a set of test cases and found several bugs. The development team provides a new build with fixes. How would you approach re-testing and regression testing for that new build?",
+      "asked": false
+    },
+    {
+      "slot": 10,
+      "id": "3",
+      "difficulty": "Low",
+      "source": "jd",
+      "question": "The role requires careful documentation. How do you typically manage and store your testing artifacts like executed test cases, screenshots, and log files?",
+      "asked": false
+    }
+  ],
+  "summary_develop": [
+    "provide more specifics on test case creation",
+    "staying on topic and providing specific details about complex order execution workflows",
+    "identifying specific red flags or ambiguities in functional documents",
+    "provide clear definitions and examples for both smoke and sanity testing, and clarify technical terms",
+    "providing specific examples and technical details for margin calculation test cases",
+    "Answer drifted off-topic from the question asked."
+  ],
+  "summary_fix": [
+    "elaborate on how BRD analysis informs test case design",
+    "clearly outline the workflow and critical validation points, avoiding vague statements and focusing on the technical aspects of the question",
+    "provide concrete examples of red flags, such as unclear requirements or incomplete test scenarios",
+    "practice explaining technical concepts clearly and concisely, and be prepared to define key terms",
+    "clearly articulate the strategy and edge cases tested, avoiding vague statements",
+    "Listen to the question first, then answer it directly before adding tangents."
+  ],
+  "transcript": [
+    "15:59:05 [AI]: Hello Aman, welcome. I'm Prabhat, your interviewer today. Before we begin, could you please introduce yourself briefly?",
+    "15:59:38 [You]: My name is Aman Kumar Nayak I am from Bhubaneswar, Odisha. Currently I'm residing in Vikriwas in Mumbai. In the last Last 1 year and 2 months I have been working as a junior test engineer. at Equium Technologies Private Limited At Ghatkopar, Mumbai.",
+    "15:59:38 [AI]: Thank you for introducing yourself, Aman. Can you walk me through your process for creating test cases when you're given a Business Requirement Document?",
+    "15:59:54 [AI]: Just checking — are you still there?",
+    "16:00:04 [You]: Wait, I'm M S see. Okay Wait",
+    "16:00:05 [AI]: Sure. The question is: Can you walk me through your process for creating test cases when you're given a Business Requirement Document?",
+    "16:00:40 [AI]: What is a test case ID?",
+    "16:01:03 [You]: Okay So basically, when I had the business This requirement document is provided to me. Initially, I will go through the document documentation process. And follow by following them, I'll create a What a blueprint of the test case model where I have provided a test case ID. And Several what? Columns are available there. but before that And, In the test case ID, I have to mention if I am preparing multiple test cases. I have to provide each and every test case a particular ID that is called a test case ID.",
+    "16:01:04 [AI]: Alright. On your Nuvama Wealth project, you mentioned testing high-frequency trading workflows in NEST Trader. Can you walk me through a specific, complex order execution workflow you tested and what the critical validation points were?",
+    "16:01:53 [AI]: What statements were applied besides quantity and price?",
+    "16:02:06 [You]: Okay, so basically, in the auto management system, When I'm I basically worked in the Next Data Platform. They are I have basically If I'm going to make an order I have to check the each and every details are available in the order management system. And before before making an order. I have to I aman, Prepare what? The quantity, the price. And each and every segment. And The securities also. and applying those. I will make an order And",
+    "16:02:07 [AI]: Got it. When you're analyzing a functional document for testability, what are some common red flags or ambiguities you look for that might cause issues down the line?",
+    "16:03:02 [You]: Okay if I'm analyzing a functional document for testability, I will see each and every details are provided to me. And I will check if there is a negative I'll check the negative testing as well as the positive testing. And within that I will check If If there is any bugs or any issue occurs I'll take that immediately.",
+    "16:03:02 [AI]: Okay. Your resume mentions several types of testing. Could you explain in your own words the difference between smoke testing and sanity testing, and when you would perform each?",
+    "16:03:39 [AI]: What is testar?",
+    "16:03:48 [You]: Okay, so basically when the developer gives gives us the gives the test array build and Initially you have to do the smoke testing. Smoke testing is basically We have to check there. The important features are present and Properly working properly or not And For example",
+    "16:03:49 [AI]: Sure. For the 5Paisa project, you focused on RMS test cases for margin calculation. What was your strategy for testing these calculations? Can you give an example of a specific edge case you tested to ensure the margin logic was correct?",
+    "16:04:20 [You]: Okay, so when I'm validating in the RMS For 5 plus 5 project There I basically do the Risk Management System Operation",
+    "16:04:21 [AI]: Understood. Describe a situation where you and a developer disagreed on the severity or validity of a bug you reported. How did you handle that conversation and come to a resolution?",
+    "16:05:08 [AI]: Thank you for your time today. We'll wrap up here. The team will be in touch with next steps."
+  ],
+  "interview_completed": true,
+  "completed_at": "2026-07-02T10:35:08.268789+00:00"
+}

@@ -48,6 +48,7 @@ class MeetingSession:
     _speaking_fallback_task: Optional[asyncio.Task] = None
     # Sarvam STT engine (primary) — None when Sarvam is disabled or unavailable
     sarvam_stt_engine: Optional[object] = None
+    scheduled_candidate_name: Optional[str] = None
     # Post-playback silence watcher — fires "can you hear me?" after quiet period
     _silence_watch_task: Optional[asyncio.Task] = None
     _presence_checks_this_question: int = 0
@@ -920,6 +921,7 @@ class SessionManager:
         session.state.interview_ended.clear()
         session.state.interview_language = language_mode
         session.pending_greeting_message = greeting_message
+        session.scheduled_candidate_name = orchestrator.candidate_name
         if language_mode == "hinglish":
             orchestrator.localization_status = "pending"
         else:

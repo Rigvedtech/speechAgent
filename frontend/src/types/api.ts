@@ -107,6 +107,7 @@ export interface ReportSummary {
   questions_planned?: number
   stopped_reason?: string
   completed_at?: string
+  has_feedback?: boolean
 }
 
 export interface ReportsListResponse {
@@ -176,4 +177,35 @@ export interface ApiErrorDetail {
   localization_status?: string
   error?: string
   [key: string]: unknown
+}
+
+export type TechIssues = 'none' | 'minor' | 'major'
+export type WouldRepeat = 'yes' | 'maybe' | 'no'
+
+export interface CandidateFeedback {
+  bot_id: string
+  overall_rating: number
+  clarity_rating: number
+  tech_issues: TechIssues
+  improve_text: string
+  would_repeat?: WouldRepeat
+  candidate_name?: string
+  submitted_at?: string
+}
+
+export interface FeedbackContextResponse {
+  success: boolean
+  bot_id: string
+  candidate_name?: string
+  already_submitted: boolean
+}
+
+export interface FeedbackResponse {
+  success: boolean
+  feedback: CandidateFeedback
+}
+
+export interface SubmitFeedbackResponse {
+  success: boolean
+  message?: string
 }

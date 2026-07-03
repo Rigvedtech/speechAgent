@@ -3,9 +3,10 @@
 CREATE TABLE interview_sessions (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     bot_id              UUID NOT NULL,
-    organization_id     UUID REFERENCES organization (id) ON DELETE SET NULL,
-    created_by          UUID REFERENCES users (id) ON DELETE SET NULL,
-    candidate_id        UUID REFERENCES candidates (id) ON DELETE SET NULL,
+    organization_id     UUID NOT NULL REFERENCES organization (id) ON DELETE CASCADE,
+    created_by          UUID NOT NULL REFERENCES users (id) ON DELETE RESTRICT,
+    candidate_id        UUID NOT NULL REFERENCES candidates (id) ON DELETE RESTRICT,
+    job_posting_id      UUID NOT NULL REFERENCES job_postings (id) ON DELETE RESTRICT,
     meeting_url         TEXT NOT NULL,
     meeting_url_normalized TEXT NOT NULL,
     bot_name            VARCHAR(100) NOT NULL DEFAULT 'Prabhat',
@@ -51,11 +52,13 @@ CREATE TABLE interview_sessions (
 );
 
 CREATE INDEX idx_interview_sessions_org ON interview_sessions (organization_id);
+CREATE INDEX idx_interview_sessions_created_by ON interview_sessions (created_by, completed_at DESC);
+CREATE INDEX idx_interview_sessions_job_posting ON interview_sessions (job_posting_id, completed_at DESC);
 CREATE INDEX idx_interview_sessions_candidate ON interview_sessions (candidate_id);
-CREATE INDEX idx_interview_sessions_created_by ON interview_sessions (created_by);
 CREATE INDEX idx_interview_sessions_meeting ON interview_sessions (meeting_url_normalized);
 CREATE INDEX idx_interview_sessions_completed ON interview_sessions (completed_at DESC)
     WHERE interview_ended = TRUE;
 
-COMMENT ON TABLE interview_sessions IS 'Core interview record; bot_id matches Recall.ai bot UUID.';
+COMMENT ON TABLE interview_sessions IS 'Core interview record linking recruiter, job posting, and candidate.';
 COMMENT ON COLUMN interview_sessions.bot_id IS 'Recall.ai bot id — primary external identifier used by the API today.';
+COMMENT ON COLUMN interview_sessions.created_by IS 'Recruiter who scheduled this interview.';

@@ -15,7 +15,6 @@ CREATE TABLE session_events (
             'interview_started',
             'question_asked',
             'answer_scored',
-            
             'localization_completed',
             'localization_failed',
             'playback_done',

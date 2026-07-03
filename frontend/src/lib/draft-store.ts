@@ -1,4 +1,4 @@
-import type { JoinFormValues } from '@/schemas/join-form.schema'
+import { splitFullName, type JoinFormValues } from '@/schemas/join-form.schema'
 
 import type { CvStructured, JdStructured } from '@/types/extraction'
 
@@ -17,7 +17,8 @@ export interface InterviewDraftMeta {
 const emptyDraft: JoinFormValues = {
   meeting_url: '',
   bot_name: 'Prabhat',
-  candidate_name: '',
+  candidate_first_name: '',
+  candidate_last_name: '',
   language_mode: 'english',
   position_name: '',
   jdText: '',
@@ -45,10 +46,19 @@ export function loadInterviewDraft(): JoinFormValues | null {
   try {
     const raw = sessionStorage.getItem(DRAFT_KEY)
     if (!raw) return null
-    const parsed = JSON.parse(raw) as Partial<JoinFormValues>
+    const parsed = JSON.parse(raw) as Partial<JoinFormValues> & { candidate_name?: string }
+    let first = parsed.candidate_first_name ?? ''
+    let last = parsed.candidate_last_name ?? ''
+    if (!first.trim() && parsed.candidate_name?.trim()) {
+      const split = splitFullName(parsed.candidate_name)
+      first = split.first
+      last = split.last
+    }
     return {
       ...emptyDraft,
       ...parsed,
+      candidate_first_name: first,
+      candidate_last_name: last,
       questions: parsed.questions?.length ? parsed.questions : emptyDraft.questions,
     }
   } catch {

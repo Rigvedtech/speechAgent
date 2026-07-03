@@ -26,10 +26,30 @@ const questionSchema = z.object({
   question: z.string().min(10, 'Question must be at least 10 characters'),
 })
 
+export function splitFullName(full: string): { first: string; last: string } {
+  const trimmed = full.trim()
+  if (!trimmed) return { first: '', last: '' }
+  const space = trimmed.indexOf(' ')
+  if (space === -1) return { first: trimmed, last: '' }
+  return { first: trimmed.slice(0, space), last: trimmed.slice(space + 1).trim() }
+}
+
+export function formatCandidateDisplayName(first: string, last?: string): string {
+  const f = first.trim()
+  const l = (last ?? '').trim()
+  if (!f) return 'Candidate'
+  return l ? `${f} ${l}` : f
+}
+
 export const joinFormSchema = z.object({
   meeting_url: z.string().url('Enter a valid meeting URL'),
   bot_name: z.string().optional(),
-  candidate_name: z.string().trim().min(2, 'Name must be at least 2 characters').max(100),
+  candidate_first_name: z
+    .string()
+    .trim()
+    .min(2, 'First name must be at least 2 characters')
+    .max(50),
+  candidate_last_name: z.string().trim().max(50),
   language_mode: z.enum(['english', 'hinglish']),
   position_name: z.string().trim().min(2, 'Position name must be at least 2 characters').max(120),
   jdText: z.string().trim().min(100, 'Job description must be at least 100 characters'),
@@ -40,12 +60,15 @@ export const joinFormSchema = z.object({
 
 export type JoinFormValues = z.infer<typeof joinFormSchema>
 
-export const step1Fields = ['candidate_name', 'language_mode'] as const
+export const step1Fields = ['candidate_first_name', 'candidate_last_name', 'language_mode'] as const
 export const step2Fields = ['position_name'] as const
 export const step4Fields = ['meeting_url', 'bot_name'] as const
 
-export function isStep1Ready(values: Pick<JoinFormValues, 'candidate_name'>, cvFile: File | null) {
-  return values.candidate_name.trim().length >= 2 && cvFile !== null
+export function isStep1Ready(
+  values: Pick<JoinFormValues, 'candidate_first_name'>,
+  cvFile: File | null,
+) {
+  return values.candidate_first_name.trim().length >= 2 && cvFile !== null
 }
 
 export function isStep2Ready(values: Pick<JoinFormValues, 'position_name'>, jdFile: File | null) {

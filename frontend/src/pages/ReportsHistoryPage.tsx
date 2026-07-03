@@ -6,6 +6,8 @@ import { listReports } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { reportsWithinDays, STOPPED_LABELS } from '@/lib/dashboard-stats'
 import { formatScore } from '@/lib/utils'
+import { FeedbackViewDialog } from '@/components/feedback/FeedbackViewDialog'
+import { FeedbackRowButton } from '@/components/feedback/FeedbackRowButton'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -23,6 +25,8 @@ const DATE_FILTERS: { value: DaysFilter; label: string }[] = [
 export function ReportsHistoryPage() {
   const [search, setSearch] = useState('')
   const [daysFilter, setDaysFilter] = useState<DaysFilter>('all')
+  const [feedbackBotId, setFeedbackBotId] = useState<string | null>(null)
+  const [feedbackCandidate, setFeedbackCandidate] = useState<string | undefined>()
 
   const reports = useQuery({
     queryKey: queryKeys.reports,
@@ -134,9 +138,18 @@ export function ReportsHistoryPage() {
                           : '—'}
                       </td>
                       <td className="px-4 py-3">
-                        <Button asChild variant="outline" size="sm">
-                          <Link to={`/interviews/${row.bot_id}/report`}>View</Link>
-                        </Button>
+                        <div className="flex flex-wrap gap-2">
+                          <Button asChild variant="outline" size="sm">
+                            <Link to={`/interviews/${row.bot_id}/report`}>Report</Link>
+                          </Button>
+                          <FeedbackRowButton
+                            hasFeedback={row.has_feedback}
+                            onViewSubmitted={() => {
+                              setFeedbackBotId(row.bot_id)
+                              setFeedbackCandidate(row.candidate_name)
+                            }}
+                          />
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -146,6 +159,18 @@ export function ReportsHistoryPage() {
           )}
         </CardContent>
       </Card>
+
+      <FeedbackViewDialog
+        botId={feedbackBotId ?? ''}
+        candidateName={feedbackCandidate}
+        open={Boolean(feedbackBotId)}
+        onOpenChange={(open) => {
+          if (!open) {
+            setFeedbackBotId(null)
+            setFeedbackCandidate(undefined)
+          }
+        }}
+      />
     </div>
   )
 }

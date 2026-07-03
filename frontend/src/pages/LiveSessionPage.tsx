@@ -9,6 +9,7 @@ import { formatApiError } from '@/lib/error-messages'
 import { queryKeys } from '@/lib/query-keys'
 import { updateSessionPhase, markSessionCompleted } from '@/lib/session-store'
 import { StatusStepper } from '@/components/interview/StatusStepper'
+import { PhaseStatusDialog } from '@/components/interview/PhaseStatusDialog'
 import { QuestionPlanList } from '@/components/interview/QuestionPlanList'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -23,6 +24,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { truncate } from '@/lib/utils'
+import { buildFeedbackUrl } from '@/lib/feedback-url'
 import type { PlannedQuestion } from '@/types/api'
 
 export function LiveSessionPage() {
@@ -39,6 +41,7 @@ export function LiveSessionPage() {
   const [error, setError] = useState<string | null>(null)
   const [leaveOpen, setLeaveOpen] = useState(false)
   const [meetingLinkCopied, setMeetingLinkCopied] = useState(false)
+  const [feedbackLinkCopied, setFeedbackLinkCopied] = useState(false)
   const initialQuestions =
     (location.state as { plannedQuestions?: PlannedQuestion[] } | null)?.plannedQuestions ?? []
   const [cachedQuestions, setCachedQuestions] = useState<PlannedQuestion[]>(initialQuestions)
@@ -121,17 +124,17 @@ export function LiveSessionPage() {
     }
   }
 
-  const lobbyBanner =
-    data?.recall_phase === 'lobby' && setupNotStarted
-      ? `Bot is in the lobby. Admit it from Teams before starting. If not started within ${lobbyTimeoutMin} minutes, it will leave automatically.`
-      : data?.recall_phase === 'lobby'
-        ? 'Bot is in the lobby. Admit the bot from Teams before starting.'
-        : null
+  const feedbackUrl = buildFeedbackUrl(botId)
 
-  const localizingBanner =
-    data?.language_mode === 'hinglish' && data?.localization_status === 'pending'
-      ? 'Translating questions to Hinglish…'
-      : null
+  const copyFeedbackUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(feedbackUrl)
+      setFeedbackLinkCopied(true)
+      window.setTimeout(() => setFeedbackLinkCopied(false), 2000)
+    } catch {
+      setError('Could not copy feedback link')
+    }
+  }
 
   if (status.isLoading && !status.isError) {
     return (
@@ -192,15 +195,15 @@ export function LiveSessionPage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden">
-      {(error || lobbyBanner || localizingBanner) && (
-        <Alert
-          className={
-            lobbyBanner || localizingBanner
-              ? 'shrink-0 border-warning/30 bg-warning/5 py-2.5 text-xs leading-snug'
-              : 'shrink-0 border-destructive/30 bg-destructive/5 text-xs leading-snug text-destructive'
-          }
-        >
-          {error ?? lobbyBanner ?? localizingBanner}
+      <PhaseStatusDialog
+        data={data}
+        setupNotStarted={setupNotStarted}
+        lobbyTimeoutMin={lobbyTimeoutMin}
+      />
+
+      {error && (
+        <Alert className="shrink-0 border-destructive/30 bg-destructive/5 py-2.5 text-xs leading-snug text-destructive">
+          {error}
         </Alert>
       )}
 
@@ -298,6 +301,31 @@ export function LiveSessionPage() {
                       onClick={() => copyMeetingUrl(data.meeting_url!)}
                     >
                       {meetingLinkCopied ? (
+                        <Check className="h-3.5 w-3.5 text-success" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                  </div>
+                </div>
+              )}
+              {botId && (
+                <div>
+                  <p className="mb-1 font-medium">Feedback</p>
+                  <div className="flex items-center gap-1">
+                    <p className="min-w-0 flex-1 truncate" title={feedbackUrl}>
+                      {truncate(feedbackUrl, 48)}
+                    </p>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
+                      title={feedbackLinkCopied ? 'Copied' : 'Copy feedback link'}
+                      aria-label={feedbackLinkCopied ? 'Feedback link copied' : 'Copy feedback link'}
+                      onClick={copyFeedbackUrl}
+                    >
+                      {feedbackLinkCopied ? (
                         <Check className="h-3.5 w-3.5 text-success" />
                       ) : (
                         <Copy className="h-3.5 w-3.5" />

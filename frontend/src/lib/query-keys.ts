@@ -4,4 +4,6 @@ export const queryKeys = {
   reports: ['reports'] as const,
   status: (botId: string) => ['status', botId] as const,
   report: (botId: string) => ['report', botId] as const,
+  feedback: (botId: string) => ['feedback', botId] as const,
+  feedbackContext: (botId: string) => ['feedbackContext', botId] as const,
 }

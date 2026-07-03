@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 import { getHealth } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { useTheme } from '@/hooks/useTheme'
-import { PrabhatMark } from '@/components/brand/PrabhatMark'
+import { PrabhatBrand } from '@/components/brand/PrabhatBrand'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
@@ -59,14 +59,8 @@ export function AppShell() {
       {/* Sticky sidebar — same tone as header (unified shell, not black vs white) */}
       <aside className="no-print sticky top-0 flex h-screen w-56 shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
         <div className="flex h-14 shrink-0 items-center border-b border-sidebar-border px-2">
-          <div className="flex min-w-0 items-center gap-2.5 px-3">
-            <PrabhatMark className="h-4 w-auto shrink-0" />
-            <span className="truncate text-xl font-semibold leading-none tracking-wide text-sidebar-foreground">
-              PRABHAT
-              <span className="text-[#7c3aed] dark:text-[#a78bfa]" aria-hidden>
-                .
-              </span>
-            </span>
+          <div className="px-3">
+            <PrabhatBrand />
           </div>
         </div>
 
