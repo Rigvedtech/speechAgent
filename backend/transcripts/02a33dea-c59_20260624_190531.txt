@@ -1,0 +1,10 @@
+# Transcript bot=02a33dea-c59a-4225-a038-75808b4b8230 started=20260624_190531
+19:06:17 [AI]: Namaste Pranay, welcome. Main Prabhat hoon, aaj aapka interviewer. Shuru karne se pehle, kripya apna brief introduction dijiye.
+19:06:32 [You]: नमस्ते Prabha जी
+19:06:32 [AI]: Intro dene ke liye dhanyavaad, Pranay. RAG kya hai, aur yeh LLM applications ke liye popular approach kyun hai?
+19:07:08 [AI]: Koi baat nahi — jab ready hon, sawal par wapas aate hain.
+19:07:22 [You]: Sorry I can't
+19:07:23 [AI]: Samajh gaya.
+19:07:23 [AI]: Aapne RAG pipeline ke liye chunking strategy kaise banayi, chunk size aur overlap kaise decide kiya?
+19:08:12 [AI]: Koi baat nahi — jab ready hon, sawal par wapas aate hain.
+19:08:32 [AI]: Apna time lijiye. Kya aap mujhe sun pa rahe hain?

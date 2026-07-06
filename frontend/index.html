@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem('speechagent-theme');
+          var isDark = theme === 'dark';
+          document.documentElement.classList.toggle('dark', isDark);
+          document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
+          var favicon = document.querySelector('link[rel="icon"]');
+          if (favicon) {
+            favicon.href = isDark ? '/favicon-dark.svg' : '/favicon-light.svg';
+          }
+        } catch (_) {}
+      })();
+    </script>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon-light.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Prabhat AI</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -14,6 +14,9 @@ def main():
     # 1. Initialize Shared Global State
     state = AgentState()
     
+    # STANDALONE MODE: Auto-start interview (no manual /api/start needed)
+    state.is_started.set()  # Allows STT to process audio immediately
+    
     # 2. Instantiate all core components
     stt_engine = STTEngine(state)
     llm_brain = LLMBrain(state)
@@ -74,7 +77,7 @@ def main():
         return
 
     # First spoken turn: introduction via TTS (matches Prabhat voice persona).
-    state.is_ai_speaking = True
+    state.is_ai_speaking.set()
     print(f"[AI]: {STARTUP_GREETING}")
     state.tts_turn_done_event.clear()
     state.tts_queue.put(STARTUP_GREETING)

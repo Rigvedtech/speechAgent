@@ -1,0 +1,552 @@
+@import "tailwindcss";
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/500.css";
+@import "@fontsource/inter/600.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+  Premium B&W system — unified shell, hairline borders, minimal hover.
+  Light: white sidebar + off-white canvas (no harsh black/white split).
+  Dark: single near-black surface with subtle elevation on cards.
+*/
+@theme inline {
+  --color-background: var(--app-background);
+  --color-foreground: var(--app-foreground);
+  --color-card: var(--app-card);
+  --color-card-foreground: var(--app-card-foreground);
+  --color-muted: var(--app-muted);
+  --color-muted-foreground: var(--app-muted-foreground);
+  --color-border: var(--app-border);
+  --color-input: var(--app-input);
+  --color-primary: var(--app-primary);
+  --color-primary-foreground: var(--app-primary-foreground);
+  --color-destructive: var(--app-destructive);
+  --color-destructive-foreground: var(--app-destructive-foreground);
+  --color-warning: var(--app-warning);
+  --color-success: var(--app-success);
+  --color-accent: var(--app-accent);
+  --color-accent-foreground: var(--app-accent-foreground);
+  --color-ring: var(--app-ring);
+  --color-sidebar: var(--app-sidebar);
+  --color-sidebar-foreground: var(--app-sidebar-foreground);
+  --color-sidebar-muted: var(--app-sidebar-muted);
+  --color-sidebar-border: var(--app-sidebar-border);
+  --color-sidebar-hover: var(--app-sidebar-hover);
+  --color-sidebar-active: var(--app-sidebar-active);
+  --color-brand: var(--app-brand);
+  --scrollbar-size: 4px;
+  --scrollbar-thumb: var(--app-scrollbar-thumb);
+  --scrollbar-track: transparent;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+:root {
+  color-scheme: light;
+
+  --app-background: #f5f5f5;
+  --app-foreground: #0a0a0a;
+  --app-card: #ffffff;
+  --app-card-foreground: #0a0a0a;
+  --app-muted: #f0f0f0;
+  --app-muted-foreground: #737373;
+  --app-border: rgba(0, 0, 0, 0.1);
+  --app-input: rgba(0, 0, 0, 0.12);
+  --app-primary: #0a0a0a;
+  --app-primary-foreground: #ffffff;
+  --app-destructive: #dc2626;
+  --app-destructive-foreground: #ffffff;
+  --app-warning: #a16207;
+  --app-success: #15803d;
+  --app-accent: #f0f0f0;
+  --app-accent-foreground: #0a0a0a;
+  --app-ring: rgba(0, 0, 0, 0.2);
+  --app-sidebar: #ffffff;
+  --app-sidebar-foreground: #0a0a0a;
+  --app-sidebar-muted: #737373;
+  --app-sidebar-border: rgba(0, 0, 0, 0.08);
+  --app-sidebar-hover: rgba(0, 0, 0, 0.04);
+  --app-sidebar-active: rgba(0, 0, 0, 0.06);
+  --app-brand: #2563eb;
+  --app-scrollbar-thumb: #0a0a0a;
+}
+
+:root.dark {
+  color-scheme: dark;
+
+  --app-background: #0a0a0a;
+  --app-foreground: #fafafa;
+  --app-card: #111111;
+  --app-card-foreground: #fafafa;
+  --app-muted: #161616;
+  --app-muted-foreground: #a3a3a3;
+  --app-border: rgba(255, 255, 255, 0.1);
+  --app-input: rgba(255, 255, 255, 0.12);
+  --app-primary: #fafafa;
+  --app-primary-foreground: #0a0a0a;
+  --app-destructive: #ef4444;
+  --app-destructive-foreground: #ffffff;
+  --app-warning: #eab308;
+  --app-success: #22c55e;
+  --app-accent: #161616;
+  --app-accent-foreground: #fafafa;
+  --app-ring: rgba(255, 255, 255, 0.2);
+  --app-sidebar: #0a0a0a;
+  --app-sidebar-foreground: #fafafa;
+  --app-sidebar-muted: #a3a3a3;
+  --app-sidebar-border: rgba(255, 255, 255, 0.08);
+  --app-sidebar-hover: rgba(255, 255, 255, 0.04);
+  --app-sidebar-active: rgba(255, 255, 255, 0.07);
+  --app-brand: #60a5fa;
+  --app-scrollbar-thumb: rgba(250, 250, 250, 0.45);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans text-sm antialiased;
+    margin: 0;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  }
+
+  *::-webkit-scrollbar {
+    width: var(--scrollbar-size);
+    height: var(--scrollbar-size);
+  }
+
+  *::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+
+  *::-webkit-scrollbar-thumb {
+    background-color: var(--scrollbar-thumb);
+    border-radius: 9999px;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background-color: color-mix(in srgb, var(--scrollbar-thumb) 75%, var(--color-foreground));
+  }
+
+  *::-webkit-scrollbar-button,
+  *::-webkit-scrollbar-corner {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+}
+
+@layer utilities {
+  .surface-hover {
+    @apply transition-[background-color,border-color] duration-200 ease-out;
+  }
+
+  .row-hover {
+    @apply transition-colors duration-150 hover:bg-foreground/[0.03] dark:hover:bg-foreground/[0.04];
+  }
+
+  .live-dot {
+    width: 0.2rem;
+    height: 0.5rem;
+    border-radius: 9999px;
+    background-color: var(--color-success);
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 45%, transparent);
+    animation: live-pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+
+  /* On screen: hide the print-only report document */
+  .report-print-document {
+    display: none;
+  }
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--color-success) 50%, transparent);
+  }
+
+  50% {
+    opacity: 0.85;
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--color-success) 0%, transparent);
+  }
+}
+
+/* Landing page — subtle motion (respect reduced motion) */
+@keyframes wave-bar-dance {
+  0%,
+  100% {
+    transform: scaleY(0.45);
+    opacity: 0.55;
+  }
+
+  50% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+@keyframes landing-ring-breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.7;
+    transform: scale(1.04);
+  }
+}
+
+.reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition:
+    opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform;
+}
+
+.reveal-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.landing-nav-link {
+  position: relative;
+}
+
+.landing-nav-link::after {
+  content: '';
+  position: absolute;
+  left: 0.75rem;
+  right: 0.75rem;
+  bottom: 0.35rem;
+  height: 1px;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  opacity: 0.35;
+}
+
+.landing-nav-link:hover::after {
+  transform: scaleX(1);
+}
+
+.wave-bar {
+  transform-origin: bottom center;
+  animation: wave-bar-dance 1.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+.landing-ring-pulse {
+  animation: landing-ring-breathe 3s ease-in-out infinite;
+}
+
+.landing-hero-panel {
+  transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+  cursor: pointer;
+}
+
+.landing-step-card {
+  cursor: pointer;
+}
+
+.landing-hero-panel:hover {
+  transform: translateY(-2px);
+}
+
+.faq-content[data-state='open'] {
+  animation: faq-slide-down 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes faq-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  .wave-bar,
+  .landing-ring-pulse,
+  .live-dot {
+    animation: none;
+  }
+
+  .landing-hero-panel:hover {
+    transform: none;
+  }
+
+  .faq-content[data-state='open'] {
+    animation: none;
+  }
+}
+
+@media print {
+  @page {
+    size: A4;
+    margin: 1.5cm;
+  }
+
+  .no-print,
+  .screen-only,
+  .report-page-root {
+    display: none !important;
+  }
+
+  html,
+  body,
+  #root,
+  #root > *,
+  #root .flex.min-h-screen,
+  #root .flex.h-screen {
+    overflow: visible !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    background: #fff !important;
+    color: #1a1a1a !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  main,
+  main > div {
+    display: block !important;
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+    min-height: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    max-width: none !important;
+  }
+
+  .report-print-document {
+    display: block !important;
+    visibility: visible !important;
+    position: static !important;
+    width: 100% !important;
+    overflow: visible !important;
+    height: auto !important;
+    max-height: none !important;
+    font-family: Georgia, 'Times New Roman', Times, serif;
+    font-size: 11pt;
+    line-height: 1.55;
+    color: #1a1a1a;
+    background: #fff;
+    padding: 0;
+  }
+
+  .report-print-document * {
+    overflow: visible !important;
+    max-height: none !important;
+  }
+
+  .report-print-header {
+    border-bottom: 2px solid #1a1a1a;
+    padding-bottom: 0.5rem;
+    margin-bottom: 1rem;
+  }
+
+  .report-print-brand {
+    font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+    font-size: 9pt;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #555;
+    margin-bottom: 0.35rem;
+  }
+
+  .report-print-header h1 {
+    font-size: 20pt;
+    font-weight: normal;
+    margin: 0;
+  }
+
+  .report-print-subtitle {
+    font-size: 10pt;
+    color: #555;
+    margin-top: 0.35rem;
+  }
+
+  .report-print-outcome {
+    border: 1px solid #1a1a1a;
+    padding: 0.65rem 0.85rem;
+    margin-bottom: 1.25rem;
+    font-size: 10.5pt;
+  }
+
+  .report-print-section {
+    margin-bottom: 1.25rem;
+    break-inside: auto;
+    page-break-inside: auto;
+  }
+
+  .report-print-section h2 {
+    font-size: 11pt;
+    font-weight: bold;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom: 1px solid #bbb;
+    padding-bottom: 0.2rem;
+    margin: 0 0 0.65rem;
+  }
+
+  .report-print-note,
+  .report-print-muted {
+    font-size: 10pt;
+    color: #555;
+    margin-bottom: 0.5rem;
+  }
+
+  .report-print-summary {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.35rem 1.5rem;
+    margin: 0.5rem 0;
+  }
+
+  .report-print-summary dt {
+    font-size: 9.5pt;
+    color: #555;
+  }
+
+  .report-print-summary dd {
+    font-weight: bold;
+    margin: 0 0 0.35rem;
+  }
+
+  .report-print-list {
+    margin: 0;
+    padding-left: 1.25rem;
+  }
+
+  .report-print-list li {
+    margin-bottom: 0.35rem;
+  }
+
+  .report-print-question {
+    border: 1px solid #ccc;
+    padding: 0.85rem;
+    margin-bottom: 0.85rem;
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+
+  .report-print-question-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
+  }
+
+  .report-print-question h3 {
+    font-size: 11pt;
+    margin: 0;
+  }
+
+  .report-print-meta {
+    font-weight: normal;
+    color: #666;
+    font-size: 10pt;
+  }
+
+  .report-print-label {
+    font-size: 8.5pt;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #666;
+    margin: 0.5rem 0 0.15rem;
+  }
+
+  .report-print-body {
+    margin: 0 0 0.35rem;
+    font-size: 10.5pt;
+  }
+
+  .report-print-answer {
+    font-style: italic;
+    color: #333;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .report-print-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9.5pt;
+    margin: 0.5rem 0;
+  }
+
+  .report-print-table th,
+  .report-print-table td {
+    border: 1px solid #ccc;
+    padding: 0.3rem 0.45rem;
+    text-align: left;
+  }
+
+  .report-print-table th {
+    background: #f5f5f5;
+    font-weight: normal;
+    color: #555;
+  }
+
+  .report-print-feedback {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+    font-size: 10pt;
+    margin-top: 0.35rem;
+  }
+
+  .report-print-transcript {
+    border: 1px solid #ccc;
+    padding: 0.65rem;
+    font-family: ui-monospace, 'Courier New', monospace;
+    font-size: 8.5pt;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .report-print-transcript div {
+    margin-bottom: 0.15rem;
+  }
+
+  .report-print-footer {
+    margin-top: 1.5rem;
+    padding-top: 0.65rem;
+    border-top: 1px solid #bbb;
+    font-size: 9pt;
+    color: #666;
+    text-align: center;
+  }
+}

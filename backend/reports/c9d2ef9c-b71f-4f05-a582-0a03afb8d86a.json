@@ -1,0 +1,189 @@
+{
+  "candidate_name": "ATHARV",
+  "bot_id": "c9d2ef9c-b71f-4f05-a582-0a03afb8d86a",
+  "phase": "ended",
+  "stopped_reason": "low_recent_average",
+  "questions_planned": 10,
+  "questions_scored": 4,
+  "abuse_warnings": 0,
+  "continue_threshold": 7.0,
+  "rolling_window": 4,
+  "last_4_average": 5.75,
+  "overall_average": 5.75,
+  "per_question": [
+    {
+      "question_index": 1,
+      "question_id": "1",
+      "difficulty": "Low",
+      "source": "Job Description",
+      "question_text": "Can you explain the difference between a LEFT JOIN and an INNER JOIN in SQL, and give me a simple business scenario where you'd choose one over the other?",
+      "answer_text": "तो तो जो inner join है वो सिर्फ return करता है records। Data Matching Values in Voters और जो left sign है That returns all records from the left Left Table and the matching records from the right table. If there is no match then R return For the right table column. तो जो business scenario है वो है marketing teams often use Left Joins to identify inactive customers for re-engagement campaigns.",
+      "score": 7,
+      "confident": true,
+      "relevant": true,
+      "strengths": "clear example",
+      "develop": "technical vocabulary and sentence structure",
+      "fix": "practice explaining technical concepts in English to improve clarity and concision",
+      "abuse_flag": false
+    },
+    {
+      "question_index": 2,
+      "question_id": "11",
+      "difficulty": "Hard",
+      "source": "Resume",
+      "question_text": "Your resume mentions your work at KAS Marine contributed to a 5% improvement in fuel efficiency recommendations. Can you walk me through exactly how you analyzed the vessel performance data and what specific trend you found that led to this recommendation?",
+      "answer_text": "हाँ हां तो मेरे interns के ही time पे। I analyze vessel operational data. Including voyage duration, speed, fuel consumption and route details. I first clean the data cells by removing to be get sandaling missing values and standardizing units. Power BI और Excel का use करके। उसके बाद I created dashboard to analyze fuel consumption across roots and vessel types. I discovered that certain vessels operating above a Optimal speed Consistently consume disproportionality की Higher Fuel. By highlighting this trend and recommending maintaining speed With an optimal range द टीम वाज़ एबल टू इम्प्रूव फ्यूल एफिशिएंसी बाय एप्रोक्सीमेटली 5%।",
+      "score": 8,
+      "confident": true,
+      "relevant": true,
+      "strengths": "Data analysis and visualization",
+      "develop": "Quantifying the impact of specific factors on fuel efficiency",
+      "fix": "Provide more specific numbers and metrics to support the analysis, such as the exact speed range and vessel types",
+      "abuse_flag": false
+    },
+    {
+      "question_index": 3,
+      "question_id": "10",
+      "difficulty": "Intermediate",
+      "source": "Job Description",
+      "question_text": "Our JD and your resume both mention SQL window functions. Can you tell me about a time you used a window function, like RANK() or LAG(), to answer a specific business question that would have been difficult to solve otherwise?",
+      "answer_text": "तो जो मेरी hobby है, I like 2 drive 5 cars and और racing And I also like to watch movies. And yes ना ना मुझे ये सब बहुत पसंद है हाँ हाँ हाँ। तो इसके लिए मैं इसमें बहुत interested हूं। नहीं",
+      "score": 0,
+      "confident": false,
+      "relevant": false,
+      "strengths": "",
+      "develop": "Provide relevant and specific examples from work experience or projects that demonstrate the use of SQL window functions to answer business questions",
+      "fix": "Stay focused on the question and avoid discussing unrelated hobbies or interests",
+      "abuse_flag": false
+    },
+    {
+      "question_index": 4,
+      "question_id": "2",
+      "difficulty": "Low",
+      "source": "Job Description",
+      "question_text": "In Excel, what's the purpose of a Pivot Table, and can you walk me through the basic steps to create one from a raw dataset?",
+      "answer_text": "Yes अ Picture तो pivot table है वो help करता है summarize, analyze and explore large data sets quickly. हाँ। Without writing formulas. इसका example है If I have sales data containing date product Bacteria and Revenue. I can instantly see total sales by region or monthly trades. तो इसके simple जो steps हैं इसको create कर सकते सकते हैं वो है Select data set, go to insert, pivot tables, choose the data range and location. Drag fields into row, columns, values, filters. Customize aggregation such as Count और Average। This allows quick Quick Business Analyze with Minimal Efforts.",
+      "score": 8,
+      "confident": true,
+      "relevant": true,
+      "strengths": "clear understanding of pivot tables",
+      "develop": "provide more specific examples from experience",
+      "fix": "practice explaining technical concepts in a more formal, professional tone",
+      "abuse_flag": false
+    }
+  ],
+  "planned_questions": [
+    {
+      "slot": 1,
+      "id": "1",
+      "difficulty": "Low",
+      "source": "Job Description",
+      "question": "Can you explain the difference between a LEFT JOIN and an INNER JOIN in SQL, and give me a simple business scenario where you'd choose one over the other?",
+      "asked": true
+    },
+    {
+      "slot": 2,
+      "id": "11",
+      "difficulty": "Hard",
+      "source": "Resume",
+      "question": "Your resume mentions your work at KAS Marine contributed to a 5% improvement in fuel efficiency recommendations. Can you walk me through exactly how you analyzed the vessel performance data and what specific trend you found that led to this recommendation?",
+      "asked": true
+    },
+    {
+      "slot": 3,
+      "id": "10",
+      "difficulty": "Intermediate",
+      "source": "Job Description",
+      "question": "Our JD and your resume both mention SQL window functions. Can you tell me about a time you used a window function, like RANK() or LAG(), to answer a specific business question that would have been difficult to solve otherwise?",
+      "asked": true
+    },
+    {
+      "slot": 4,
+      "id": "2",
+      "difficulty": "Low",
+      "source": "Job Description",
+      "question": "In Excel, what's the purpose of a Pivot Table, and can you walk me through the basic steps to create one from a raw dataset?",
+      "asked": true
+    },
+    {
+      "slot": 5,
+      "id": "12",
+      "difficulty": "Hard",
+      "source": "Resume",
+      "question": "In your KAS Marine internship, your resume lists '[Excel / Power BI / Tableau]' for the dashboards you developed. Which specific tool did you primarily use, and why was that tool chosen for visualizing KPIs like voyage duration and route efficiency?",
+      "asked": false
+    },
+    {
+      "slot": 6,
+      "id": "6",
+      "difficulty": "Intermediate",
+      "source": "Job Description",
+      "question": "The job description mentions SQL subqueries. Can you describe a situation where using a subquery would be more effective than using a JOIN?",
+      "asked": false
+    },
+    {
+      "slot": 7,
+      "id": "3",
+      "difficulty": "Low",
+      "source": "Job Description",
+      "question": "Tell me about the main components of a Power BI dashboard. What's the difference between a report and a dashboard in that context?",
+      "asked": false
+    },
+    {
+      "slot": 8,
+      "id": "13",
+      "difficulty": "Hard",
+      "source": "Resume",
+      "question": "For your RCB-IPL SQL project, you mentioned writing complex queries. Can you describe the most complex query you wrote? What tables were involved, what specific question were you trying to answer, and what was the biggest challenge you faced in getting it to work correctly?",
+      "asked": false
+    },
+    {
+      "slot": 9,
+      "id": "7",
+      "difficulty": "Intermediate",
+      "source": "Job Description",
+      "question": "Imagine you've built a dashboard for the sales team. How would you go about ensuring the data is accurate and that the team trusts the numbers they're seeing?",
+      "asked": false
+    },
+    {
+      "slot": 10,
+      "id": "4",
+      "difficulty": "Low",
+      "source": "Job Description",
+      "question": "This role involves cleaning data from multiple sources. What are some of the most common data quality issues you've encountered or would expect to encounter?",
+      "asked": false
+    }
+  ],
+  "summary_develop": [
+    "technical vocabulary and sentence structure",
+    "Quantifying the impact of specific factors on fuel efficiency",
+    "Provide relevant and specific examples from work experience or projects that demonstrate the use of SQL window functions to answer business questions",
+    "provide more specific examples from experience"
+  ],
+  "summary_fix": [
+    "practice explaining technical concepts in English to improve clarity and concision",
+    "Provide more specific numbers and metrics to support the analysis, such as the exact speed range and vessel types",
+    "Stay focused on the question and avoid discussing unrelated hobbies or interests",
+    "practice explaining technical concepts in a more formal, professional tone"
+  ],
+  "transcript": [
+    "16:11:10 [AI]: Namaste ATHARV, welcome. Main Prabhat hoon, aaj aapka interviewer. Shuru karne se pehle, kripya apna brief introduction dijiye.",
+    "16:12:07 [You]: Hello Prabhat मेरा नाम अथर्व मोरे है And I have completed my Bachelor of Information Technology from CKT College मैं जो नगर में रहता हूं and during my academic career I have I have been strong foundation in data analyst and business analyst. मैंने 1 महीने का returnless internship भी किया है। कास्मा राइंस है। At that time I have gain solid experience of how to collect raw data material and analyze the data. Also currently I am complete Completing my data analyst course from Newton School. and currently I am at Rigved Technologies as a data analyst inter.",
+    "16:12:08 [AI]: Intro dene ke liye dhanyavaad, ATHARV. LEFT JOIN aur INNER JOIN mein kya difference hai, aur koi simple business scenario batao jahaan aap ek ko doosre se prefer karenge?",
+    "16:12:54 [You]: तो तो जो inner join है वो सिर्फ return करता है records। Data Matching Values in Voters और जो left sign है That returns all records from the left Left Table and the matching records from the right table. If there is no match then R return For the right table column. तो जो business scenario है वो है marketing teams often use Left Joins to identify inactive customers for re-engagement campaigns.",
+    "16:12:56 [AI]: Samajh gaya.",
+    "16:12:56 [AI]: Aapne KAS Marine me kaam kiya, jisse fuel efficiency me 5% sudhar hua, usme aapne vessel performance data kaise analyze kiya?",
+    "16:13:14 [You]: Sorry can you repeat the question?",
+    "16:13:15 [AI]: Bilkul. Sawal yeh hai: Aapne KAS Marine me kaam kiya, jisse fuel efficiency me 5% sudhar hua, usme aapne vessel performance data kaise analyze kiya?",
+    "16:14:21 [You]: हाँ हां तो मेरे interns के ही time पे। I analyze vessel operational data. Including voyage duration, speed, fuel consumption and route details. I first clean the data cells by removing to be get sandaling missing values and standardizing units. Power BI और Excel का use करके। उसके बाद I created dashboard to analyze fuel consumption across roots and vessel types. I discovered that certain vessels operating above a Optimal speed Consistently consume disproportionality की Higher Fuel. By highlighting this trend and recommending maintaining speed With an optimal range द टीम वाज़ एबल टू इम्प्रूव फ्यूल एफिशिएंसी बाय एप्रोक्सीमेटली 5%।",
+    "16:14:24 [AI]: Achha.",
+    "16:14:24 [AI]: Aapne SQL window functions, jaise RANK() ya LAG(), kabhi use kiya hai koi business question solve karne ke liye?",
+    "16:15:01 [You]: तो जो मेरी hobby है, I like 2 drive 5 cars and और racing And I also like to watch movies. And yes ना ना मुझे ये सब बहुत पसंद है हाँ हाँ हाँ। तो इसके लिए मैं इसमें बहुत interested हूं। नहीं",
+    "16:15:03 [AI]: Theek hai.",
+    "16:15:03 [AI]: Main ise thoda simple tareeke se puchta hoon:  Excel mein Pivot Table ka kya purpose hai, aur aap mujhe usse create karne ke basic steps bata sakte hain?",
+    "16:16:03 [You]: Yes अ Picture तो pivot table है वो help करता है summarize, analyze and explore large data sets quickly. हाँ। Without writing formulas. इसका example है If I have sales data containing date product Bacteria and Revenue. I can instantly see total sales by region or monthly trades. तो इसके simple जो steps हैं इसको create कर सकते सकते हैं वो है Select data set, go to insert, pivot tables, choose the data range and location. Drag fields into row, columns, values, filters. Customize aggregation such as Count और Average। This allows quick Quick Business Analyze with Minimal Efforts.",
+    "16:16:06 [AI]: Aaj ke liye dhanyavaad. Yahan wrap up karte hain. Team aapko next steps ke saath contact karegi."
+  ],
+  "interview_completed": true,
+  "completed_at": "2026-06-23T10:46:06.620802+00:00"
+}

@@ -1,0 +1,4 @@
+# Transcript bot=1bb9cc7c-25ab-4f77-8bd5-326dff83275c started=20260625_145832
+15:04:50 [AI]: Namaste Atharv, welcome. Main Prabhat hoon, aaj aapka interviewer. Shuru karne se pehle, kripya apna brief introduction dijiye.
+15:05:37 [You]: Hello प्रभात मेरा नाम अथर्व मोरे है I have completed my Bachelor of Information Technology from CKD College, Panvel. Hi Resides at Jui Nagar Bhashi During my academic career I have gain strong foundation in data analyst and business analyst. list I have also completed 1 month of data analyst internship from Case Marine. At that time I had in solid experience of how to collect raw data material and analyze the data. Also currently I am completing my data analysis goals from Newton School.
+15:05:37 [AI]: Intro dene ke liye dhanyavaad, Atharv. VLOOKUP aur INDEX/MATCH Excel mein kab use karte hain?

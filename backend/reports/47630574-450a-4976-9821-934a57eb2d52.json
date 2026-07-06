@@ -1,0 +1,228 @@
+{
+  "candidate_name": "Aman",
+  "bot_id": "47630574-450a-4976-9821-934a57eb2d52",
+  "phase": "ended",
+  "stopped_reason": "low_recent_average",
+  "questions_planned": 10,
+  "questions_scored": 6,
+  "abuse_warnings": 0,
+  "continue_threshold": 5.5,
+  "rolling_window": 6,
+  "last_4_average": 3.67,
+  "overall_average": 3.67,
+  "per_question": [
+    {
+      "question_index": 1,
+      "question_id": "1",
+      "difficulty": "Low",
+      "source": "jd",
+      "question_text": "Can you walk me through your process for creating a test case based on a business requirement document?",
+      "answer_text": "So basically I check the business requirement document and create the test case using the unit test case and the Following module test case, so first I understand the business requirement, what is it, analyze that document. Understand it and after that I create the test cases.",
+      "score": 6,
+      "confident": false,
+      "relevant": true,
+      "strengths": "basic understanding",
+      "develop": "providing detailed steps and specific examples",
+      "fix": "elaborate on the analysis of business requirements and provide concrete test case creation methods",
+      "abuse_flag": false
+    },
+    {
+      "question_index": 2,
+      "question_id": "11",
+      "difficulty": "Hard",
+      "source": "resume",
+      "question_text": "On your Nuvama Wealth project, you mentioned implementing sanity testing using the 'BOTm automation framework'. Can you tell me more about this framework and what your specific role was in its implementation?",
+      "answer_text": "So in test cases, BOT automation framework is very best framework. Work, BU team, automation framework is used for a test casing. No mobile we are used to For the test, that's it.",
+      "score": 2,
+      "confident": false,
+      "relevant": true,
+      "strengths": "attempted to address the question",
+      "develop": "provide specific details about the BOTm automation framework and personal role in its implementation",
+      "fix": "clearly define the framework, its application, and personal contributions to demonstrate understanding and experience",
+      "abuse_flag": false
+    },
+    {
+      "question_index": 3,
+      "question_id": "6",
+      "difficulty": "Intermediate",
+      "source": "jd",
+      "question_text": "When you start on a new feature, how do you go about creating a comprehensive set of test scenarios to ensure good test coverage?",
+      "answer_text": "The best test coverage is to have a cover the every module of the software. After that, you have to implement it. In test cases First understand the framework and understand the component and after it you have to test it.",
+      "score": 6,
+      "confident": false,
+      "relevant": true,
+      "strengths": "basic understanding",
+      "develop": "providing specific examples and detailed explanations",
+      "fix": "focus on creating a structured approach to test scenario creation, such as using risk-based testing or equivalence partitioning",
+      "abuse_flag": false
+    },
+    {
+      "question_index": 4,
+      "question_id": "4",
+      "difficulty": "Low",
+      "source": "resume",
+      "question_text": "You've listed several types of testing on your resume. In your own words, what's the difference between smoke testing and regression testing, and when would you perform each?",
+      "answer_text": "Mock testing is basically we do the small testing. And in that we have to add a small components for attesting and in the regression we Instead of testing individual model, we test the whole. the software That's it.",
+      "score": 4,
+      "confident": false,
+      "relevant": true,
+      "strengths": "attempted to define terms",
+      "develop": "provide clear, specific definitions and examples of smoke and regression testing, and explain when to use each",
+      "fix": "study and practice explaining key testing concepts in simple, concise terms, without relying on vague phrases like 'small testing'",
+      "abuse_flag": false
+    },
+    {
+      "question_index": 5,
+      "question_id": "12",
+      "difficulty": "Hard",
+      "source": "resume",
+      "question_text": "Your resume says you validated high-frequency trading workflows. What were the most significant challenges in testing a system like that, particularly around order execution and data validation?",
+      "answer_text": "So basically I use a norms for a testing and I use Test for it That's it.",
+      "score": 2,
+      "confident": false,
+      "relevant": false,
+      "strengths": "None",
+      "develop": "Lack of specific examples and technical details",
+      "fix": "Provide concrete experiences and challenges faced during high-frequency trading workflow validation",
+      "abuse_flag": false
+    },
+    {
+      "question_index": 6,
+      "question_id": "10",
+      "difficulty": "Intermediate",
+      "source": "resume",
+      "question_text": "Walk me through your process for executing a suite of test cases. How do you track which tests have passed, which have failed, and which are blocked?",
+      "answer_text": "So basically I write a script for it, after writing script I run that script. And run it on in the module and after that I will check. So that's it.",
+      "score": 2,
+      "confident": false,
+      "relevant": true,
+      "strengths": "basic understanding of testing",
+      "develop": "providing detailed explanations of test case execution and tracking",
+      "fix": "elaborate on the process of tracking passed, failed, and blocked tests, and provide specific examples from experience",
+      "abuse_flag": false
+    }
+  ],
+  "planned_questions": [
+    {
+      "slot": 1,
+      "id": "1",
+      "difficulty": "Low",
+      "source": "jd",
+      "question": "Can you walk me through your process for creating a test case based on a business requirement document?",
+      "asked": true
+    },
+    {
+      "slot": 2,
+      "id": "11",
+      "difficulty": "Hard",
+      "source": "resume",
+      "question": "On your Nuvama Wealth project, you mentioned implementing sanity testing using the 'BOTm automation framework'. Can you tell me more about this framework and what your specific role was in its implementation?",
+      "asked": true
+    },
+    {
+      "slot": 3,
+      "id": "6",
+      "difficulty": "Intermediate",
+      "source": "jd",
+      "question": "When you start on a new feature, how do you go about creating a comprehensive set of test scenarios to ensure good test coverage?",
+      "asked": true
+    },
+    {
+      "slot": 4,
+      "id": "4",
+      "difficulty": "Low",
+      "source": "resume",
+      "question": "You've listed several types of testing on your resume. In your own words, what's the difference between smoke testing and regression testing, and when would you perform each?",
+      "asked": true
+    },
+    {
+      "slot": 5,
+      "id": "12",
+      "difficulty": "Hard",
+      "source": "resume",
+      "question": "Your resume says you validated high-frequency trading workflows. What were the most significant challenges in testing a system like that, particularly around order execution and data validation?",
+      "asked": true
+    },
+    {
+      "slot": 6,
+      "id": "10",
+      "difficulty": "Intermediate",
+      "source": "resume",
+      "question": "Walk me through your process for executing a suite of test cases. How do you track which tests have passed, which have failed, and which are blocked?",
+      "asked": true
+    },
+    {
+      "slot": 7,
+      "id": "2",
+      "difficulty": "Low",
+      "source": "jd",
+      "question": "This role involves installing new software builds for testing. What has been your experience with this, and what kind of issues have you run into?",
+      "asked": false
+    },
+    {
+      "slot": 8,
+      "id": "13",
+      "difficulty": "Hard",
+      "source": "resume",
+      "question": "For the 5Paisa project, you tested RMS margin calculations. Can you give me a specific example of a complex test case you designed for this? What edge cases did you consider?",
+      "asked": false
+    },
+    {
+      "slot": 9,
+      "id": "9",
+      "difficulty": "Intermediate",
+      "source": "jd",
+      "question": "What would you do if you were given a requirement to test that was ambiguous or seemed incomplete?",
+      "asked": false
+    },
+    {
+      "slot": 10,
+      "id": "3",
+      "difficulty": "Low",
+      "source": "jd",
+      "question": "The job description emphasizes preserving testing documents. How do you typically organize and store artifacts like screenshots and log files during your testing?",
+      "asked": false
+    }
+  ],
+  "summary_develop": [
+    "providing detailed steps and specific examples",
+    "provide specific details about the BOTm automation framework and personal role in its implementation",
+    "providing specific examples and detailed explanations",
+    "provide clear, specific definitions and examples of smoke and regression testing, and explain when to use each",
+    "Lack of specific examples and technical details",
+    "providing detailed explanations of test case execution and tracking"
+  ],
+  "summary_fix": [
+    "elaborate on the analysis of business requirements and provide concrete test case creation methods",
+    "clearly define the framework, its application, and personal contributions to demonstrate understanding and experience",
+    "focus on creating a structured approach to test scenario creation, such as using risk-based testing or equivalence partitioning",
+    "study and practice explaining key testing concepts in simple, concise terms, without relying on vague phrases like 'small testing'",
+    "Provide concrete experiences and challenges faced during high-frequency trading workflow validation",
+    "elaborate on the process of tracking passed, failed, and blocked tests, and provide specific examples from experience"
+  ],
+  "transcript": [
+    "12:58:25 [AI]: Hello Aman, welcome. I'm Prabhat, your interviewer today. Before we begin, could you please introduce yourself briefly?",
+    "12:59:40 [You]: Mm- Hello Prabhat, I am Pranay. I have completed my bachelor's degree in computer application. Right now working as a Hello Project Engineer AI in Rigved Technology",
+    "12:59:40 [AI]: Thank you for introducing yourself, Aman. Can you walk me through your process for creating a test case based on a business requirement document?",
+    "12:59:55 [AI]: Just checking — are you still there?",
+    "13:00:11 [You]: Sorry, aman you repeat the question?",
+    "13:00:11 [AI]: Sure. The question is: Can you walk me through your process for creating a test case based on a business requirement document?",
+    "13:00:40 [You]: So basically I check the business requirement document and create the test case using the unit test case and the Following module test case, so first I understand the business requirement, what is it, analyze that document. Understand it and after that I create the test cases.",
+    "13:00:41 [AI]: Alright. On your Nuvama Wealth project, you mentioned implementing sanity testing using the 'BOTm automation framework'. Can you tell me more about this framework and what your specific role was in its implementation?",
+    "13:01:11 [You]: So in test cases, BOT automation framework is very best framework. Work, BU team, automation framework is used for a test casing. No mobile we are used to For the test, that's it.",
+    "13:01:12 [AI]: Got it. When you start on a new feature, how do you go about creating a comprehensive set of test scenarios to ensure good test coverage?",
+    "13:01:40 [You]: The best test coverage is to have a cover the every module of the software. After that, you have to implement it. In test cases First understand the framework and understand the component and after it you have to test it.",
+    "13:01:41 [AI]: Okay. You've listed several types of testing on your resume. In your own words, what's the difference between smoke testing and regression testing, and when would you perform each?",
+    "13:02:13 [You]: Mock testing is basically we do the small testing. And in that we have to add a small components for attesting and in the regression we Instead of testing individual model, we test the whole. the software That's it.",
+    "13:02:14 [AI]: Sure. Your resume says you validated high-frequency trading workflows. What were the most significant challenges in testing a system like that, particularly around order execution and data validation?",
+    "13:02:32 [You]: I don't know",
+    "13:02:47 [You]: Sorry, I don't know.",
+    "13:02:57 [You]: Hello Hello Hello",
+    "13:03:14 [You]: So basically I use a norms for a testing and I use Test for it That's it.",
+    "13:03:15 [AI]: Understood. Walk me through your process for executing a suite of test cases. How do you track which tests have passed, which have failed, and which are blocked?",
+    "13:03:43 [You]: So basically I write a script for it, after writing script I run that script. And run it on in the module and after that I will check. So that's it.",
+    "13:03:44 [AI]: Thank you for your time today. We'll wrap up here. The team will be in touch with next steps."
+  ],
+  "interview_completed": true,
+  "completed_at": "2026-07-02T07:33:44.056705+00:00"
+}

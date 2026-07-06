@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 27 24" role="img" aria-label="Prabhat">
+  <style>
+    .bar { fill: #0a0a0a; }
+    @media (prefers-color-scheme: dark) {
+      .bar { fill: #fafafa; }
+    }
+  </style>
+  <rect class="bar" x="0" y="14" width="2.5" height="10" rx="1.25"/>
+  <rect class="bar" x="4" y="6" width="2.5" height="18" rx="1.25"/>
+  <rect class="bar" x="8" y="10" width="2.5" height="14" rx="1.25"/>
+  <rect class="bar" x="12" y="0" width="2.5" height="24" rx="1.25"/>
+  <rect class="bar" x="16" y="10" width="2.5" height="14" rx="1.25"/>
+  <rect class="bar" x="20" y="6" width="2.5" height="18" rx="1.25"/>
+  <rect class="bar" x="24" y="14" width="2.5" height="10" rx="1.25"/>
+</svg>

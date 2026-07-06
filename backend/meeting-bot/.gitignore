@@ -1,6 +1,0 @@
-.env
-bin/
-obj/
-tmp-build/
-wwwroot/generated-audio/
-*.wav

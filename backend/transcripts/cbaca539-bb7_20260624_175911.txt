@@ -1,0 +1,18 @@
+18:01:24 [AI]: Namaste Athrava, welcome. Main Prabhat hoon, aaj aapka interviewer. Shuru karne se pehle, kripya apna brief introduction dijiye.
+18:02:17 [You]: आ हेलो प्रभात, मेरा नाम अथर्व मोरे है। I have completed my Bachelor of Information Technology from Security College Panvel. मैं चुई नगर में रहता हूं। During my academic career I have gained strong foundation in data analyst and business analyst. और मैंने 1 साल का internship भी किया है Kashmir से। at That time I gain solid experience Of how to collect raw data material Data analyzing the data. Also currently I am completing my data analyst course from Newton School and currently Time Posted आज Data Analyst इन River Technologies।
+18:02:17 [AI]: Intro dene ke liye dhanyavaad, Athrava. Excel ke PivotTables use karke large dataset ko summarize karne ka ek example do
+18:02:55 [You]: Pivot Table help summarize, analyze and explore large data set quickly. नहीं Without writing formulas. For example if I have sales data containing date product Region Revenue I can instantly see total sales by region or monthly trends. This allows quick business analyze with minimal efforts.
+18:02:56 [AI]: Theek hai.
+18:02:56 [AI]: Main ise thoda simple tareeke se puchta hoon:  Aapne 5% fuel efficiency improvement ke baare mein bataya, uska calculation kaise kiya
+18:03:58 [You]: तो इसका calculation करने के लिए First तो मुझे analyze करना पड़ा vessel operational data। Including voice duration, Speed, Fuel Consumption and Route Detail. पहले मैंने data को clean किया। किया by removing duplicates handling missing values एंड standardizing units Excel और Power BI को यूज करके। फिर आया created dashboard to analyze fuel consumption across route and vessel type. I discovered that certain vessels operating अब optimal speed consistently। Okay Consume disproportionality higher view बा highlighting this trend and recommending maintaining speeds Within an optimal range, the The team was able to Improve fuel efficiency recommended by approximately 5%.
+18:03:59 [AI]: Okay.
+18:03:59 [AI]: Python ko Excel ya SQL ke upper kyu chunenge, ek example do
+18:04:12 [You]: Can you please repeat the Question
+18:04:12 [AI]: Bilkul. Sawal yeh hai: Python ko Excel ya SQL ke upper kyu chunenge, ek example do
+18:04:24 [AI]: Apna time lijiye. Kya aap mujhe sun pa rahe hain?
+18:04:52 [You]: Excel, SQL and Python From the ultimate data tool kit because the balance accessibility Storage capacity and computational power. Instead of competing this इस 3 tools Complete each other across different stages of data processing. Taking you from raw data storage to complex automations.
+18:04:53 [AI]: Theek hai.
+18:04:53 [AI]: Main ise thoda simple tareeke se puchta hoon:  LEFT JOIN aur INNER JOIN mein kya difference hai, business context mein
+18:05:34 [AI]: I notice we're going a bit off-track — could you bring it back to the question?
+18:05:39 [You]: जो left join है that returns only the records that have matching values in both tables. और जो left join है वो Overall returns all records from the left Left table and matching records from the Right table. If there is no match नल values आर written From the right table columns. और अगर इसको अगर business scenario में देखना है तो marketing team software use left joins to identify inactive customers for re-engagement campaigns.
+18:05:41 [AI]: Aaj ke liye dhanyavaad. Yahan wrap up karte hain. Team aapko next steps ke saath contact karegi.

@@ -1,0 +1,20 @@
+# Transcript bot=2c24e657-c137-4a2a-840f-5f45fda821ba started=20260626_145522
+14:58:35 [AI]: Namaste Atharv, welcome. Main Prabhat hoon, aaj aapka interviewer. Shuru karne se pehle, kripya apna brief introduction dijiye.
+14:59:26 [You]: हेलो प्रभात, मायसेल्फ अथरव मोरे। रे I have completed my Bachelor of Information Technology from CKD College Panvel. I resets at Jui Nagar Vashi My academic career I have gain strong foundation In Data Analyst and Business Analyst. I have also completed 1 month data as internship from Casmar and At that time I gain solid experience of how to collect raw data material and analyze the data. Also currently I am completing my data analyst course from Newton School. So that's it about myself.
+14:59:26 [AI]: Intro dene ke liye dhanyavaad, Atharv. SQL mein LEFT JOIN aur INNER JOIN mein kya difference hai?
+15:00:00 [AI]: Left table kya hai?
+15:00:21 [You]: तो तो जो left sign है, That returns from the records that are matching values in both table. For example, if I have customer table And an order table And I want to see only customer हूं। You have placed order I would use an inner join. तो जो वो left join है that returns all records from the left table and matching records from the right table. If no match exist, It returns null values. For Left Join Returns All Records From The Left Table. and matching records from the right table. And if there is no matching records then it Retentional Value
+15:00:22 [AI]: Samajh gaya. Aapne KAS Marine mein analysis ki thi, jiske baad 5% improvement hua. Uske steps bataiye
+15:00:54 [AI]: SQL kaise use kiya?
+15:01:13 [You]: Add At Casmaran I work with operational and marine logistic data set containing OH ID, vessel ID Root Information then वह है duration, distance travelled, average vessel speed. We will consumption law code details. First Step Data Cleaning and Collection. I first extract the data using SQL and CleanIt. in Excel. मैं First Remove duplicates, records, handling missing values, correct data types and standardizing root names.
+15:01:14 [AI]: Achha. Data ko report ke liye prepare karte waqt SQL query mein transformation karte hain ya Power BI mein?
+15:01:25 [You]: हाँ SQL I use for extract the data.
+15:01:26 [AI]: Got it. Excel mein Pivot Tables ka use karke large dataset ko summarize kiya hai? Kya insights nikale the?
+15:01:40 [You]: And repeat the question.
+15:01:40 [AI]: Bilkul. Sawal yeh hai: Excel mein Pivot Tables ka use karke large dataset ko summarize kiya hai? Kya insights nikale the?
+15:02:23 [You]: Yes, during my internship I use pivot table extensively. To analyze voyage and fuel consumption data क्या For example, I summarize fuel consumption by vessel. Root Month month. I place root in rows, month in column, fuel consumption in values. This allowed me to quickly identify high fuel consumption routes. Monthly Operational Trends Underperforming Vessels. Pivot Table helps convert large data set into meaningful business insights.
+15:02:23 [AI]: Samajh gaya. KAS Marine internship mein aapne Excel, Power BI, Tableau mein se kaunsa tool use kiya tha?
+15:03:13 [You]: For the Casmaran project, I primarily use Power BI for dashboard development and Excel for primarily Analysis. Power BI was chosen because it offered interactive visualization. Dynamic filtering and drill down capabilities Connectivity with multiple data source. The dashboard track KPI such as watch duration, route efficiency, Fuel consumption हम्म Vessel Utilization Power BI enabled operational management To analyze इस performance by vessels route and time period interactively.
+15:03:13 [AI]: Achha. SQL window functions ka practical use bataiye, jaise ROW_NUMBER() ya LAG()
+15:03:48 [You]: वन practical use case for row_number is to identify the top performing customers in each region Suppose management want to know the top 5 customers per sales in every region. और जो lag है Which use for Calculating Months Over Month Sales Growth.
+15:03:49 [AI]: Got it. Power BI mein data source connect karke simple bar chart banana hai, steps bataiye

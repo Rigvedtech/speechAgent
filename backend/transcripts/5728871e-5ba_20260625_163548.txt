@@ -1,0 +1,6 @@
+# Transcript bot=5728871e-5ba4-4a24-a17a-207d509177fc started=20260625_163548
+16:36:48 [AI]: Namaste Atharv, welcome. Main Prabhat hoon, aaj aapka interviewer. Shuru karne se pehle, kripya apna brief introduction dijiye.
+16:37:30 [You]: Hello Prabhat. My name is Atharv Moori. I have completed my Bachelor of Information Technology From CET College Panvel, I resided at Juhi Nagar Vashi. During my academic Career I have been strong foundation in data analyst and business analyst I have also completed one one data analysis internship from Cosmar and at the द time मैं again stalled experience of how to collect data material and analyze the data. Also currently I am completing My data analysis course from Newton School.
+16:37:30 [AI]: Intro dene ke liye dhanyavaad, Atharv. Do table combine karne ke liye aapne kabhi SQL join use kiya hai?
+16:37:45 [You]: हाँ
+16:37:46 [AI]: Kripya apna jawab continue kijiye.

@@ -1,0 +1,7 @@
+# Transcript bot=d4408ed8-e850-4690-b9d8-743641f1ebb4 started=20260625_152018
+15:20:52 [AI]: Namaste Atharv, welcome. Main Prabhat hoon, aaj aapka interviewer. Shuru karne se pehle, kripya apna brief introduction dijiye.
+15:21:05 [You]: Hello Prabhupada.
+15:21:05 [AI]: Intro dene ke liye dhanyavaad, Atharv. SQL mein INNER JOIN aur LEFT JOIN mein kya difference hai?
+15:21:19 [AI]: Apna time lijiye. Kya aap mujhe sun pa rahe hain?
+15:21:56 [You]: तो The primary difference is that an inner join returns only the rows with matching values in both वोट टेबल्स। पहिलं left join Returns all roads from the left table Plus any matching rows From the right table.
+15:21:58 [AI]: Samajh gaya. Aapne KAS Marine mein 5% fuel efficiency improvement kiya, uska analysis kaise kiya?

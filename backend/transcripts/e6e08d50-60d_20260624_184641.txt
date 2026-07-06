@@ -1,0 +1,25 @@
+# Transcript bot=e6e08d50-60d1-4851-b0cf-0ba9a1cfbe85 started=20260624_184641
+18:47:02 [AI]: Namaste Atharv, welcome. Main Prabhat hoon, aaj aapka interviewer. Shuru karne se pehle, kripya apna brief introduction dijiye.
+18:47:40 [You]: हेलो प्रभात, मेरा नाम अथर्व मोरे है। I have completed a Bachelor of Information Technology. From CKD College Panvel मैं जोगीनगर में रहता हूं during my academic career I have gained strong foundation in data analysis and business analysis. I have also completed 1 month data analyst and Business Analyst course from Newton School and also completed Internship in Casemir
+18:47:40 [AI]: Intro dene ke liye dhanyavaad, Atharv. SQL mein tables ko combine karne ka experience hai? JOIN kaunsa use kiya tha?
+18:48:19 [You]: हां मेरे को इस team में table join करने का experience है OK Where I I use either with Join clause to merge table side by side और Union operators to stack data on top of each other. The best method depends on how your table relate Late to each other.
+18:48:20 [AI]: Samajh gaya.
+18:48:20 [AI]: Aapne KAS Marine mein 5% improvement kiya tha, us project ke baare mein bataiye
+18:49:10 [You]: During my internship I analyzed vessel operational data including voyage duration speed Fuel consumption and route details. I first clean the data set. By removing duplicates handling missing values and standardizing unit using excellent power pay. I created dashboard to analyze fuel consumption across routes and vessel types. I discovered that certain vessels operating अब Optimal speed consistently consume disproportionality higher fuel. By highlighting this trend and recommending maintaining speed, विदिन एन Optimal Range The team was able to improve fuel efficiency recommendations by approximately 5%
+18:49:12 [AI]: Achha.
+18:49:12 [AI]: Non-technical person ko data present karne ka experience hai? Challenges kya aaye the?
+18:49:33 [You]: हां Can you repeat the question?
+18:49:33 [AI]: Bilkul. Sawal yeh hai: Non-technical person ko data present karne ka experience hai? Challenges kya aaye the?
+18:50:12 [You]: Non-technical पर्सन को Challenges managing SQL data from non-technical users involve bridging the इन the cap Between raw database tables and easy to use business tools. The biggest Plus I usually writing in complex SQL queries to extract data. था। Preventing unauthorized or accidental data Corruption. and making the data easy to interrupt.
+18:50:15 [AI]: Got it.
+18:50:15 [AI]: Excel mein Pivot Table use karke sales data ko summarize kaise karte hain?
+18:50:27 [You]: Can you repeat the question?
+18:50:27 [AI]: Bilkul. Sawal yeh hai: Excel mein Pivot Table use karke sales data ko summarize kaise karte hain?
+18:52:01 [You]: तो to summarize sales data using a pivot table in Microsoft Excel or Google Sheets. Click any cells Within your data and go to insert pivot table Drag field into rows Example product Columns, Region and Values Areas to instantly group Group and Calculate Your Tools. First First prepare your data to ensure your sales data is in clean tabular format. With no empty row. Second create the pivot table. Select any cell within your sales table. इन the top ribbon click the insert tab and select pivot table. 1 3rd build your summary on the right side of your screen you will see the pivot Table Fields मैनल। Drag and drop your fields name into this 4 key है ना इस row Columns, Values, Filter. Then 4 Change how values are created by default Excel will usually sum up your वर Numbers but you might It want to find average Average sale or count the number of transaction. तो C step by step. If you want let
+18:52:02 [AI]: Samajh gaya.
+18:52:02 [AI]: Aapne dashboard banane ke liye kaunsa tool use kiya tha? Sabse complex dashboard ka experience bataiye
+18:52:33 [You]: मैंने The best dashboard tools for you depends on your existing tech stack and data needs. Popular Microsoft Power भी है। है। Best if your team operates in Microsoft 365
+18:52:34 [AI]: Achha.
+18:52:34 [AI]: SQL window functions ka business scenario bataiye jahan RANK() ya LAG() use hota hai
+18:52:50 [You]: Can you repeat the question?
+18:52:50 [AI]: Bilkul. Sawal yeh hai: SQL window functions ka business scenario bataiye jahan RANK() ya LAG() use hota hai

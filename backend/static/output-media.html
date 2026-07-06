@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<!--
+  Recall.ai Output Media Page — Voice Agent Speaker
+  ==================================================
+  Recall.ai opens this page inside its headless Chromium bot.
+  Whatever audio this page plays is streamed into the meeting as the bot's mic.
+
+  Audio path:
+    Python (Sarvam TTS) → Int16 PCM over /ws/audio-stream/{bot_id}
+      → AudioWorkletProcessor → AudioContext.destination → Recall.ai captures → Teams/Zoom/Meet hears bot
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Interviewer — Output Media</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: radial-gradient(ellipse at center, #141414 0%, #0a0a0a 70%);
+      color: #f5f5f5;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      width: 1280px;
+      height: 720px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+    }
+
+    .avatar {
+      width: 132px;
+      height: 132px;
+      border-radius: 50%;
+      background: #f5f5f5;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      position: relative;
+      flex-shrink: 0;
+    }
+
+    .avatar .logo {
+      width: 64px;
+      height: 64px;
+      display: block;
+      overflow: visible;
+    }
+
+    .avatar .logo .wave-bar {
+      transform-box: fill-box;
+      transform-origin: center bottom;
+    }
+
+    .avatar.speaking .logo .wave-bar {
+      animation: wave-dance 1.35s ease-in-out infinite;
+    }
+
+    .avatar.speaking .logo .wave-bar:nth-child(1) { animation-delay: 0ms; }
+    .avatar.speaking .logo .wave-bar:nth-child(2) { animation-delay: 90ms; }
+    .avatar.speaking .logo .wave-bar:nth-child(3) { animation-delay: 180ms; }
+    .avatar.speaking .logo .wave-bar:nth-child(4) { animation-delay: 270ms; }
+    .avatar.speaking .logo .wave-bar:nth-child(5) { animation-delay: 180ms; }
+    .avatar.speaking .logo .wave-bar:nth-child(6) { animation-delay: 90ms; }
+    .avatar.speaking .logo .wave-bar:nth-child(7) { animation-delay: 0ms; }
+
+    @keyframes wave-dance {
+      0%, 100% { transform: scaleY(0.42); opacity: 0.55; }
+      50%       { transform: scaleY(1); opacity: 1; }
+    }
+
+    .avatar.speaking::after {
+      content: '';
+      position: absolute;
+      inset: -8px;
+      border-radius: 50%;
+      border: 3px solid rgba(255, 255, 255, 0.85);
+      animation: ring-pulse 1.6s ease-out infinite;
+    }
+
+    @keyframes ring-pulse {
+      0%   { opacity: 0.9; transform: scale(1); }
+      100% { opacity: 0; transform: scale(1.28); }
+    }
+
+    @keyframes pulse {
+      0%   { opacity: 1; transform: scale(1); }
+      100% { opacity: 0; transform: scale(1.3); }
+    }
+
+    .name {
+      font-size: 32px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 18px;
+      color: #a3a3a3;
+    }
+
+    .dot {
+      flex-shrink: 0;
+      transition: background 0.25s ease, width 0.25s ease, height 0.25s ease, border-radius 0.25s ease;
+    }
+
+    /* Listening — green vertical capsule */
+    .dot.connected {
+      width: 4px;
+      height: 12px;
+      border-radius: 9999px;
+      background: #22c55e;
+      box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.45);
+      animation: live-pulse 2s ease-in-out infinite;
+    }
+
+    /* Speaking — blue dot */
+    .dot.speaking {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #3b82f6;
+      box-shadow: 0 0 8px rgba(59, 130, 246, 0.55);
+      animation: speak-pulse 1s ease-in-out infinite;
+    }
+
+    .dot.reconnecting {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #f59e0b;
+    }
+
+    .dot.error {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #ef4444;
+    }
+
+    @keyframes live-pulse {
+      0%, 100% {
+        opacity: 1;
+        box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5);
+      }
+      50% {
+        opacity: 0.88;
+        box-shadow: 0 0 0 6px rgba(34, 197, 94, 0);
+      }
+    }
+
+    @keyframes speak-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.75; transform: scale(0.92); }
+    }
+
+    @keyframes blink { 50% { opacity: 0.3; } }
+
+    canvas#viz {
+      width: 400px;
+      height: 56px;
+      opacity: 0.85;
+    }
+
+    .timer {
+      font-size: 14px;
+      color: #525252;
+      font-variant-numeric: tabular-nums;
+    }
+  </style>
+</head>
+<body>
+  <div class="avatar" id="avatar">
+    <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
+      <rect class="wave-bar" x="0" y="14" width="2.5" height="10" rx="1.25" fill="#0a0a0a"/>
+      <rect class="wave-bar" x="3.5" y="6" width="2.5" height="18" rx="1.25" fill="#0a0a0a"/>
+      <rect class="wave-bar" x="7" y="10" width="2.5" height="14" rx="1.25" fill="#0a0a0a"/>
+      <rect class="wave-bar" x="10.5" y="0" width="2.5" height="24" rx="1.25" fill="#0a0a0a"/>
+      <rect class="wave-bar" x="14" y="10" width="2.5" height="14" rx="1.25" fill="#0a0a0a"/>
+      <rect class="wave-bar" x="17.5" y="6" width="2.5" height="18" rx="1.25" fill="#0a0a0a"/>
+      <rect class="wave-bar" x="21" y="14" width="2.5" height="10" rx="1.25" fill="#0a0a0a"/>
+    </svg>
+  </div>
+  <div class="name" id="botName">AI Interviewer</div>
+  <div class="status-row">
+    <div class="dot" id="dot"></div>
+    <span id="statusText">Initialising…</span>
+  </div>
+  <canvas id="viz" width="320" height="48"></canvas>
+  <div class="timer" id="timer">00:00</div>
+
+<script>
+/* ─────────────────────────────────────────────────
+   Configuration — read from URL query params
+   ?page_session_id=<uuid>  (required — injected by api_server.py at bot creation)
+   ?name=<string>           (optional, display name)
+   ───────────────────────────────────────────────── */
+const params          = new URLSearchParams(location.search);
+const PAGE_SESSION_ID = params.get('page_session_id') || '';
+const BOT_NAME        = decodeURIComponent(params.get('name') || 'Prabhat');
+
+/* Audio format contract (matches Sarvam TTS bulbul:v3 output):
+   - Encoding  : Int16 PCM (little-endian)
+   - Sample rate: 24000 Hz (bulbul:v3 default)
+   - Channels  : 1 (mono) */
+const SAMPLE_RATE = 24000;
+
+/* WebSocket endpoint — server resolves page_session_id → bot_id */
+const WS_PATH = `/ws/audio-stream/${PAGE_SESSION_ID}`;
+
+/* ─── DOM refs ────────────────────────────────── */
+const avatarEl    = document.getElementById('avatar');
+const botNameEl   = document.getElementById('botName');
+const dotEl       = document.getElementById('dot');
+const statusEl    = document.getElementById('statusText');
+const timerEl     = document.getElementById('timer');
+const canvas      = document.getElementById('viz');
+const ctx2d       = canvas.getContext('2d');
+
+botNameEl.textContent = BOT_NAME;
+
+/* ─── Timer ───────────────────────────────────── */
+let startTime = Date.now();
+setInterval(() => {
+  const s = Math.floor((Date.now() - startTime) / 1000);
+  timerEl.textContent = `${String(Math.floor(s / 60)).padStart(2,'0')}:${String(s % 60).padStart(2,'0')}`;
+}, 1000);
+
+/* ─── State ───────────────────────────────────── */
+let audioCtx    = null;
+let workletNode = null;
+let analyser    = null;
+let ws          = null;
+let wsRetry     = 0;
+const MAX_RETRY = 5;
+let isSpeaking  = false;
+let turnEnded   = false;
+let playbackDoneTimer = null;
+const PLAYBACK_DONE_DEBOUNCE_MS = 300;
+
+function schedulePlaybackDone() {
+  if (!isSpeaking || !turnEnded) return;
+  if (playbackDoneTimer) clearTimeout(playbackDoneTimer);
+  playbackDoneTimer = setTimeout(() => {
+    playbackDoneTimer = null;
+    if (!turnEnded) return;
+    setStatus('connected', 'Listening…');
+    turnEnded = false;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'playback_done' }));
+      console.info('[voice-agent] playback_done sent to server');
+    }
+  }, PLAYBACK_DONE_DEBOUNCE_MS);
+}
+
+function cancelPlaybackDoneTimer() {
+  if (playbackDoneTimer) {
+    clearTimeout(playbackDoneTimer);
+    playbackDoneTimer = null;
+  }
+}
+
+/* ─── UI helpers ──────────────────────────────── */
+function setStatus(state, text) {
+  dotEl.className   = `dot ${state}`;
+  statusEl.textContent = text;
+  avatarEl.className = `avatar${state === 'speaking' ? ' speaking' : ''}`;
+  isSpeaking = state === 'speaking';
+}
+
+/* ─── Waveform visualiser (30 fps, lightweight) ── */
+function drawViz() {
+  requestAnimationFrame(drawViz);
+  ctx2d.clearRect(0, 0, 320, 48);
+  if (!analyser) return;
+
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  analyser.getByteFrequencyData(data);
+
+  const barW  = 4;
+  const gap   = 2;
+  const count = Math.floor(320 / (barW + gap));
+  const step  = Math.floor(data.length / count);
+
+  ctx2d.fillStyle = isSpeaking ? '#ffffff' : '#404040';
+
+  for (let i = 0; i < count; i++) {
+    const val = data[i * step] / 255;
+    const h   = Math.max(2, val * 48);
+    ctx2d.fillRect(i * (barW + gap), 48 - h, barW, h);
+  }
+}
+drawViz();
+
+/* ─── AudioContext + AudioWorklet setup ──────── */
+async function initAudio() {
+  audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: 'interactive' });
+
+  // Recall.ai's headless Chrome auto-grants mic; resume immediately
+  if (audioCtx.state === 'suspended') {
+    await audioCtx.resume().catch(() => {});
+  }
+
+  // AudioWorklet for gapless, low-latency PCM playback
+  await audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
+  workletNode = new AudioWorkletNode(audioCtx, 'pcm-player-processor', {
+    numberOfInputs:  0,
+    numberOfOutputs: 1,
+    outputChannelCount: [1],
+  });
+
+  // Monitor buffer level from worklet
+  workletNode.port.onmessage = (e) => {
+    if (e.data.type === 'bufferLevel') {
+      if (e.data.count === 0 && isSpeaking && turnEnded) {
+        // Debounce: streaming gaps between MP3 chunks can briefly empty the buffer.
+        schedulePlaybackDone();
+      }
+      if (e.data.pct > 90) {
+        console.warn(`[voice-agent] Buffer near full: ${e.data.pct}% (${e.data.count}/${e.data.capacity} samples)`);
+      }
+    }
+  };
+
+  // Analyser for waveform visualisation
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 128;
+
+  workletNode.connect(analyser);
+  analyser.connect(audioCtx.destination);   // ← Recall.ai captures this
+}
+
+/* ─── WebSocket connection + reconnect logic ──── */
+async function connect() {
+  if (!PAGE_SESSION_ID) {
+    setStatus('error', 'Missing ?page_session_id= in URL');
+    console.error('[voice-agent] No page_session_id in URL');
+    return;
+  }
+
+  if (!audioCtx) {
+    try {
+      await initAudio();
+    } catch (err) {
+      console.error('[voice-agent] AudioContext init failed:', err);
+      setStatus('error', 'Audio init failed');
+      return;
+    }
+  }
+
+  const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+  const url = `${protocol}://${location.host}${WS_PATH}`;
+  console.info(`[voice-agent] Connecting to ${url} (attempt ${wsRetry + 1})`);
+  setStatus('reconnecting', wsRetry === 0 ? 'Connecting…' : `Reconnecting… (${wsRetry}/${MAX_RETRY})`);
+
+  ws = new WebSocket(url);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    console.info('[voice-agent] WebSocket connected');
+    wsRetry = 0;
+    setStatus('connected', 'Listening…');
+  };
+
+  ws.onmessage = (event) => {
+    if (typeof event.data === 'string') {
+      // Control messages from server
+      try {
+        const msg = JSON.parse(event.data);
+        if (msg.type === 'start_speaking') {
+          turnEnded = false;
+          cancelPlaybackDoneTimer();
+          setStatus('speaking', 'Speaking…');
+          // Do NOT flush here — sentences append seamlessly in the ring buffer.
+        } else if (msg.type === 'end_of_turn') {
+          turnEnded = true;
+        } else if (msg.type === 'flush') {
+          turnEnded = false;
+          cancelPlaybackDoneTimer();
+          // User interrupted mid-speech — discard buffered audio immediately
+          workletNode.port.postMessage({ type: 'flush' });
+          setStatus('connected', 'Listening…');
+          console.info('[voice-agent] Ring buffer flushed (interrupt)');
+        } else if (msg.type === 'stop_speaking') {
+          // Don't reset immediately — let buffer drain naturally
+        } else if (msg.type === 'ping') {
+          ws.send(JSON.stringify({ type: 'pong' }));
+        }
+      } catch (_) { /* not JSON — ignore */ }
+      return;
+    }
+
+    // Binary frame → raw Int16 PCM
+    if (event.data instanceof ArrayBuffer && event.data.byteLength > 0) {
+      cancelPlaybackDoneTimer();
+      setStatus('speaking', 'Speaking…');
+      workletNode.port.postMessage(event.data, [event.data]);   // zero-copy transfer
+    }
+  };
+
+  ws.onerror = (err) => {
+    console.error('[voice-agent] WebSocket error:', err);
+  };
+
+  ws.onclose = (ev) => {
+    console.warn(`[voice-agent] WebSocket closed (code=${ev.code})`);
+    setStatus('reconnecting', 'Disconnected');
+
+    if (wsRetry < MAX_RETRY) {
+      const delay = Math.min(500 * 2 ** wsRetry, 8000);   // 500ms → 8s
+      wsRetry++;
+      console.info(`[voice-agent] Retry in ${delay}ms`);
+      setTimeout(connect, delay);
+    } else {
+      setStatus('error', 'Connection lost — reload to retry');
+      console.error('[voice-agent] Max retries reached');
+    }
+  };
+}
+
+/* ─── Cleanup on unload ────────────────────────── */
+window.addEventListener('beforeunload', () => {
+  if (ws) ws.close(1000, 'page unload');
+  if (workletNode) workletNode.disconnect();
+  if (audioCtx) audioCtx.close();
+});
+
+/* ─── Boot ─────────────────────────────────────── */
+connect();
+</script>
+</body>
+</html>

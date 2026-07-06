@@ -61,7 +61,7 @@ class TTSVoice:
                         play_queue.put(END_SIGNAL)
                         continue
 
-                    if self.state.interrupt_flag:
+                    if self.state.interrupt_flag.is_set():
                         continue
 
                     tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
@@ -91,7 +91,7 @@ class TTSVoice:
                         except Exception:
                             pass
                         # Spoken fallback so the user doesn't get silence.
-                        if not self.state.interrupt_flag:
+                        if not self.state.interrupt_flag.is_set():
                             speak_fallback_windows(sentence)
 
                 except queue.Empty:
@@ -102,7 +102,7 @@ class TTSVoice:
                 try:
                     item = play_queue.get(timeout=1.0)
                     if item == END_SIGNAL:
-                        self.state.is_ai_speaking = False
+                        self.state.is_ai_speaking.clear()
                         # Notify anyone waiting for the end of this spoken turn.
                         try:
                             self.state.tts_turn_done_event.set()
@@ -112,7 +112,7 @@ class TTSVoice:
                         continue
 
                     temp_file = item
-                    if self.state.interrupt_flag:
+                    if self.state.interrupt_flag.is_set():
                         try:
                             os.unlink(temp_file)
                         except Exception:
@@ -124,7 +124,7 @@ class TTSVoice:
                         self.pygame.mixer.music.play()
 
                         while self.pygame.mixer.music.get_busy():
-                            if self.state.interrupt_flag:
+                            if self.state.interrupt_flag.is_set():
                                 self.pygame.mixer.music.stop()
                                 for q in [self.state.tts_queue, play_queue]:
                                     while not q.empty():

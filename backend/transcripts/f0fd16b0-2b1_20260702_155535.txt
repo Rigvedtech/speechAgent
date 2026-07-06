@@ -1,0 +1,21 @@
+# Transcript bot=f0fd16b0-2b16-4fb7-ab0a-62da57c7831a started=20260702_155535
+15:59:05 [AI]: Hello Aman, welcome. I'm Prabhat, your interviewer today. Before we begin, could you please introduce yourself briefly?
+15:59:38 [You]: My name is Aman Kumar Nayak I am from Bhubaneswar, Odisha. Currently I'm residing in Vikriwas in Mumbai. In the last Last 1 year and 2 months I have been working as a junior test engineer. at Equium Technologies Private Limited At Ghatkopar, Mumbai.
+15:59:38 [AI]: Thank you for introducing yourself, Aman. Can you walk me through your process for creating test cases when you're given a Business Requirement Document?
+15:59:54 [AI]: Just checking — are you still there?
+16:00:04 [You]: Wait, I'm M S see. Okay Wait
+16:00:05 [AI]: Sure. The question is: Can you walk me through your process for creating test cases when you're given a Business Requirement Document?
+16:00:40 [AI]: What is a test case ID?
+16:01:03 [You]: Okay So basically, when I had the business This requirement document is provided to me. Initially, I will go through the document documentation process. And follow by following them, I'll create a What a blueprint of the test case model where I have provided a test case ID. And Several what? Columns are available there. but before that And, In the test case ID, I have to mention if I am preparing multiple test cases. I have to provide each and every test case a particular ID that is called a test case ID.
+16:01:04 [AI]: Alright. On your Nuvama Wealth project, you mentioned testing high-frequency trading workflows in NEST Trader. Can you walk me through a specific, complex order execution workflow you tested and what the critical validation points were?
+16:01:53 [AI]: What statements were applied besides quantity and price?
+16:02:06 [You]: Okay, so basically, in the auto management system, When I'm I basically worked in the Next Data Platform. They are I have basically If I'm going to make an order I have to check the each and every details are available in the order management system. And before before making an order. I have to I aman, Prepare what? The quantity, the price. And each and every segment. And The securities also. and applying those. I will make an order And
+16:02:07 [AI]: Got it. When you're analyzing a functional document for testability, what are some common red flags or ambiguities you look for that might cause issues down the line?
+16:03:02 [You]: Okay if I'm analyzing a functional document for testability, I will see each and every details are provided to me. And I will check if there is a negative I'll check the negative testing as well as the positive testing. And within that I will check If If there is any bugs or any issue occurs I'll take that immediately.
+16:03:02 [AI]: Okay. Your resume mentions several types of testing. Could you explain in your own words the difference between smoke testing and sanity testing, and when you would perform each?
+16:03:39 [AI]: What is testar?
+16:03:48 [You]: Okay, so basically when the developer gives gives us the gives the test array build and Initially you have to do the smoke testing. Smoke testing is basically We have to check there. The important features are present and Properly working properly or not And For example
+16:03:49 [AI]: Sure. For the 5Paisa project, you focused on RMS test cases for margin calculation. What was your strategy for testing these calculations? Can you give an example of a specific edge case you tested to ensure the margin logic was correct?
+16:04:20 [You]: Okay, so when I'm validating in the RMS For 5 plus 5 project There I basically do the Risk Management System Operation
+16:04:21 [AI]: Understood. Describe a situation where you and a developer disagreed on the severity or validity of a bug you reported. How did you handle that conversation and come to a resolution?
+16:05:08 [AI]: Thank you for your time today. We'll wrap up here. The team will be in touch with next steps.

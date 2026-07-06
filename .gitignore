@@ -6,5 +6,5 @@ temp.rar
 .DS_Store
 Thumbs.db
 
-temp.zip
-request.inf
+frontend/node_modules
+frontend/dist

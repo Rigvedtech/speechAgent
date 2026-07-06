@@ -1,0 +1,25 @@
+# Transcript bot=54474f7e-7ebe-4aa6-9957-02fe5f17c0ee started=20260625_164454
+16:45:38 [AI]: Namaste Atharv, welcome. Main Prabhat hoon, aaj aapka interviewer. Shuru karne se pehle, kripya apna brief introduction dijiye.
+16:46:42 [You]: Hello Prabhat. My name is Atharv More. I have completed my Bachelor of Information Technology. From Security College, Panvel. I resides at Jubinagar Vashi during my academic career I have gained strong foundation In Data Analyst and Business Analyst I also completed 1 month of data and internship from Kasman. At that time I can solve it experience how to collect raw data material and analyze the data. That's it.
+16:46:42 [AI]: Intro dene ke liye dhanyavaad, Atharv. Do table 'Employees' aur 'Departments' ke liye SQL query kaise likhenge?
+16:46:56 [You]: तो actually I can try with force of the payload
+16:46:58 [AI]: Samajh gaya. Aapne KAS Marine me analysis kiya, 5% improvement fuel efficiency me, steps bataiye
+16:48:12 [You]: Those. Yeah.
+16:48:14 [AI]: Achha. Non-technical audience ko data analysis ka key finding kaise present karenge?
+16:48:20 [You]: At Cast Marine I work with operational and voyage related data set That include voice duration, vessel speed. Fuel consumption, route information and weather condition. First I extract Extract and Clean the data using SQL and Excel. By removing duplicates handling missing values In validating records. Next है Analyze Fuel Consumption Trend. across different routes and vessel speeds. Using Excel Power Tables and Power BI dashboard identified that certain speed ranges are रूट consistently consume more The key inside was That Vessel operating outside of Optimal Speed Range where consuming Significantly more fuel Based on this analysis I recommended maintaining vessel speed within specific speed bands not and Optimizing certain routes. To measure the impact we compare fuel consumption before and after implementing this recommendation. On selected pages. The comparison showed Approximately a 5% improvement in fuel efficiency. That's it.
+16:48:20 [AI]: Got it. Excel me Pivot Tables kab use kiya, kaunsa data tha?
+16:48:30 [AI]: Kya aap mujhe clearly sun pa rahe hain?
+16:48:39 [You]: एक बार आप question repeat कर सकते हो।
+16:48:39 [AI]: Bilkul. Sawal yeh hai: Excel me Pivot Tables kab use kiya, kaunsa data tha?
+16:49:15 [You]: अह I use An Excel pivot टेबल summarizing last data set Automatically. It It pulls data from a tabular list. Where every column has a unique header. To let you drag and drop field to calculate sums, average or counts without writing formulas. हाँ
+16:49:15 [AI]: Samajh gaya. KAS Marine me dashboard ke liye kaunsa tool use kiya, Excel, Power BI ya Tableau?
+16:49:17 [You]: That's it.
+16:49:18 [AI]: Kripya apna jawab continue kijiye.
+16:50:00 [You]: The primary I use Power BI because the primary purpose of Power BI is to transform Row data into meaningful and interactive insight. That support Support Business Decision Making. Power BI allows organization to connect data from multiple source Create dashboards, monitor KPS, Identify Trends and Share Reports With stakeholders. It enables decision makers to track business performance in real time. and make data driven decision more effectively.
+16:50:01 [AI]: Achha. SQL window functions jaise RANK() ya LAG() ka practical business scenario bataiye
+16:50:13 [AI]: Bas check kar raha hoon — kya aap abhi bhi hain?
+16:50:22 [You]: हाँ मैं हूँ
+16:50:23 [AI]: Kripya apna jawab continue kijiye.
+16:50:54 [AI]: Seedha point par aate hain. SQL mein LAG() function ka ek practical business scenario kya hai?
+16:50:58 [You]: That's it.
+16:50:59 [AI]: Aaj ke liye dhanyavaad. Yahan wrap up karte hain. Team aapko next steps ke saath contact karegi.

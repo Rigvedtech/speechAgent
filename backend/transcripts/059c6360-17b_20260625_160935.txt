@@ -1,0 +1,9 @@
+# Transcript bot=059c6360-17bb-46a3-892f-ea665447ecc9 started=20260625_160935
+16:13:47 [AI]: Namaste Atharv, welcome. Main Prabhat hoon, aaj aapka interviewer. Shuru karne se pehle, kripya apna brief introduction dijiye.
+16:14:33 [You]: बरोबर बात मेरा नाम अथर्व मोरे है। I have completed my Bachelor of Information Technology from CKD College Panvel. रिसेट सेट जुइनगर वाशी During my academic career I have been strong foundation in data analyst and business analyst. I have also completed 1 month data analysis internship From कास्मरा at that Set time I can solid experience of how to collect raw data material and analyze the data. Also currently I am completing my data analyst course from Newton School.
+16:14:33 [AI]: Intro dene ke liye dhanyavaad, Atharv. Users aur logins table hai, SQL JOIN kaise use karenge jo users ko find kare jo kabhi login nahi hue?
+16:14:49 [You]: एक बार question repeat कर सकते हो?
+16:14:49 [AI]: Bilkul. Sawal yeh hai: Users aur logins table hai, SQL JOIN kaise use karenge jo users ko find kare jo kabhi login nahi hue?
+16:15:27 [You]: I prefer index match when I need more flexibility. नहीं। For example if the lookup column is not left most Column। और if the table structure change frequently index matches better option The key difference is we look up can only search for the Left To write, whereas index match can look any direction and is generally more flexible and efficient for less large data set.
+16:15:27 [AI]: Samajh gaya. Aapne KAS Marine me 5% fuel efficiency improve kiya, analysis kaise kiya aur data points kya the?
+16:16:29 [You]: I work work with फिर OK Operational Voyage related data set that in Fluids, Forge, Duration, Vessel Speed, Fuel consumption, route information, weather condition. First I extract and clean the data using SQL.
