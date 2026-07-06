@@ -49,6 +49,29 @@
       width: 64px;
       height: 64px;
       display: block;
+      overflow: visible;
+    }
+
+    .avatar .logo .wave-bar {
+      transform-box: fill-box;
+      transform-origin: center bottom;
+    }
+
+    .avatar.speaking .logo .wave-bar {
+      animation: wave-dance 1.35s ease-in-out infinite;
+    }
+
+    .avatar.speaking .logo .wave-bar:nth-child(1) { animation-delay: 0ms; }
+    .avatar.speaking .logo .wave-bar:nth-child(2) { animation-delay: 90ms; }
+    .avatar.speaking .logo .wave-bar:nth-child(3) { animation-delay: 180ms; }
+    .avatar.speaking .logo .wave-bar:nth-child(4) { animation-delay: 270ms; }
+    .avatar.speaking .logo .wave-bar:nth-child(5) { animation-delay: 180ms; }
+    .avatar.speaking .logo .wave-bar:nth-child(6) { animation-delay: 90ms; }
+    .avatar.speaking .logo .wave-bar:nth-child(7) { animation-delay: 0ms; }
+
+    @keyframes wave-dance {
+      0%, 100% { transform: scaleY(0.42); opacity: 0.55; }
+      50%       { transform: scaleY(1); opacity: 1; }
     }
 
     .avatar.speaking::after {
@@ -56,8 +79,13 @@
       position: absolute;
       inset: -8px;
       border-radius: 50%;
-      border: 3px solid #ffffff;
-      animation: pulse 1s ease-out infinite;
+      border: 3px solid rgba(255, 255, 255, 0.85);
+      animation: ring-pulse 1.6s ease-out infinite;
+    }
+
+    @keyframes ring-pulse {
+      0%   { opacity: 0.9; transform: scale(1); }
+      100% { opacity: 0; transform: scale(1.28); }
     }
 
     @keyframes pulse {
@@ -80,18 +108,59 @@
     }
 
     .dot {
+      flex-shrink: 0;
+      transition: background 0.25s ease, width 0.25s ease, height 0.25s ease, border-radius 0.25s ease;
+    }
+
+    /* Listening — green vertical capsule */
+    .dot.connected {
+      width: 4px;
+      height: 12px;
+      border-radius: 9999px;
+      background: #22c55e;
+      box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.45);
+      animation: live-pulse 2s ease-in-out infinite;
+    }
+
+    /* Speaking — blue dot */
+    .dot.speaking {
       width: 10px;
       height: 10px;
       border-radius: 50%;
-      background: #555;
-      transition: background 0.3s;
-      flex-shrink: 0;
+      background: #3b82f6;
+      box-shadow: 0 0 8px rgba(59, 130, 246, 0.55);
+      animation: speak-pulse 1s ease-in-out infinite;
     }
 
-    .dot.connected    { background: #22c55e; }
-    .dot.speaking     { background: #ffffff; animation: blink 0.8s step-start infinite; }
-    .dot.reconnecting { background: #f59e0b; }
-    .dot.error        { background: #ef4444; }
+    .dot.reconnecting {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #f59e0b;
+    }
+
+    .dot.error {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #ef4444;
+    }
+
+    @keyframes live-pulse {
+      0%, 100% {
+        opacity: 1;
+        box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.5);
+      }
+      50% {
+        opacity: 0.88;
+        box-shadow: 0 0 0 6px rgba(34, 197, 94, 0);
+      }
+    }
+
+    @keyframes speak-pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.75; transform: scale(0.92); }
+    }
 
     @keyframes blink { 50% { opacity: 0.3; } }
 
@@ -111,13 +180,13 @@
 <body>
   <div class="avatar" id="avatar">
     <svg class="logo" viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="0" y="14" width="2.5" height="10" rx="1.25" fill="#0a0a0a"/>
-      <rect x="3.5" y="6" width="2.5" height="18" rx="1.25" fill="#0a0a0a"/>
-      <rect x="7" y="10" width="2.5" height="14" rx="1.25" fill="#0a0a0a"/>
-      <rect x="10.5" y="0" width="2.5" height="24" rx="1.25" fill="#0a0a0a"/>
-      <rect x="14" y="10" width="2.5" height="14" rx="1.25" fill="#0a0a0a"/>
-      <rect x="17.5" y="6" width="2.5" height="18" rx="1.25" fill="#0a0a0a"/>
-      <rect x="21" y="14" width="2.5" height="10" rx="1.25" fill="#0a0a0a"/>
+      <rect class="wave-bar" x="0" y="14" width="2.5" height="10" rx="1.25" fill="#0a0a0a"/>
+      <rect class="wave-bar" x="3.5" y="6" width="2.5" height="18" rx="1.25" fill="#0a0a0a"/>
+      <rect class="wave-bar" x="7" y="10" width="2.5" height="14" rx="1.25" fill="#0a0a0a"/>
+      <rect class="wave-bar" x="10.5" y="0" width="2.5" height="24" rx="1.25" fill="#0a0a0a"/>
+      <rect class="wave-bar" x="14" y="10" width="2.5" height="14" rx="1.25" fill="#0a0a0a"/>
+      <rect class="wave-bar" x="17.5" y="6" width="2.5" height="18" rx="1.25" fill="#0a0a0a"/>
+      <rect class="wave-bar" x="21" y="14" width="2.5" height="10" rx="1.25" fill="#0a0a0a"/>
     </svg>
   </div>
   <div class="name" id="botName">AI Interviewer</div>

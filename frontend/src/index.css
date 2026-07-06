@@ -185,6 +185,129 @@
   }
 }
 
+/* Landing page — subtle motion (respect reduced motion) */
+@keyframes wave-bar-dance {
+  0%,
+  100% {
+    transform: scaleY(0.45);
+    opacity: 0.55;
+  }
+
+  50% {
+    transform: scaleY(1);
+    opacity: 1;
+  }
+}
+
+@keyframes landing-ring-breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(1);
+  }
+
+  50% {
+    opacity: 0.7;
+    transform: scale(1.04);
+  }
+}
+
+.reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition:
+    opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform;
+}
+
+.reveal-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.landing-nav-link {
+  position: relative;
+}
+
+.landing-nav-link::after {
+  content: '';
+  position: absolute;
+  left: 0.75rem;
+  right: 0.75rem;
+  bottom: 0.35rem;
+  height: 1px;
+  background: currentColor;
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+  opacity: 0.35;
+}
+
+.landing-nav-link:hover::after {
+  transform: scaleX(1);
+}
+
+.wave-bar {
+  transform-origin: bottom center;
+  animation: wave-bar-dance 1.8s cubic-bezier(0.45, 0, 0.55, 1) infinite;
+}
+
+.landing-ring-pulse {
+  animation: landing-ring-breathe 3s ease-in-out infinite;
+}
+
+.landing-hero-panel {
+  transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+  cursor: pointer;
+}
+
+.landing-step-card {
+  cursor: pointer;
+}
+
+.landing-hero-panel:hover {
+  transform: translateY(-2px);
+}
+
+.faq-content[data-state='open'] {
+  animation: faq-slide-down 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes faq-slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  .wave-bar,
+  .landing-ring-pulse,
+  .live-dot {
+    animation: none;
+  }
+
+  .landing-hero-panel:hover {
+    transform: none;
+  }
+
+  .faq-content[data-state='open'] {
+    animation: none;
+  }
+}
+
 @media print {
   @page {
     size: A4;

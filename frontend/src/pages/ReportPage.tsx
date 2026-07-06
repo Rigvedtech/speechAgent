@@ -85,7 +85,7 @@ export function ReportPage() {
         <Alert className="border-destructive/30">
           Could not load report.
           <Button asChild variant="link" className="ml-2 h-auto p-0">
-            <Link to="/">Dashboard</Link>
+            <Link to="/dashboard">Dashboard</Link>
           </Button>
         </Alert>
       </div>

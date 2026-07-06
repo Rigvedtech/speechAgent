@@ -87,7 +87,7 @@ export function LiveSessionPage() {
     mutationFn: () => leaveMeeting(botId),
     onSuccess: () => {
       setLeaveOpen(false)
-      navigate('/')
+      navigate('/dashboard')
     },
     onError: (err) => {
       if (err instanceof ApiError) {
@@ -180,7 +180,7 @@ export function LiveSessionPage() {
               {cancelMutation.isPending ? 'Cancelling…' : 'Cancel setup'}
             </Button>
             <Button asChild variant="ghost">
-              <Link to="/">Dashboard</Link>
+              <Link to="/dashboard">Dashboard</Link>
             </Button>
           </div>
           {error && (

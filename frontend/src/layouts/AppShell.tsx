@@ -8,13 +8,13 @@ import { useTheme } from '@/hooks/useTheme'
 import { PrabhatBrand } from '@/components/brand/PrabhatBrand'
 
 const navItems = [
-  { to: '/', label: 'Dashboard', icon: LayoutDashboard, end: true },
+  { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/interviews/new', label: 'New Interview', icon: PlusCircle },
   { to: '/reports', label: 'Reports', icon: FileText },
 ]
 
 const pageTitles: Record<string, string> = {
-  '/': 'Overview',
+  '/dashboard': 'Overview',
   '/interviews/new': 'Schedule interview',
   '/reports': 'Reports',
 }
