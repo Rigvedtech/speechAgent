@@ -15,8 +15,6 @@
 \ir 004_documents.sql
 \ir 005_document_extractions.sql
 \ir 006_job_postings.sql
-\ir 007_question_banks.sql
-\ir 008_question_bank_items.sql
 \ir 009_interview_sessions.sql
 \ir 010_interview_configs.sql
 \ir 011_interview_questions.sql

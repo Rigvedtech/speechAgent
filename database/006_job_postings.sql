@@ -8,7 +8,6 @@ CREATE TABLE job_postings (
     jd_text             TEXT,
     jd_document_id      UUID REFERENCES documents (id) ON DELETE SET NULL,
     status              VARCHAR(20) NOT NULL DEFAULT 'open',
-    continue_threshold  NUMERIC(4, 2) NOT NULL DEFAULT 5.50,
     description         TEXT,
     is_active           BOOLEAN NOT NULL DEFAULT TRUE,
     deleted_at          TIMESTAMPTZ,
@@ -38,4 +37,3 @@ ALTER TABLE document_extractions
 CREATE INDEX idx_document_extractions_job_posting ON document_extractions (job_posting_id);
 
 COMMENT ON TABLE job_postings IS 'Recruiter-owned job requisitions; interview sessions link here for title search and reporting.';
-COMMENT ON COLUMN job_postings.continue_threshold IS 'Minimum rolling average to continue interview for this role.';

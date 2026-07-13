@@ -1,10 +1,10 @@
 -- Frozen JD/CV, role, people, and scoring config at interview join (immutable snapshot).
+-- Questions for this interview live in interview_questions (generated per JD+CV each time).
 
 CREATE TABLE interview_configs (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     interview_id            UUID NOT NULL REFERENCES interview_sessions (id) ON DELETE CASCADE,
     job_posting_id          UUID REFERENCES job_postings (id) ON DELETE SET NULL,
-    question_bank_id        UUID REFERENCES question_banks (id) ON DELETE SET NULL,
     document_extraction_id  UUID REFERENCES document_extractions (id) ON DELETE SET NULL,
     job_title               VARCHAR(255) NOT NULL,
     recruiter_name          VARCHAR(255) NOT NULL,
@@ -29,4 +29,5 @@ CREATE TABLE interview_configs (
 CREATE INDEX idx_interview_configs_job_title ON interview_configs (job_title);
 
 COMMENT ON TABLE interview_configs IS 'Immutable snapshot: job title, recruiter, candidate, JD/CV, thresholds at join time.';
-COMMENT ON COLUMN interview_configs.settings_json IS 'TTS/STT language, speaker, thresholds at join time.';
+COMMENT ON COLUMN interview_configs.document_extraction_id IS 'n8n run that produced JD/CV text and generated questions for this interview.';
+COMMENT ON COLUMN interview_configs.settings_json IS 'TTS/STT language, speaker, greeting, thresholds at join time.';

@@ -24,4 +24,5 @@ CREATE INDEX idx_candidates_active ON candidates (created_by, full_name)
     WHERE is_active = TRUE AND deleted_at IS NULL;
 
 COMMENT ON TABLE candidates IS 'Interview candidates scoped to recruiter (created_by) and organization.';
-COMMENT ON COLUMN candidates.cv_text IS 'Latest CV text snapshot; interview_configs stores per-session copy.';
+COMMENT ON COLUMN candidates.cv_text IS
+    'Latest profile CV text; each interview freezes its own copy in interview_configs.cv_text.';

@@ -4,6 +4,7 @@ CREATE TABLE documents (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     organization_id UUID NOT NULL REFERENCES organization (id) ON DELETE CASCADE,
     uploaded_by     UUID REFERENCES users (id) ON DELETE SET NULL,
+    candidate_id    UUID REFERENCES candidates (id) ON DELETE SET NULL,
     document_type   VARCHAR(10) NOT NULL,
     original_filename VARCHAR(512),
     storage_path    TEXT,
@@ -22,5 +23,8 @@ CREATE TABLE documents (
 
 CREATE INDEX idx_documents_organization ON documents (organization_id);
 CREATE INDEX idx_documents_type ON documents (organization_id, document_type);
+CREATE INDEX idx_documents_candidate ON documents (candidate_id)
+    WHERE candidate_id IS NOT NULL;
 
-COMMENT ON TABLE documents IS 'Job descriptions and resumes uploaded before interview setup.';
+COMMENT ON TABLE documents IS 'Uploaded JD/CV files only; typed text can skip this table and go straight into extractions/configs.';
+COMMENT ON COLUMN documents.candidate_id IS 'CV → candidate link; leave NULL for JD files.';

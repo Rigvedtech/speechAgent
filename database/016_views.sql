@@ -15,15 +15,16 @@ SELECT
     c.full_name             AS candidate_name,
     c.email                 AS candidate_email,
     s.meeting_url,
-    s.recall_status,
-    s.phase,
+    s.language_mode,
     s.interview_started,
     s.interview_ended,
+    s.is_active,
     s.stopped_reason        AS session_stopped_reason,
     s.started_at,
     s.completed_at          AS session_completed_at,
     s.created_at            AS session_created_at,
     r.overall_average,
+    r.stage1_average,
     r.questions_scored,
     r.questions_planned,
     r.qualified,
@@ -36,7 +37,7 @@ JOIN candidates c ON c.id = s.candidate_id
 LEFT JOIN interview_reports r ON r.interview_id = s.id;
 
 COMMENT ON VIEW v_interview_overview IS
-    'Recruiter + job title + candidate for session lists and job_title search.';
+    'Interview list row: people, job title, gate score, qualified flag.';
 
 CREATE OR REPLACE VIEW v_job_posting_stats AS
 SELECT
