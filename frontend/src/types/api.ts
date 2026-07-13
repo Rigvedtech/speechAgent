@@ -81,6 +81,13 @@ export interface LeaveResponse {
   message: string
 }
 
+export interface RejoinResponse {
+  success: boolean
+  old_bot_id: string
+  new_bot_id: string
+  message: string
+}
+
 export interface SessionBot {
   bot_id: string
   meeting_url: string

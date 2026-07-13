@@ -32,6 +32,7 @@ import {
   joinFormSchema,
   splitFullName,
   toApiQuestions,
+  type DocumentInputMode,
   type JoinFormValues,
 } from '@/schemas/join-form.schema'
 import type { ApiErrorDetail } from '@/types/api'
@@ -45,6 +46,7 @@ import { JoinWizardSteps } from '@/components/interview/JoinWizardSteps'
 import { QuestionBankEditor } from '@/components/interview/QuestionBankEditor'
 import { FormSectionCard } from '@/components/interview/FormSectionCard'
 import { CompactFileUpload } from '@/components/interview/CompactFileUpload'
+import { InputModeToggle } from '@/components/interview/InputModeToggle'
 import { CvExtractionReview } from '@/components/interview/CvExtractionReview'
 import { JdExtractionReview } from '@/components/interview/JdExtractionReview'
 import { Card, CardContent } from '@/components/ui/card'
@@ -100,8 +102,22 @@ function resolveInitialStep(
   meta: ReturnType<typeof loadInterviewDraftMeta>,
 ): number {
   if (!savedStep || savedStep < 1 || savedStep > TOTAL_STEPS) return 1
-  if (savedStep >= 2 && !meta?.cvStructured && !meta?.cvFileName) return 1
-  if (savedStep >= 4 && !meta?.jdStructured && !meta?.jdFileName) return 3
+  if (
+    savedStep >= 2 &&
+    !meta?.cvStructured &&
+    !meta?.cvFileName &&
+    meta?.cvInputMode !== 'manual'
+  ) {
+    return 1
+  }
+  if (
+    savedStep >= 4 &&
+    !meta?.jdStructured &&
+    !meta?.jdFileName &&
+    meta?.jdInputMode !== 'manual'
+  ) {
+    return 3
+  }
   return savedStep
 }
 
@@ -114,6 +130,12 @@ export function NewInterviewPage() {
   const [error, setError] = useState<string | null>(null)
   const [jdFile, setJdFile] = useState<File | null>(null)
   const [cvFile, setCvFile] = useState<File | null>(null)
+  const [cvInputMode, setCvInputMode] = useState<DocumentInputMode>(
+    savedMeta?.cvInputMode ?? 'upload',
+  )
+  const [jdInputMode, setJdInputMode] = useState<DocumentInputMode>(
+    savedMeta?.jdInputMode ?? 'upload',
+  )
   const [cvStructured, setCvStructured] = useState<CvStructured | null>(
     savedMeta?.cvStructured ?? null,
   )
@@ -157,12 +179,23 @@ export function NewInterviewPage() {
       cvStructured,
       jdStructured,
       questionsGenerated,
+      cvInputMode,
+      jdInputMode,
     })
-  }, [cvFile, jdFile, step, cvStructured, jdStructured, questionsGenerated])
+  }, [
+    cvFile,
+    jdFile,
+    step,
+    cvStructured,
+    jdStructured,
+    questionsGenerated,
+    cvInputMode,
+    jdInputMode,
+  ])
 
-  const step1Ready = isStep1Ready(values, cvFile)
+  const step1Ready = isStep1Ready(values, cvFile, cvInputMode)
   const step1bReady = isStep1bReady(values)
-  const step2Ready = isStep2Ready(values, jdFile)
+  const step2Ready = isStep2Ready(values, jdFile, jdInputMode)
   const step2bReady = isStep2bReady(values)
   const step3Ready = isStep3Ready(values)
   const step4Ready = isStep4Ready(values.meeting_url ?? '')
@@ -334,7 +367,26 @@ export function NewInterviewPage() {
 
     if (step === 1) {
       const ok = await form.trigger(['candidate_first_name', 'candidate_last_name', 'language_mode'])
-      if (!ok || !step1Ready || !cvFile) return
+      if (!ok || !step1Ready) return
+
+      if (cvInputMode === 'manual') {
+        const text = form.getValues('cvText').trim()
+        if (text.length < 50) {
+          setError('Paste at least a short resume (50+ characters) before continuing.')
+          return
+        }
+        setCvStructured({
+          name: formatCandidateDisplayName(
+            form.getValues('candidate_first_name'),
+            form.getValues('candidate_last_name'),
+          ),
+          raw_text: text,
+        })
+        setStep(2)
+        return
+      }
+
+      if (!cvFile) return
       try {
         const result = await extractCvMutation.mutateAsync()
         applyCvResult(result)
@@ -360,7 +412,20 @@ export function NewInterviewPage() {
 
     if (step === 3) {
       const ok = await form.trigger(['position_name'])
-      if (!ok || !step2Ready || !jdFile) return
+      if (!ok || !step2Ready) return
+
+      if (jdInputMode === 'manual') {
+        const text = form.getValues('jdText').trim()
+        if (text.length < 100) {
+          setError('Paste a fuller job description (100+ characters) before continuing.')
+          return
+        }
+        setJdStructured({ jd_summary: text })
+        setStep(4)
+        return
+      }
+
+      if (!jdFile) return
       try {
         const result = await extractJdMutation.mutateAsync()
         applyJdResult(result)
@@ -431,15 +496,17 @@ export function NewInterviewPage() {
     if (step === TOTAL_STEPS) {
       return joinMutation.isPending ? 'Sending bot…' : 'Send bot to meeting'
     }
-    if (step === 1) return 'Extract & continue'
+    if (step === 1) return cvInputMode === 'manual' ? 'Continue' : 'Extract & continue'
     if (step === 2) return 'Continue to job'
-    if (step === 3) return 'Extract & continue'
+    if (step === 3) return jdInputMode === 'manual' ? 'Continue' : 'Extract & continue'
     if (step === 4) return 'Continue to questions'
     if (step === 5) return questionsGenerated ? 'Continue to join' : 'Generate questions'
     return 'Continue'
   }, [
     step,
     questionsGenerated,
+    cvInputMode,
+    jdInputMode,
     extractCvMutation.isPending,
     extractJdMutation.isPending,
     questionsMutation.isPending,
@@ -541,27 +608,76 @@ export function NewInterviewPage() {
                       </RadioGroup>
                     </div>
 
-                    <CompactFileUpload
-                      label="Candidate resume"
-                      file={cvFile}
-                      onFileSelect={setCvFile}
-                      disabled={wizardBusy}
-                      error={!cvFile && form.formState.isSubmitted ? 'Resume file is required' : undefined}
-                    />
-                    {savedMeta?.cvFileName && !cvFile ? (
-                      <p className="text-xs text-muted-foreground">
-                        Previously uploaded: {savedMeta.cvFileName} — re-upload to continue after
-                        refresh.
-                      </p>
-                    ) : null}
+                    <div>
+                      <div className="mb-2 flex items-center justify-between gap-2">
+                        <Label>Candidate resume</Label>
+                      </div>
+                      <InputModeToggle
+                        value={cvInputMode}
+                        disabled={wizardBusy}
+                        onChange={(mode) => {
+                          setCvInputMode(mode)
+                          setError(null)
+                          if (mode === 'manual') {
+                            setCvFile(null)
+                          }
+                        }}
+                      />
+                      <div className="mt-3">
+                        {cvInputMode === 'upload' ? (
+                          <>
+                            <CompactFileUpload
+                              label="Upload resume"
+                              file={cvFile}
+                              onFileSelect={setCvFile}
+                              disabled={wizardBusy}
+                              error={
+                                !cvFile && form.formState.isSubmitted
+                                  ? 'Resume file is required'
+                                  : undefined
+                              }
+                            />
+                            {savedMeta?.cvFileName && !cvFile ? (
+                              <p className="mt-1.5 text-xs text-muted-foreground">
+                                Previously uploaded: {savedMeta.cvFileName} — re-upload to continue
+                                after refresh.
+                              </p>
+                            ) : null}
+                          </>
+                        ) : (
+                          <div>
+                            <Textarea
+                              id="cvText_manual"
+                              className="min-h-[180px] select-text"
+                              placeholder="Paste the full resume text here…"
+                              value={values.cvText}
+                              disabled={wizardBusy}
+                              onChange={(e) =>
+                                form.setValue('cvText', e.target.value, { shouldValidate: true })
+                              }
+                            />
+                            <p className="mt-1.5 text-xs text-muted-foreground">
+                              Tip: paste the complete resume so question generation has enough
+                              context (min. 50 characters).
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </FormSectionCard>
               )}
 
               {step === 2 && (
                 <FormSectionCard
-                  title="Review extracted resume"
-                  description="Structured profile from your upload. Edit the resume text at the bottom before continuing."
+                  title={
+                    cvInputMode === 'manual' ? 'Review resume text' : 'Review extracted resume'
+                  }
+                  description={
+                    cvInputMode === 'manual'
+                      ? 'Confirm the resume text you entered. Edit anything before continuing.'
+                      : 'Structured profile from your upload. Edit the resume text at the bottom before continuing.'
+                  }
                 >
                   <CvExtractionReview
                     structured={cvReviewData}
@@ -576,7 +692,11 @@ export function NewInterviewPage() {
               {step === 3 && (
                 <FormSectionCard
                   title="Job description"
-                  description="Upload the JD and name the role. We will extract details on continue."
+                  description={
+                    jdInputMode === 'manual'
+                      ? 'Name the role and paste the job description text.'
+                      : 'Upload the JD and name the role. We will extract details on continue.'
+                  }
                 >
                   <div className="space-y-4">
                     <div>
@@ -594,25 +714,73 @@ export function NewInterviewPage() {
                       )}
                     </div>
 
-                    <CompactFileUpload
-                      label="Job description document"
-                      file={jdFile}
-                      onFileSelect={setJdFile}
-                      disabled={wizardBusy}
-                    />
-                    {savedMeta?.jdFileName && !jdFile ? (
-                      <p className="text-xs text-muted-foreground">
-                        Previously uploaded: {savedMeta.jdFileName} — re-upload to extract again.
-                      </p>
-                    ) : null}
+                    <div>
+                      <div className="mb-2">
+                        <Label>Job description</Label>
+                      </div>
+                      <InputModeToggle
+                        value={jdInputMode}
+                        disabled={wizardBusy}
+                        onChange={(mode) => {
+                          setJdInputMode(mode)
+                          setError(null)
+                          if (mode === 'manual') {
+                            setJdFile(null)
+                          }
+                        }}
+                      />
+                      <div className="mt-3">
+                        {jdInputMode === 'upload' ? (
+                          <>
+                            <CompactFileUpload
+                              label="Upload job description"
+                              file={jdFile}
+                              onFileSelect={setJdFile}
+                              disabled={wizardBusy}
+                            />
+                            {savedMeta?.jdFileName && !jdFile ? (
+                              <p className="mt-1.5 text-xs text-muted-foreground">
+                                Previously uploaded: {savedMeta.jdFileName} — re-upload to extract
+                                again.
+                              </p>
+                            ) : null}
+                          </>
+                        ) : (
+                          <div>
+                            <Textarea
+                              id="jdText_manual"
+                              className="min-h-[180px] select-text"
+                              placeholder="Paste the full job description here…"
+                              value={values.jdText}
+                              disabled={wizardBusy}
+                              onChange={(e) =>
+                                form.setValue('jdText', e.target.value, { shouldValidate: true })
+                              }
+                            />
+                            <p className="mt-1.5 text-xs text-muted-foreground">
+                              Tip: include responsibilities and must-have skills (min. 100
+                              characters).
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
                 </FormSectionCard>
               )}
 
               {step === 4 && (
                 <FormSectionCard
-                  title="Review extracted job description"
-                  description="Structured role details from your upload. Edit the job text at the bottom before continuing."
+                  title={
+                    jdInputMode === 'manual'
+                      ? 'Review job description text'
+                      : 'Review extracted job description'
+                  }
+                  description={
+                    jdInputMode === 'manual'
+                      ? 'Confirm the job text you entered. Edit anything before continuing.'
+                      : 'Structured role details from your upload. Edit the job text at the bottom before continuing.'
+                  }
                 >
                   <JdExtractionReview
                     structured={jdReviewData}

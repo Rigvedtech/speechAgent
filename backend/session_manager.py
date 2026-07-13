@@ -1208,6 +1208,100 @@ class SessionManager:
         logger.info(f"Session {bot_id} ended and cleaned up")
         return recall_removed
 
+    def rejoin_bot(self, old_bot_id: str, bot_config) -> str:
+        """
+        Rejoin a bot to the meeting with a new bot instance while preserving session.
+        Used when bot is denied admission - creates new bot, keeps same session state.
+        
+        Args:
+            old_bot_id: Current bot ID to replace
+            bot_config: BotConfig for creating new bot
+            
+        Returns:
+            New bot ID
+            
+        Raises:
+            ValueError: If session not found or interview already started
+        """
+        with self.sessions_lock:
+            old_session = self.sessions.get(old_bot_id)
+            if not old_session:
+                raise ValueError(f"Session not found for bot {old_bot_id}")
+            
+            if old_session.state.is_started.is_set():
+                raise ValueError("Cannot rejoin - interview already started")
+            
+            meeting_url = old_session.meeting_url
+            meeting_key = normalize_meeting_url(meeting_url)
+            
+            # Preserve interview configuration
+            orchestrator = old_session.state.interview_orchestrator
+            greeting_message = old_session.pending_greeting_message
+            scheduled_candidate_name = old_session.scheduled_candidate_name
+            use_webpage = old_session.use_webpage
+            
+            # Mark as CREATING to prevent race conditions
+            self.meeting_to_bot[meeting_key] = "CREATING"
+        
+        try:
+            # Remove old bot from Recall (but don't cleanup local session yet)
+            logger.info(f"Rejoining: Removing old bot {old_bot_id[:8]} from Recall")
+            try:
+                self.recall_service.remove_bot(old_bot_id)
+            except Exception as e:
+                logger.warning(f"Could not remove old bot {old_bot_id[:8]}: {e}")
+            
+            # Create new bot
+            logger.info(f"Rejoining: Creating new bot for {meeting_url[:50]}...")
+            bot_data = self.recall_service.create_bot(bot_config)
+            new_bot_id = bot_data["id"]
+            logger.info(f"Rejoining: New bot created {new_bot_id[:8]}")
+            
+            # Create new session with same configuration
+            self.create_session(
+                new_bot_id,
+                meeting_url,
+                bot_data=bot_data,
+                use_webpage=use_webpage,
+            )
+            
+            new_session = self.sessions.get(new_bot_id)
+            if new_session and orchestrator:
+                # Restore interview configuration
+                new_session.state.interview_orchestrator = orchestrator
+                new_session.pending_greeting_message = greeting_message
+                new_session.scheduled_candidate_name = scheduled_candidate_name
+                orchestrator.bot_id = new_bot_id
+                logger.info(
+                    f"Rejoining: Interview config restored for {new_bot_id[:8]} "
+                    f"(candidate={orchestrator.candidate_name}, "
+                    f"questions={len(orchestrator.planned_questions)})"
+                )
+            
+            # Cleanup old session (without calling Recall delete again)
+            with self.sessions_lock:
+                if old_bot_id in self.sessions:
+                    old_session.is_active = False
+                    old_session.state.is_running = False
+                    self.cancel_silence_check(old_session)
+                    close_session(old_bot_id)
+                    del self.sessions[old_bot_id]
+                    logger.info(f"Rejoining: Old session {old_bot_id[:8]} cleaned up")
+            
+            logger.info(
+                f"Rejoin successful: {old_bot_id[:8]} → {new_bot_id[:8]} "
+                f"for {meeting_url[:50]}..."
+            )
+            return new_bot_id
+            
+        except Exception as e:
+            # Restore old mapping on failure
+            with self.sessions_lock:
+                if self.meeting_to_bot.get(meeting_key) == "CREATING":
+                    self.meeting_to_bot[meeting_key] = old_bot_id
+            logger.error(f"Rejoin failed: {e}")
+            raise
+
     def cleanup_stale_lobby_bots(self, max_age_sec: float):
         """Remove bots stuck in lobby before interview start (never admitted / abandoned)."""
         now = time.time()

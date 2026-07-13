@@ -985,6 +985,86 @@ async def cancel_interview_setup(bot_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/rejoin/{bot_id}")
+async def rejoin_bot_to_lobby(bot_id: str):
+    """
+    Rejoin bot to meeting lobby after denial.
+    Creates new bot instance while preserving session state (CV, JD, questions).
+    
+    Path Parameter:
+    - bot_id: Current bot ID to rejoin
+    
+    Response:
+    {
+        "success": true,
+        "old_bot_id": "abc-123",
+        "new_bot_id": "def-456",
+        "message": "Bot rejoined to lobby"
+    }
+    """
+    try:
+        session = session_manager.get_session(bot_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Session not found for bot {bot_id}")
+        
+        if session.state.is_started.is_set():
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot rejoin - interview already started"
+            )
+        
+        meeting_url = session.meeting_url
+        
+        # Build bot config (same as original join)
+        import uuid as _uuid
+        public_base = os.getenv("PUBLIC_NGROK_URL", "").rstrip("/")
+        page_session_id = str(_uuid.uuid4())
+        output_media_page_url: Optional[str] = None
+        
+        if app_config.RECALL_USE_OUTPUT_MEDIA and public_base:
+            import urllib.parse
+            output_media_page_url = (
+                f"{public_base}/voice-agent"
+                f"?page_session_id={page_session_id}"
+                f"&name={urllib.parse.quote(BOT_NAME)}"
+            )
+        
+        config = BotConfig(
+            meeting_url=meeting_url,
+            bot_name=BOT_NAME,
+            websocket_url=PUBLIC_WEBSOCKET_URL,
+            use_output_media=app_config.RECALL_USE_OUTPUT_MEDIA,
+            output_media_url=output_media_page_url,
+        )
+        
+        # Rejoin bot (creates new bot, preserves session)
+        logger.info(f"Rejoining bot {bot_id[:8]} to lobby for {meeting_url[:50]}...")
+        new_bot_id = session_manager.rejoin_bot(bot_id, config)
+        
+        # Register new page session if using output media
+        if output_media_page_url:
+            ws_hub.register_page_session(page_session_id, new_bot_id)
+        
+        logger.info(
+            f"Bot rejoined successfully: {bot_id[:8]} → {new_bot_id[:8]}"
+        )
+        
+        return {
+            "success": True,
+            "old_bot_id": bot_id,
+            "new_bot_id": new_bot_id,
+            "message": "Bot rejoined to lobby - admit from Teams to continue",
+        }
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to rejoin bot: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.delete("/api/leave/{bot_id}", response_model=LeaveResponse)
 async def leave_meeting(bot_id: str):
     """

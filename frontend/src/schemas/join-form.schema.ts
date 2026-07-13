@@ -64,15 +64,26 @@ export const step1Fields = ['candidate_first_name', 'candidate_last_name', 'lang
 export const step2Fields = ['position_name'] as const
 export const step4Fields = ['meeting_url', 'bot_name'] as const
 
+export type DocumentInputMode = 'upload' | 'manual'
+
 export function isStep1Ready(
-  values: Pick<JoinFormValues, 'candidate_first_name'>,
+  values: Pick<JoinFormValues, 'candidate_first_name' | 'cvText'>,
   cvFile: File | null,
+  mode: DocumentInputMode = 'upload',
 ) {
-  return values.candidate_first_name.trim().length >= 2 && cvFile !== null
+  if (values.candidate_first_name.trim().length < 2) return false
+  if (mode === 'manual') return values.cvText.trim().length >= 50
+  return cvFile !== null
 }
 
-export function isStep2Ready(values: Pick<JoinFormValues, 'position_name'>, jdFile: File | null) {
-  return values.position_name.trim().length >= 2 && jdFile !== null
+export function isStep2Ready(
+  values: Pick<JoinFormValues, 'position_name' | 'jdText'>,
+  jdFile: File | null,
+  mode: DocumentInputMode = 'upload',
+) {
+  if (values.position_name.trim().length < 2) return false
+  if (mode === 'manual') return values.jdText.trim().length >= 100
+  return jdFile !== null
 }
 
 export function isStep1bReady(values: Pick<JoinFormValues, 'cvText'>) {

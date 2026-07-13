@@ -4,6 +4,7 @@ import type {
   JoinMeetingRequest,
   JoinMeetingResponse,
   LeaveResponse,
+  RejoinResponse,
   StartInterviewResponse,
   StatusResponse,
   SessionsResponse,
@@ -35,6 +36,10 @@ export function startInterview(botId: string, body: Record<string, never> = {}) 
 
 export function leaveMeeting(botId: string) {
   return request<LeaveResponse>(`/api/leave/${botId}`, { method: 'DELETE' })
+}
+
+export function rejoinBot(botId: string) {
+  return request<RejoinResponse>(`/api/rejoin/${botId}`, { method: 'POST' })
 }
 
 export function cancelInterviewSetup(botId: string) {

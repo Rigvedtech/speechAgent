@@ -1,4 +1,8 @@
-import { splitFullName, type JoinFormValues } from '@/schemas/join-form.schema'
+import {
+  splitFullName,
+  type DocumentInputMode,
+  type JoinFormValues,
+} from '@/schemas/join-form.schema'
 
 import type { CvStructured, JdStructured } from '@/types/extraction'
 
@@ -12,6 +16,8 @@ export interface InterviewDraftMeta {
   cvStructured?: CvStructured | null
   jdStructured?: JdStructured | null
   questionsGenerated?: boolean
+  cvInputMode?: DocumentInputMode
+  jdInputMode?: DocumentInputMode
 }
 
 const emptyDraft: JoinFormValues = {
