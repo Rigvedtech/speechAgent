@@ -39,12 +39,16 @@ import ws_hub
 
 load_dotenv()
 
-# Setup logging
+# Setup logging (console + full file under backend/logs/)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+from file_logging import setup_file_logging
+
+_run_log = setup_file_logging(prefix="api_server")
 logger = logging.getLogger(__name__)
+logger.info("Server log file: %s", _run_log)
 
 # Initialize FastAPI
 app = FastAPI(title="Recall.ai Bot API", version="1.0.0")

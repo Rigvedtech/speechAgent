@@ -20,9 +20,10 @@ from config import (
     STT_FALLBACK_ENABLED,
     USER_BARGE_IN_ENABLED,
     BOT_INTERRUPT_ENABLED,
-    BOT_INTERRUPT_MIN_SPEECH_SEC,
-    BOT_INTERRUPT_CHECK_INTERVAL_SEC,
     BOT_INTERRUPT_MIN_PARTIAL_SEC,
+    ANSWER_DEPTH_CHECK_WINDOW_SEC,
+    ANSWER_TOPIC_POLL_WINDOW_SEC,
+    MID_ANSWER_BOT_COOLDOWN_SEC,
     SARVAM_LOCAL_SILENCE_SEC,
     WHISPER_LOCAL_SILENCE_SEC,
     SARVAM_QUALITY_MIN_UTTERANCE_SEC,
@@ -38,12 +39,20 @@ from config import (
     INTRO_MIN_CHARS,
     INTRO_MIN_SPEECH_SEC,
     INTRO_MERGE_WINDOW_SEC,
+    CORE_ANSWER_SOFT_SILENCE_SEC,
     CORE_ANSWER_MERGE_WINDOW_SEC,
     CORE_LONG_ANSWER_SPEECH_SEC,
     CORE_LONG_ANSWER_SILENCE_SEC,
     CORE_ANSWER_MAX_HOLD_SEC,
+    CLARIFIER_REPLY_SILENCE_SEC,
     TURN_FLUSH_GUARD_MIN_CHARS,
     TURN_FLUSH_DEFER_SEC,
+    STREAM_STT_ENABLED,
+    STREAM_STT_FINALIZE_SEC,
+    STREAM_STT_MIN_CHARS,
+    INCOMPLETE_MERGE_WINDOW_SEC,
+    SHORT_UTTERANCE_MAX_SEC,
+    SHORT_UTTERANCE_SILENCE_SEC,
     sarvam_collect_deadline_sec,
     sarvam_transcribe_timeout_sec,
 )
@@ -106,6 +115,14 @@ class STTEngine:
         self._pending_sarvam_failed: bool = False
         self._pending_core_deadline: float = 0.0
         self._turn_q_index: int = -1
+        # Dedicated flush timer — must not depend on next mic chunk (fixes 40s+ silence deadlock)
+        self._flush_timer: Optional[threading.Timer] = None
+        self._flush_lock = threading.Lock()
+        self._pending_commit_lock = threading.Lock()
+        # Live Sarvam streaming (transcript builds while speaking)
+        self._live_stream_on = False
+        self._live_stream_pcm_buf = np.empty(0, dtype=np.float32)
+        self._live_stream_chunk_samples = int(SAMPLE_RATE * 0.1)  # 100ms
 
         print(f"Loading Silero VAD on {DEVICE}...")
         self.vad_model, _ = torch.hub.load(
@@ -142,6 +159,7 @@ class STTEngine:
             return self._whisper_model
 
     def _reset_recording_state(self):
+        self._abort_live_stream()
         self.audio_buffer = []
         self.is_recording = False
         self.state.candidate_recording = False
@@ -161,7 +179,10 @@ class STTEngine:
             "check_num": self._check_num,
             "prev_partial": self._prev_check_partial,
             "last_speech_time": self.last_speech_time,
+            "live_text": self._get_live_partial_text(),
         }
+        # Pause live stream while bot speaks (will restart on restore)
+        self._abort_live_stream()
 
     def restore_answer_in_progress(self) -> None:
         """Restore answer buffer after mid-answer bot speech so the candidate can continue."""
@@ -174,7 +195,21 @@ class STTEngine:
         self._check_num = snap["check_num"]
         self._prev_check_partial = snap["prev_partial"]
         self.last_speech_time = snap.get("last_speech_time", 0.0)
+        saved_live = (snap.get("live_text") or "").strip()
         self._preserved_snapshot = None
+        # Resume live STT for continued answer after mid-answer bot speech
+        if self._stream_stt_enabled() and not self._live_stream_on:
+            self._start_live_stream()
+            # Seed prior live text so topic/final merge keeps earlier speech
+            if saved_live and self.sarvam_engine is not None:
+                try:
+                    with self.sarvam_engine._live_lock:
+                        if self.sarvam_engine._live_active and not self.sarvam_engine._live_parts:
+                            self.sarvam_engine._live_parts = [saved_live]
+                except Exception:
+                    pass
+            if saved_live:
+                self._prev_check_partial = saved_live
 
     def _orch_awaiting_clarifier(self) -> bool:
         orch = getattr(self.state, "interview_orchestrator", None)
@@ -235,8 +270,11 @@ class STTEngine:
             return True
         return False
 
-    def _merge_window_sec(self, hold_reason: str = "") -> float:
+    def _merge_window_sec(self, hold_reason: str = "", text: str = "") -> float:
         if hold_reason == "core_answer_in_progress":
+            # Incomplete mid-thought needs a longer listen-back than normal soft merge
+            if text and detect_incomplete_answer(text):
+                return float(INCOMPLETE_MERGE_WINDOW_SEC)
             return CORE_ANSWER_MERGE_WINDOW_SEC
         if self._in_await_intro_phase():
             return INTRO_MERGE_WINDOW_SEC
@@ -283,16 +321,23 @@ class STTEngine:
         return False
 
     def _active_endpoint_silence_for_recording(self) -> float:
-        """Use a longer pause threshold during long CORE answers to avoid splitting."""
+        """Soft silence endpoint — ~2s pause ends utterance capture (merge may still apply)."""
+        if self._orch_awaiting_clarifier():
+            return CLARIFIER_REPLY_SILENCE_SEC
         endpoint = self.adaptive_silence_duration
         if not self.is_recording or not self._recording_started_at:
             return endpoint
         if not self._in_core_phase():
             return endpoint
-        speech_sec = time.monotonic() - self._recording_started_at
-        if speech_sec >= CORE_LONG_ANSWER_SPEECH_SEC:
+        # Short utterances (repeat/rephrase): faster endpoint so total stays ~4s
+        speech_so_far = time.monotonic() - self._recording_started_at
+        if speech_so_far <= float(SHORT_UTTERANCE_MAX_SEC):
+            return min(float(SHORT_UTTERANCE_SILENCE_SEC), float(CORE_ANSWER_SOFT_SILENCE_SEC))
+        # Production: soft silence for CORE answers (merge window handles continuation)
+        try:
+            return max(endpoint, float(CORE_ANSWER_SOFT_SILENCE_SEC))
+        except Exception:
             return max(endpoint, CORE_LONG_ANSWER_SILENCE_SEC)
-        return endpoint
 
     def _sync_turn_question_index(self) -> None:
         """Drop held turns when the orchestrator advances to a new question."""
@@ -332,6 +377,47 @@ class STTEngine:
             return True
         return False
 
+    def _cancel_flush_timer(self) -> None:
+        with self._flush_lock:
+            t = self._flush_timer
+            self._flush_timer = None
+        if t is not None:
+            try:
+                t.cancel()
+            except Exception:
+                pass
+
+    def _schedule_flush_timer(self, delay_sec: float) -> None:
+        """Wake flush when merge window expires — even if candidate stays silent."""
+        self._cancel_flush_timer()
+        wait = max(0.05, float(delay_sec))
+
+        def _on_fire() -> None:
+            try:
+                with self._flush_lock:
+                    self._flush_timer = None
+                if self._pending_audio is None:
+                    return
+                if time.monotonic() < self._pending_until:
+                    # Extended (e.g. defer) — reschedule remainder
+                    remain = self._pending_until - time.monotonic()
+                    if remain > 0.05:
+                        self._schedule_flush_timer(remain)
+                        return
+                logger.info(
+                    "[TURN FLUSH TIMER] Q%s firing after silence — committing held turn",
+                    self._current_q_label(),
+                )
+                self._discard_expired_pending(force=True)
+            except Exception as ex:
+                logger.warning("[TURN FLUSH TIMER] failed: %s", ex)
+
+        timer = threading.Timer(wait, _on_fire)
+        timer.daemon = True
+        with self._flush_lock:
+            self._flush_timer = timer
+        timer.start()
+
     def _defer_pending_flush(self, pending_text: str, pending_sec: float, reason: str) -> None:
         logger.warning(
             "[TURN DEFER] Q%s %s — active answer in progress (audio=%.1fs chars=%d text=%r)",
@@ -342,8 +428,10 @@ class STTEngine:
             pending_text[:60],
         )
         self._pending_until = time.monotonic() + TURN_FLUSH_DEFER_SEC
+        self._schedule_flush_timer(TURN_FLUSH_DEFER_SEC)
 
     def _clear_pending_turn(self) -> None:
+        self._cancel_flush_timer()
         self._pending_audio = None
         self._pending_text = ""
         self._pending_until = 0.0
@@ -362,8 +450,27 @@ class STTEngine:
             return True
         return False
 
-    def _discard_expired_pending(self) -> None:
-        if self._pending_audio is None or time.monotonic() < self._pending_until:
+    def _should_flush_held_turn(self, text: str, audio_sec: float) -> bool:
+        """Commit held text on expiry instead of silently dropping substantive answers."""
+        stripped = (text or "").strip()
+        if not stripped:
+            return False
+        if should_commit_short_turn_immediately(stripped):
+            return True
+        if len(stripped) >= TURN_MERGE_MIN_CHARS:
+            return True
+        if audio_sec >= TURN_MERGE_MIN_AUDIO_SEC and len(stripped) >= 3:
+            return True
+        return False
+
+    def _discard_expired_pending(self, force: bool = False) -> None:
+        with self._pending_commit_lock:
+            self._discard_expired_pending_locked(force=force)
+
+    def _discard_expired_pending_locked(self, force: bool = False) -> None:
+        if self._pending_audio is None:
+            return
+        if not force and time.monotonic() < self._pending_until:
             return
         pending_text = (self._pending_text or "").strip()
         pending_sec = len(self._pending_audio) / SAMPLE_RATE
@@ -373,6 +480,15 @@ class STTEngine:
             should_flush = self._should_flush_held_core_turn(pending_text, pending_sec)
         else:
             should_flush = self._should_flush_held_turn(pending_text, pending_sec)
+
+        # Production hard-end: after merge window, always commit substantive CORE holds
+        if (
+            force
+            and self._in_core_phase()
+            and pending_text
+            and len(pending_text) >= 12
+        ):
+            should_flush = True
 
         if should_flush and self._substantive_answer_in_progress():
             if len(pending_text) < TURN_FLUSH_GUARD_MIN_CHARS:
@@ -402,19 +518,6 @@ class STTEngine:
             )
         self._clear_pending_turn()
 
-    def _should_flush_held_turn(self, text: str, audio_sec: float) -> bool:
-        """Commit held text on expiry instead of silently dropping substantive answers."""
-        stripped = (text or "").strip()
-        if not stripped:
-            return False
-        if should_commit_short_turn_immediately(stripped):
-            return True
-        if len(stripped) >= TURN_MERGE_MIN_CHARS:
-            return True
-        if audio_sec >= TURN_MERGE_MIN_AUDIO_SEC and len(stripped) >= 3:
-            return True
-        return False
-
     def _should_hold_turn(
         self,
         text: str,
@@ -434,9 +537,11 @@ class STTEngine:
         if should_commit_short_turn_immediately(stripped):
             return False, ""
 
+        # Done phrase → hard end immediately (no merge hold)
+        if self._contains_answer_done_marker(stripped):
+            return False, ""
+
         if self._in_core_phase() and self._core_answer_in_progress():
-            if self._contains_answer_done_marker(stripped):
-                return False, ""
             if (
                 self._pending_core_deadline > 0
                 and time.monotonic() >= self._pending_core_deadline
@@ -446,14 +551,31 @@ class STTEngine:
                     len(stripped),
                 )
                 return False, ""
+            # Incomplete / mid-thought → always hold (do not advance to next Q)
             if detect_incomplete_answer(stripped):
                 return True, "core_answer_in_progress"
-            word_count = len(stripped.split())
-            if word_count < MIN_ANSWER_WORDS:
-                return True, "core_answer_in_progress"
-            return False, ""
+            # Live path: complete answers commit after soft silence (keep ~2.5s latency)
+            if self._stream_stt_enabled():
+                words = len(stripped.split())
+                if words >= max(MIN_ANSWER_WORDS * 2, 16) or self._contains_answer_done_marker(stripped):
+                    return False, ""
+            # Soft end → brief hold so a short pause can resume into same answer
+            return True, "core_answer_in_progress"
 
-        # Substantive Sarvam finals must reach scoring — never hold.
+        # First soft-ended CORE utterance
+        if self._in_core_phase() and stripped:
+            # Incomplete mid-thought → merge hold (prevents Q2 cut → Q3 jump)
+            if detect_incomplete_answer(stripped):
+                return True, "core_answer_in_progress"
+            words = len(stripped.split())
+            if len(stripped) >= TURN_MERGE_MIN_CHARS or words >= MIN_ANSWER_WORDS:
+                # Live STT: only skip merge when answer looks finished enough
+                if self._stream_stt_enabled():
+                    if words >= max(MIN_ANSWER_WORDS * 2, 16) or self._contains_answer_done_marker(stripped):
+                        return False, ""
+                    return True, "core_answer_in_progress"
+                return True, "core_answer_in_progress"
+
         if stripped and len(stripped) >= TURN_MERGE_MIN_CHARS and not sarvam_failed:
             return False, ""
 
@@ -510,6 +632,9 @@ class STTEngine:
         else:
             self.state.last_candidate_speech_at = time.monotonic()
             self.state.pending_presence_check = False
+        if orch is not None:
+            if not orch.awaiting_clarifier_reply:
+                orch.mark_answer_turn_committed()
         self.state.llm_queue.put(normalized)
         logger.info(
             "[TURN COMMIT] queued %d chars for LLM/scoring",
@@ -669,6 +794,118 @@ class STTEngine:
         except queue.Full:
             print("[STT] Warning: Audio queue full, dropping chunk", file=sys.stderr)
 
+
+    def _stream_stt_enabled(self) -> bool:
+        return bool(STREAM_STT_ENABLED) and self.sarvam_engine is not None
+
+    def _start_live_stream(self) -> None:
+        if not self._stream_stt_enabled():
+            self._live_stream_on = False
+            return
+        try:
+            ok = self.sarvam_engine.start_live_utterance_sync()
+            self._live_stream_on = bool(ok)
+            self._live_stream_pcm_buf = np.empty(0, dtype=np.float32)
+            if ok:
+                logger.info("[STREAM STT] live utterance started Q%s", self._current_q_label())
+            else:
+                logger.warning("[STREAM STT] failed to start — will use batch fallback")
+        except Exception as ex:
+            self._live_stream_on = False
+            logger.warning("[STREAM STT] start error: %s", ex)
+
+    def _abort_live_stream(self) -> None:
+        if not self._live_stream_on and not (
+            self.sarvam_engine is not None and getattr(self.sarvam_engine, "is_live_active", lambda: False)()
+        ):
+            self._live_stream_pcm_buf = np.empty(0, dtype=np.float32)
+            self._live_stream_on = False
+            return
+        self._live_stream_on = False
+        self._live_stream_pcm_buf = np.empty(0, dtype=np.float32)
+        try:
+            if self.sarvam_engine is not None:
+                self.sarvam_engine.abort_live_utterance_sync()
+        except Exception:
+            pass
+
+    def _feed_live_stream(self, process_block: np.ndarray) -> None:
+        if not self._live_stream_on or self.sarvam_engine is None:
+            return
+        block = process_block.flatten().astype(np.float32)
+        self._live_stream_pcm_buf = np.concatenate([self._live_stream_pcm_buf, block])
+        while len(self._live_stream_pcm_buf) >= self._live_stream_chunk_samples:
+            chunk = self._live_stream_pcm_buf[: self._live_stream_chunk_samples]
+            self._live_stream_pcm_buf = self._live_stream_pcm_buf[self._live_stream_chunk_samples :]
+            try:
+                self.sarvam_engine.stream_audio_sync(chunk, sample_rate=SAMPLE_RATE)
+            except Exception:
+                break
+
+    def _get_live_partial_text(self) -> str:
+        if self.sarvam_engine is None:
+            return ""
+        try:
+            return (self.sarvam_engine.get_live_transcript() or "").strip()
+        except Exception:
+            return ""
+
+    def _finalize_live_or_batch(
+        self, audio_data: np.ndarray, utterance_duration: float
+    ) -> tuple:
+        """Prefer live transcript; fall back to full batch only if needed."""
+        t0 = time.monotonic()
+        live_text = ""
+        used_live = False
+        if self._live_stream_on and self.sarvam_engine is not None:
+            # Flush any remaining PCM
+            if len(self._live_stream_pcm_buf) > 0:
+                try:
+                    self.sarvam_engine.stream_audio_sync(
+                        self._live_stream_pcm_buf, sample_rate=SAMPLE_RATE
+                    )
+                except Exception:
+                    pass
+                self._live_stream_pcm_buf = np.empty(0, dtype=np.float32)
+            try:
+                live_text = (
+                    self.sarvam_engine.finalize_live_utterance_sync(
+                        collect_deadline=float(STREAM_STT_FINALIZE_SEC)
+                    )
+                    or ""
+                ).strip()
+            except Exception as ex:
+                logger.warning("[STREAM STT] finalize error: %s", ex)
+                live_text = self._get_live_partial_text()
+            self._live_stream_on = False
+            used_live = len(live_text) >= int(STREAM_STT_MIN_CHARS)
+            logger.info(
+                "[STREAM STT] finalize Q%s live_chars=%d used_live=%s finalize_ms=%.0f audio=%.1fs",
+                self._current_q_label(),
+                len(live_text),
+                used_live,
+                (time.monotonic() - t0) * 1000,
+                utterance_duration,
+            )
+            if used_live:
+                print(f"\n[SARVAM STT LIVE] Transcript: {live_text}")
+                return live_text, False
+
+        # Batch fallback (short answers / live failed / stream disabled)
+        self._abort_live_stream()
+        full_text, sarvam_failed = self._transcribe_with_fallback(
+            audio_data, utterance_duration=utterance_duration
+        )
+        logger.info(
+            "[STREAM STT] batch fallback Q%s chars=%d failed=%s total_ms=%.0f audio=%.1fs",
+            self._current_q_label(),
+            len((full_text or "").strip()),
+            sarvam_failed,
+            (time.monotonic() - t0) * 1000,
+            utterance_duration,
+        )
+        return full_text, sarvam_failed
+
     def _transcribe_whisper_only(self, audio_data: np.ndarray) -> str:
         """
         Whisper-only transcription for bot-interrupt partial checks.
@@ -699,17 +936,39 @@ class STTEngine:
             print(f"\n[STT] Whisper partial check error: {e}", file=sys.stderr)
             return ""
 
+    def _maybe_force_answer_time_cap(self) -> bool:
+        """Hard-stop recording when answer exceeds ANSWER_MAX_TOTAL_SEC (7 min cap)."""
+        if not self.is_recording:
+            return False
+        orch = getattr(self.state, "interview_orchestrator", None)
+        if orch is None:
+            return False
+        from interview_engine import InterviewPhase
+        if orch.phase != InterviewPhase.CORE:
+            return False
+        speech_sec = orch.get_answer_speech_sec()
+        if speech_sec <= 0 and self._recording_started_at > 0:
+            speech_sec = time.monotonic() - self._recording_started_at
+        if not orch.answer_time_cap_reached(speech_sec):
+            return False
+        logger.info(
+            "[ANSWER CAP] Q%s %.0fs hard cap reached — finalizing utterance",
+            self._current_q_label(),
+            speech_sec,
+        )
+        self.transcribe_buffer()
+        self.is_recording = False
+        self.last_speech_time = 0.0
+        self._recording_started_at = 0.0
+        return True
+
     def _maybe_check_bot_interrupt(self):
         """
-        While user is still speaking, peek at partial audio via Whisper only
-        and push ProgressCheckPayload to bot_interrupt_queue for depth/drag gate.
-
-        Rules:
-        - Only fires during CORE interview phase (never during intro/greeting).
-        - First check after BOT_INTERRUPT_MIN_SPEECH_SEC (default 15s), then every
-          BOT_INTERRUPT_CHECK_INTERVAL_SEC (default 10s).
-        - Uses Whisper exclusively so the Sarvam WebSocket is never disturbed.
+        Mid-answer progress: scheduled interrupt slots beat background topic polls.
+        Uses Whisper exclusively so the Sarvam WebSocket is never disturbed.
         """
+        if self._maybe_force_answer_time_cap():
+            return
         if not BOT_INTERRUPT_ENABLED:
             return
 
@@ -727,15 +986,17 @@ class STTEngine:
             ok, _reason = orch.can_run_progress_gate(is_ai_speaking=False)
             if not ok:
                 return
-        if time.monotonic() < self._bot_interrupt_cooldown_until:
-            return
         if self._orch_awaiting_clarifier():
             return
-
-        speech_sec = time.monotonic() - self._recording_started_at
-        if speech_sec < BOT_INTERRUPT_MIN_SPEECH_SEC:
+        if time.monotonic() < self._bot_interrupt_cooldown_until:
             return
-        if time.monotonic() - self._last_bot_interrupt_check < BOT_INTERRUPT_CHECK_INTERVAL_SEC:
+
+        speech_sec = orch.get_answer_speech_sec() if orch else 0.0
+        if speech_sec <= 0 and self._recording_started_at > 0:
+            speech_sec = time.monotonic() - self._recording_started_at
+
+        schedule = orch.resolve_progress_check(speech_sec) if orch else None
+        if schedule is None:
             return
 
         audio_data = np.concatenate(self.audio_buffer).flatten().astype(np.float32)
@@ -745,13 +1006,41 @@ class STTEngine:
 
         self._last_bot_interrupt_check = time.monotonic()
 
-        full_partial = self._transcribe_whisper_only(audio_data)
-        if len(full_partial) < 12:
-            return
-
-        recent_segment = full_partial[len(self._prev_check_partial):].strip()
-        self._prev_check_partial = full_partial
+        # Prefer live Sarvam transcript (keeps topic tracking without Whisper rebatch)
+        live_partial = self._get_live_partial_text()
+        if len(live_partial) >= 12:
+            full_partial = live_partial
+            window_text = live_partial[-400:].strip()
+            recent_segment = full_partial[len(self._prev_check_partial):].strip()
+            if not recent_segment:
+                recent_segment = window_text
+            self._prev_check_partial = full_partial
+        else:
+            full_partial = self._transcribe_whisper_only(audio_data)
+            if len(full_partial) < 12:
+                return
+            if schedule.kind == "poll":
+                window_sec = float(ANSWER_TOPIC_POLL_WINDOW_SEC)
+            else:
+                window_sec = float(ANSWER_DEPTH_CHECK_WINDOW_SEC)
+            window_samples = max(int(window_sec * SAMPLE_RATE), 512)
+            if len(audio_data) > window_samples:
+                window_audio = audio_data[-window_samples:]
+            else:
+                window_audio = audio_data
+            window_text = self._transcribe_whisper_only(window_audio).strip()
+            if not window_text:
+                window_text = full_partial[-400:].strip()
+            recent_segment = full_partial[len(self._prev_check_partial):].strip()
+            if not recent_segment:
+                recent_segment = window_text
+            self._prev_check_partial = full_partial
         self._check_num += 1
+
+        if schedule.kind == "slot":
+            orch.mark_timed_check_done(schedule.slot, speech_sec)
+        else:
+            orch.mark_topic_poll_done(schedule.poll_index)
 
         from interview_engine import ProgressCheckPayload
         payload = ProgressCheckPayload(
@@ -759,16 +1048,21 @@ class STTEngine:
             recent_segment=recent_segment,
             speech_sec=speech_sec,
             check_num=self._check_num,
+            check_kind=schedule.kind,
+            check_slot=schedule.slot if schedule.kind == "slot" else 0,
+            poll_index=schedule.poll_index if schedule.kind == "poll" else 0,
+            window_text=window_text,
         )
 
         print(
-            f"\n[PROGRESS CHECK #{self._check_num}] {speech_sec:.0f}s | "
-            f"full={len(full_partial)} chars | recent={recent_segment[:60]!r}"
+            f"\n[PROGRESS CHECK #{self._check_num}] kind={schedule.kind} "
+            f"slot={schedule.slot} poll={schedule.poll_index} {speech_sec:.0f}s | "
+            f"recent={recent_segment[:60]!r}"
         )
         try:
             self.state.bot_interrupt_queue.put_nowait(payload)
             self._bot_interrupt_cooldown_until = (
-                time.monotonic() + BOT_INTERRUPT_CHECK_INTERVAL_SEC
+                time.monotonic() + MID_ANSWER_BOT_COOLDOWN_SEC
             )
         except queue.Full:
             pass
@@ -872,10 +1166,13 @@ class STTEngine:
                                     started_hook()
                                 except Exception:
                                     pass
+                            self._start_live_stream()
                             for pre_block in pre_speech_buffer:
                                 self.audio_buffer.append(pre_block)
+                                self._feed_live_stream(pre_block)
                             pre_speech_buffer.clear()
                         self.audio_buffer.append(process_block)
+                        self._feed_live_stream(process_block)
                         self.last_speech_time = 0.0
                         self._maybe_check_bot_interrupt()
                     else:
@@ -889,11 +1186,15 @@ class STTEngine:
                                 self._recording_started_at = 0.0
                             else:
                                 self.audio_buffer.append(process_block)
+                                self._feed_live_stream(process_block)
                                 self._maybe_check_bot_interrupt()
                         else:
                             pre_speech_buffer.append(process_block)
 
             except queue.Empty:
+                # Idle mic: still flush held turns when merge window expires
+                if self._pending_audio is not None and time.monotonic() >= self._pending_until:
+                    self._discard_expired_pending(force=True)
                 continue
 
     def transcribe_buffer(self):
@@ -923,23 +1224,29 @@ class STTEngine:
                 f"({recall_age:.2f}s ago) — skipping local transcription",
                 end="", flush=True,
             )
+            self._abort_live_stream()
             self.audio_buffer = []
             self.vad_model.reset_states()
             return
 
         audio_data = np.concatenate(self.audio_buffer).flatten().astype(np.float32)
+        segment_duration = len(audio_data) / SAMPLE_RATE
 
-        # Merge with held partial audio if still within the merge window
+        # Merge with held partial — prefer text merge (never rebatch full combined audio)
+        merged_pending_text = ""
         self._discard_expired_pending()
-        if self._pending_audio is not None and time.monotonic() < self._pending_until:
-            pending_sec = len(self._pending_audio) / SAMPLE_RATE
-            print(
-                f"\n[TURN MERGE] combining {pending_sec:.1f}s held audio + "
-                f"{len(audio_data) / SAMPLE_RATE:.1f}s new audio",
-                file=sys.stderr,
-            )
-            audio_data = np.concatenate([self._pending_audio, audio_data]).astype(np.float32)
-            self._clear_pending_turn()
+        with self._pending_commit_lock:
+            if self._pending_audio is not None and time.monotonic() < self._pending_until:
+                pending_sec = len(self._pending_audio) / SAMPLE_RATE
+                merged_pending_text = (self._pending_text or "").strip()
+                print(
+                    f"\n[TURN MERGE] combining held text ({len(merged_pending_text)} chars, "
+                    f"{pending_sec:.1f}s) + new segment {segment_duration:.1f}s",
+                    file=sys.stderr,
+                )
+                # Keep audio concat only for duration stats / whisper fallback
+                audio_data = np.concatenate([self._pending_audio, audio_data]).astype(np.float32)
+                self._clear_pending_turn()
 
         utterance_duration = len(audio_data) / SAMPLE_RATE
         self.recent_utterance_lengths.append(utterance_duration)
@@ -967,15 +1274,31 @@ class STTEngine:
         self.audio_buffer = []
         self.vad_model.reset_states()
 
-        full_text, sarvam_failed = self._transcribe_with_fallback(
-            audio_data, utterance_duration=utterance_duration
+        # Finalize only the NEW live segment (not the full merged audio)
+        new_text, sarvam_failed = self._finalize_live_or_batch(
+            audio_data[-int(segment_duration * SAMPLE_RATE):]
+            if merged_pending_text and utterance_duration > segment_duration
+            else audio_data,
+            utterance_duration=segment_duration,
         )
+        if merged_pending_text:
+            full_text = f"{merged_pending_text} {(new_text or '').strip()}".strip()
+            logger.info(
+                "[TURN MERGE TEXT] Q%s pending_chars=%d new_chars=%d total=%d",
+                self._current_q_label(),
+                len(merged_pending_text),
+                len((new_text or "").strip()),
+                len(full_text),
+            )
+        else:
+            full_text = new_text
 
         if self.state.is_ai_speaking.is_set():
             logger.info(
                 "[TURN DISCARD] Q%s bot speaking during transcription — dropping utterance",
                 self._current_q_label(),
             )
+            self._abort_live_stream()
             return
 
         should_hold, hold_reason = self._should_hold_turn(
@@ -995,12 +1318,15 @@ class STTEngine:
                 self._pending_text = f"{self._pending_text} {new_text}".strip()
             elif new_text:
                 self._pending_text = new_text
-            self._pending_until = time.monotonic() + self._merge_window_sec(hold_reason)
+            merge_sec = self._merge_window_sec(hold_reason, text=new_text)
+            self._pending_until = time.monotonic() + merge_sec
             self._pending_sarvam_failed = sarvam_failed
             if hold_reason == "core_answer_in_progress" and self._pending_core_deadline <= 0:
                 self._pending_core_deadline = (
                     time.monotonic() + CORE_ANSWER_MAX_HOLD_SEC
                 )
+            # Critical: flush on timer even if candidate stays silent (no new audio)
+            self._schedule_flush_timer(merge_sec)
             return
 
         self._finalize_transcript_commit(full_text, utterance_duration)

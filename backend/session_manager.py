@@ -46,6 +46,8 @@ class MeetingSession:
     use_webpage: bool = False  # Output Media webpage mode — PCM streamed via /ws/audio-stream
     # Fallback task that clears is_ai_speaking if browser never sends playback_done
     _speaking_fallback_task: Optional[asyncio.Task] = None
+    # Bumped on each new TTS turn / real playback_done — stale fallbacks must not clear speaking
+    _speaking_generation: int = 0
     # Sarvam STT engine (primary) — None when Sarvam is disabled or unavailable
     sarvam_stt_engine: Optional[object] = None
     scheduled_candidate_name: Optional[str] = None
@@ -486,20 +488,29 @@ class SessionManager:
                                 {"type": "end_of_turn"}
                             )
                         # Fallback if browser never sends playback_done
+                        session._speaking_generation += 1
+                        gen = session._speaking_generation
                         session._speaking_fallback_task = asyncio.ensure_future(
-                            self._speaking_fallback(session, timeout=30.0)
+                            self._speaking_fallback(session, timeout=30.0, generation=gen)
                         )
                     else:
                         # File-upload / batch mode: no browser feedback — clear after brief delay
                         await asyncio.sleep(0.3)
                         session.state.is_ai_speaking.clear()
                         session.state.last_playback_done_at = time.monotonic()
+                        bot_kind = getattr(session.state, "last_bot_speech_kind", "")
+                        orch = session.state.interview_orchestrator
+                        if orch is not None:
+                            if bot_kind == "main":
+                                orch.mark_main_question_playback_done()
+                                orch.mark_bot_question_asked("main")
+                            elif bot_kind in ("clarifier", "drag"):
+                                orch.mark_mid_answer_bot_playback_done()
+                                orch.mark_bot_question_asked(bot_kind)
                         if config.POST_TTS_SILENCE_CHECK_ENABLED:
-                            self.cancel_silence_check(session)
-                            session._silence_watch_task = asyncio.ensure_future(
-                                self._run_silence_check(
-                                    session, config.POST_TTS_SILENCE_CHECK_SEC
-                                )
+                            self.schedule_silence_check(
+                                session,
+                                delay=float(config.POST_QUESTION_SILENCE_STEP1_SEC),
                             )
 
                     # Proactively ensure Sarvam TTS is still connected while the bot is
@@ -532,6 +543,11 @@ class SessionManager:
                 # WebRTC / webpage mode: stream each sentence immediately for lower latency
                 self.cancel_silence_check(session)
                 session._awaiting_turn_playback = False
+                # New audio starting — invalidate any stale playback fallback
+                session._speaking_generation += 1
+                if session._speaking_fallback_task:
+                    session._speaking_fallback_task.cancel()
+                    session._speaking_fallback_task = None
                 session.state.is_ai_speaking.set()
                 
                 if session.audio_sender:
@@ -578,20 +594,33 @@ class SessionManager:
                 # Brief pause on error
                 await asyncio.sleep(0.5)
     
-    async def _speaking_fallback(self, session: MeetingSession, timeout: float = 30.0):
+    async def _speaking_fallback(
+        self,
+        session: MeetingSession,
+        timeout: float = 30.0,
+        generation: int = 0,
+    ):
         """
-        Safety net: if the browser never sends playback_done (e.g. disconnected,
-        browser crash), clear is_ai_speaking after `timeout` seconds so the STT
-        is never permanently blocked.  Normally cancelled via task.cancel() when
-        playback_done arrives or when the user interrupts.
+        Safety net: if the browser never sends playback_done, clear is_ai_speaking
+        after `timeout` seconds. Stale fallbacks from a previous turn must NOT clear
+        speaking while a newer TTS turn is active (generation guard).
         """
         try:
             await asyncio.sleep(timeout)
+            if generation != session._speaking_generation:
+                logger.info(
+                    f"Bot {session.bot_id[:8]} ignoring stale playback fallback "
+                    f"(gen={generation} current={session._speaking_generation})"
+                )
+                return
+            if not session._awaiting_turn_playback:
+                return
             if session.state.is_ai_speaking.is_set():
                 session.state.is_ai_speaking.clear()
+                session._awaiting_turn_playback = False
                 logger.warning(
                     f"Bot {session.bot_id[:8]} playback_done never received — "
-                    f"STT unblocked by {timeout}s fallback"
+                    f"STT unblocked by {timeout}s fallback (gen={generation})"
                 )
         except asyncio.CancelledError:
             pass  # cancelled by interrupt or by playback_done handler — normal path
@@ -622,6 +651,35 @@ class SessionManager:
             return False
         return True
 
+    async def _run_presence_timeout(self, session: MeetingSession, delay: float) -> None:
+        """After final presence warning — skip question if still no candidate speech."""
+        try:
+            await asyncio.sleep(delay)
+            if not session.is_active or session.state.interview_ended.is_set():
+                return
+            orch = session.state.interview_orchestrator
+            if orch is None:
+                return
+            from interview_engine import InterviewPhase
+            if orch.phase != InterviewPhase.CORE:
+                return
+            if not orch.should_schedule_presence():
+                return
+            since = session.state.last_playback_done_at
+            if not since or not self._candidate_is_silent(session, since):
+                return
+            logger.info(
+                "[PRESENCE TIMEOUT] bot=%s Q%d — no response, skipping question",
+                session.bot_id[:8],
+                orch.current_index + 1,
+            )
+            try:
+                session.state.llm_queue.put_nowait(config.PRESENCE_TIMEOUT_TOKEN)
+            except queue.Full:
+                logger.warning("[PRESENCE TIMEOUT] llm_queue full")
+        except asyncio.CancelledError:
+            pass
+
     async def _run_silence_check(self, session: MeetingSession, delay: float) -> None:
         try:
             await asyncio.sleep(delay)
@@ -638,35 +696,82 @@ class SessionManager:
             from interview_engine import InterviewPhase
             if orch.phase != InterviewPhase.CORE:
                 return
+            if not orch.should_schedule_presence():
+                return
 
             self._sync_presence_question_index(session)
-            if session._presence_checks_this_question >= config.MAX_PRESENCE_CHECKS_PER_QUESTION:
+            step = session._presence_checks_this_question
+            if step >= config.MAX_PRESENCE_CHECKS_PER_QUESTION:
                 return
 
             since = session.state.last_playback_done_at
             if not since or not self._candidate_is_silent(session, since):
                 return
 
-            import random
             lang = getattr(session.state, "interview_language", "english") or "english"
-            phrases = get_ui_strings(lang).presence_phrases
-            phrase = random.choice(phrases)
+            ui = get_ui_strings(lang)
+            if step == 0:
+                import random
+                phrase = random.choice(ui.presence_phrases)
+            elif step == 1:
+                phrase = ui.presence_not_audible
+            else:
+                phrase = ui.presence_final_warning
+
             session._presence_checks_this_question += 1
             session.state.pending_presence_check = True
+            session.state.last_bot_speech_kind = "prompt"
             log_transcript(session.bot_id, "assistant", phrase)
             session.state.tts_queue.put(phrase)
             session.state.tts_queue.put("<END_OF_TURN>")
             logger.info(
-                "[PRESENCE CHECK] bot=%s Q%d check=%d/%d",
+                "[PRESENCE CHECK] bot=%s Q%d step=%d/%d phrase=%r",
                 session.bot_id[:8],
                 orch.current_index + 1,
                 session._presence_checks_this_question,
                 config.MAX_PRESENCE_CHECKS_PER_QUESTION,
+                phrase[:60],
             )
         except asyncio.CancelledError:
             pass
         finally:
             session._silence_watch_task = None
+
+    def _schedule_presence_followup(self, session: MeetingSession) -> None:
+        """Chain presence ladder after a presence prompt finishes playing."""
+        orch = session.state.interview_orchestrator
+        if orch is None or not orch.should_schedule_presence():
+            return
+        if not session.state.pending_presence_check:
+            return
+        step = session._presence_checks_this_question
+        loop = config.main_event_loop
+        if not loop or not loop.is_running():
+            return
+        self.cancel_silence_check(session)
+        if step >= config.MAX_PRESENCE_CHECKS_PER_QUESTION:
+            delay = float(config.POST_QUESTION_FINAL_WRAP_SEC)
+
+            def _timeout_task() -> None:
+                session._silence_watch_task = asyncio.ensure_future(
+                    self._run_presence_timeout(session, delay)
+                )
+
+            loop.call_soon_threadsafe(_timeout_task)
+            return
+        if step == 1:
+            delay = float(config.POST_QUESTION_SILENCE_STEP2_SEC)
+        elif step == 2:
+            delay = float(config.POST_QUESTION_FINAL_WRAP_SEC)
+        else:
+            delay = float(config.POST_QUESTION_SILENCE_STEP1_SEC)
+
+        def _create_task() -> None:
+            session._silence_watch_task = asyncio.ensure_future(
+                self._run_silence_check(session, delay)
+            )
+
+        loop.call_soon_threadsafe(_create_task)
 
     def schedule_silence_check(
         self,
@@ -683,6 +788,8 @@ class SessionManager:
         from interview_engine import InterviewPhase
         if orch.phase != InterviewPhase.CORE:
             return
+        if not orch.should_schedule_presence():
+            return
 
         loop = config.main_event_loop
         if not loop or not loop.is_running():
@@ -694,7 +801,9 @@ class SessionManager:
             wait = override
             session.state.presence_check_delay_sec = None
         else:
-            wait = delay if delay is not None else config.POST_TTS_SILENCE_CHECK_SEC
+            base = delay if delay is not None else config.POST_QUESTION_SILENCE_STEP1_SEC
+            # Always respect minimum think-time after a main question
+            wait = max(float(base), float(config.POST_TTS_SILENCE_MIN_AFTER_QUESTION_SEC))
 
         def _create_task() -> None:
             session._silence_watch_task = asyncio.ensure_future(
@@ -705,6 +814,18 @@ class SessionManager:
 
     def on_playback_done(self, session: MeetingSession) -> None:
         """Called when browser finishes playing bot audio — start silence watcher."""
+        # Ignore stale playback_done from a previous turn while new TTS is in flight
+        if not session._awaiting_turn_playback:
+            logger.info(
+                f"[audio-stream] ignoring stale playback_done for bot {session.bot_id[:8]} "
+                f"(not awaiting turn playback)"
+            )
+            return
+        # Invalidate any pending fallback from this turn
+        session._speaking_generation += 1
+        if session._speaking_fallback_task:
+            session._speaking_fallback_task.cancel()
+            session._speaking_fallback_task = None
         session.state.is_ai_speaking.clear()
         session.state.last_playback_done_at = time.monotonic()
         orch = session.state.interview_orchestrator
@@ -712,8 +833,10 @@ class SessionManager:
         if orch is not None:
             if bot_kind == "main":
                 orch.mark_main_question_playback_done()
+                orch.mark_bot_question_asked("main")
             elif bot_kind in ("clarifier", "drag"):
                 orch.mark_mid_answer_bot_playback_done()
+                orch.mark_bot_question_asked(bot_kind)
         if session._awaiting_turn_playback:
             session._awaiting_turn_playback = False
             mid_answer = getattr(session.state, "mid_answer_interrupt", False)
@@ -727,8 +850,12 @@ class SessionManager:
                         logger.warning(
                             f"Bot {session.bot_id[:8]} STT restore after mid-answer failed: {ex}"
                         )
-            else:
-                self.schedule_silence_check(session)
+            elif session.state.pending_presence_check:
+                self._schedule_presence_followup(session)
+            elif bot_kind in ("main", "clarifier", "drag"):
+                self.schedule_silence_check(
+                    session, delay=float(config.POST_QUESTION_SILENCE_STEP1_SEC)
+                )
         if session.audio_sender and session.tts_loop:
             session.audio_sender.ensure_sarvam_connected_sync(session.tts_loop)
         logger.info(
@@ -739,6 +866,9 @@ class SessionManager:
         """VAD detected speech — cancel pending presence check (before STT completes)."""
         session.state.pending_presence_check = False
         self.cancel_silence_check(session)
+        orch = session.state.interview_orchestrator
+        if orch is not None:
+            orch.mark_answer_speech_started()
 
     def on_candidate_speech(self, session: MeetingSession) -> None:
         """Track candidate activity and cancel pending silence check."""

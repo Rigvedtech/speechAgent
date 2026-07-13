@@ -83,6 +83,12 @@ class SarvamSTTEngine:
         self._msg_queue: Optional[asyncio.Queue] = None
         self._utterance_active = False
 
+        # Live streaming (send while candidate speaks — avoid end-of-answer rebatch)
+        self._live_active = False
+        self._live_parts: list[str] = []
+        self._live_lock = threading.Lock()
+        self._live_last_text_at = 0.0
+
         logger.info(
             f"Sarvam STT initialized: model={config.model}, "
             f"language={config.language_code}, mode={config.mode}, "
@@ -187,8 +193,10 @@ class SarvamSTTEngine:
                 transcript, is_final, kind, signal = self._parse_message(raw)
                 if self._msg_queue is not None:
                     await self._msg_queue.put((transcript, is_final, kind, signal))
-                if transcript and self.on_transcript:
-                    self.on_transcript(transcript, is_final)
+                if transcript:
+                    self._append_live_transcript(transcript)
+                    if self.on_transcript:
+                        self.on_transcript(transcript, is_final)
                 if kind == "error":
                     self.is_connected = False
             except websockets.exceptions.ConnectionClosed:
@@ -408,6 +416,162 @@ class SarvamSTTEngine:
         except Exception as ex:
             logger.warning("[STT LANG] Sarvam reconnect failed: %s", ex)
             return False
+
+
+    def _append_live_transcript(self, transcript: str) -> None:
+        text = (transcript or "").strip()
+        if not text:
+            return
+        with self._live_lock:
+            if not self._live_active:
+                return
+            if self._live_parts and text == self._live_parts[-1]:
+                return
+            if self._live_parts:
+                prev = self._live_parts[-1]
+                if text.startswith(prev) or prev.startswith(text):
+                    self._live_parts[-1] = text if len(text) >= len(prev) else prev
+                else:
+                    self._live_parts.append(text)
+            else:
+                self._live_parts.append(text)
+            self._live_last_text_at = time.monotonic()
+
+    def get_live_transcript(self) -> str:
+        with self._live_lock:
+            return " ".join(self._live_parts).strip()
+
+    def is_live_active(self) -> bool:
+        with self._live_lock:
+            return self._live_active
+
+    async def _start_live_utterance(self) -> bool:
+        await self._cancel_batch_task()
+        if not await self.ensure_connected():
+            return False
+        await self._drain_stale_messages()
+        with self._live_lock:
+            self._live_active = True
+            self._live_parts = []
+            self._live_last_text_at = 0.0
+        self._utterance_active = True
+        return True
+
+    def start_live_utterance_sync(self) -> bool:
+        if not self._loop or not self._loop.is_running():
+            return False
+        try:
+            fut = asyncio.run_coroutine_threadsafe(self._start_live_utterance(), self._loop)
+            return bool(fut.result(timeout=5.0))
+        except Exception as ex:
+            logger.warning("Sarvam STT start_live failed: %s", ex)
+            return False
+
+    async def _stream_pcm(self, pcm_bytes: bytes, sample_rate: int) -> bool:
+        if not self._live_active:
+            return False
+        if not await self.ensure_connected():
+            return False
+        ok = await self._send_pcm_chunk(pcm_bytes, sample_rate)
+        if not ok:
+            if await self.reconnect():
+                ok = await self._send_pcm_chunk(pcm_bytes, sample_rate)
+        return ok
+
+    def stream_audio_sync(self, audio_float32, sample_rate: int = 16000) -> bool:
+        """Send a short PCM slice while speaking (non-blocking submit)."""
+        if not self._loop or not self._loop.is_running():
+            return False
+        if not self.is_live_active():
+            return False
+        try:
+            pcm = self._float32_to_pcm_bytes(audio_float32)
+        except Exception as ex:
+            logger.debug("Sarvam STT stream convert error: %s", ex)
+            return False
+        if not pcm:
+            return False
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._stream_pcm(pcm, sample_rate), self._loop
+            )
+            return True
+        except Exception as ex:
+            logger.debug("Sarvam STT stream_audio error: %s", ex)
+            return False
+
+    async def _wait_live_settle(self, deadline_seconds: float) -> None:
+        """Wait briefly for trailing STT segments (reader appends into live_parts)."""
+        if not self._msg_queue:
+            await asyncio.sleep(min(0.3, max(0.1, deadline_seconds)))
+            return
+        deadline = time.monotonic() + max(0.3, float(deadline_seconds))
+        last_change = time.monotonic()
+        prev_len = len(self.get_live_transcript())
+        while time.monotonic() < deadline:
+            try:
+                transcript, _is_final, kind, signal = await asyncio.wait_for(
+                    self._msg_queue.get(), timeout=0.15
+                )
+                # Reader already appended transcript; just track settle timing
+                if transcript:
+                    cur = len(self.get_live_transcript())
+                    if cur != prev_len:
+                        prev_len = cur
+                        last_change = time.monotonic()
+                if kind == "events" and signal == "END_SPEECH":
+                    if time.monotonic() - last_change >= self.config.wait_after_end_speech_seconds:
+                        break
+            except asyncio.TimeoutError:
+                if time.monotonic() - last_change >= self.config.trailing_silence_seconds:
+                    break
+
+    async def _finalize_live_utterance(self, collect_deadline: float) -> Optional[str]:
+        if not self._live_active and not self.get_live_transcript():
+            return None
+        try:
+            if await self.ensure_connected() and self._ws_lock and not self._is_ws_closed():
+                async with self._ws_lock:
+                    if not self._is_ws_closed():
+                        await self.ws.send(json.dumps({"type": "flush"}))
+            # Do not re-join queue text — reader already filled live_parts
+            await self._wait_live_settle(max(0.4, float(collect_deadline)))
+        except Exception as ex:
+            logger.warning("Sarvam STT live finalize flush/collect error: %s", ex)
+        text = self.get_live_transcript()
+        with self._live_lock:
+            self._live_active = False
+        self._utterance_active = False
+        return text or None
+
+    def finalize_live_utterance_sync(self, collect_deadline: float = 1.5) -> Optional[str]:
+        """Flush + short wait; return transcript built during live streaming."""
+        if not self._loop or not self._loop.is_running():
+            return self.get_live_transcript() or None
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                self._finalize_live_utterance(collect_deadline), self._loop
+            )
+            return fut.result(timeout=max(2.0, float(collect_deadline) + 2.0))
+        except Exception as ex:
+            logger.warning("Sarvam STT finalize_live error: %s", ex)
+            text = self.get_live_transcript()
+            with self._live_lock:
+                self._live_active = False
+            self._utterance_active = False
+            return text or None
+
+    def abort_live_utterance_sync(self) -> None:
+        with self._live_lock:
+            self._live_active = False
+            self._live_parts = []
+            self._live_last_text_at = 0.0
+        self._utterance_active = False
+        if self._loop and self._loop.is_running():
+            try:
+                asyncio.run_coroutine_threadsafe(self._drain_stale_messages(), self._loop)
+            except Exception:
+                pass
 
     def _float32_to_pcm_bytes(self, audio_float32) -> bytes:
         if np is None:

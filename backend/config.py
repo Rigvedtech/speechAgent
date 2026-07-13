@@ -54,6 +54,9 @@ MODEL_SIZE = _env_str("MODEL_SIZE", "small.en")
 # LLM
 OLLAMA_MODEL = _env_str("OLLAMA_MODEL", "llama3.2:3b")
 GROQ_MODEL = _env_str("GROQ_MODEL", "llama-3.1-8b-instant")
+# Faster model for answer scoring only (keeps main GROQ_MODEL for clarifiers/intent).
+GROQ_EVALUATOR_MODEL = _env_str("GROQ_EVALUATOR_MODEL", GROQ_MODEL)
+GROQ_EVALUATOR_MAX_TOKENS = _env_int("GROQ_EVALUATOR_MAX_TOKENS", 250)
 GROQ_TEMPERATURE = _env_float("GROQ_TEMPERATURE", 0.3)
 GROQ_MAX_TOKENS = _env_int("GROQ_MAX_TOKENS", 90)
 GROQ_REQUEST_TIMEOUT_SEC = _env_float("GROQ_REQUEST_TIMEOUT_SEC", 45.0)
@@ -106,7 +109,7 @@ def sarvam_transcribe_timeout_sec(utterance_duration: float) -> float:
     return min(max(base, scaled), SARVAM_STT_TRANSCRIBE_TIMEOUT_MAX_SEC)
 
 # Endpointing split by engine (keeps Whisper behavior stable)
-SARVAM_LOCAL_SILENCE_SEC = _env_float("SARVAM_LOCAL_SILENCE_SEC", 1.15)
+SARVAM_LOCAL_SILENCE_SEC = _env_float("SARVAM_LOCAL_SILENCE_SEC", 2.0)
 
 # Hinglish: short bridge ("Theek hai.") when score >= threshold; full rephrase intro below
 HINGLISH_SIMPLE_BRIDGE_MIN_SCORE = _env_int("HINGLISH_SIMPLE_BRIDGE_MIN_SCORE", 7)
@@ -124,19 +127,16 @@ TURN_MERGE_MIN_CHARS = _env_int("TURN_MERGE_MIN_CHARS", 20)
 TURN_MERGE_MIN_HOLD_SEC = _env_float("TURN_MERGE_MIN_HOLD_SEC", 1.5)
 TURN_MERGE_MAX_SHORT_HOLD_SEC = _env_float("TURN_MERGE_MAX_SHORT_HOLD_SEC", 4.0)
 
-# Progress gate: rule-layer thresholds for long off-topic answers
-PROGRESS_GATE_LONG_ANSWER_SEC = _env_float("PROGRESS_GATE_LONG_ANSWER_SEC", 25.0)
-PROGRESS_GATE_MIN_TOPIC_OVERLAP = _env_int("PROGRESS_GATE_MIN_TOPIC_OVERLAP", 2)
-PROGRESS_GATE_UNCLEAR_ESCALATION_CHECKS = _env_int("PROGRESS_GATE_UNCLEAR_ESCALATION_CHECKS", 2)
-
 # TTS Configuration (Bulbul V3)
 SARVAM_TTS_MODEL = _env_str("SARVAM_TTS_MODEL", "bulbul:v3")
 SARVAM_TTS_SPEAKER = _env_str("SARVAM_TTS_SPEAKER", "shubh")  # Default to shubh as requested
 SARVAM_TTS_LANGUAGE = _env_str("SARVAM_TTS_LANGUAGE", "en-IN")
 SARVAM_TTS_SAMPLE_RATE = _env_int("SARVAM_TTS_SAMPLE_RATE", 24000)  # bulbul:v3 default: 24000
-SARVAM_TTS_PACE = _env_float("SARVAM_TTS_PACE", 1.2)  # 0.5 to 2.0, higher = faster
-SARVAM_TTS_TEMPERATURE = _env_float("SARVAM_TTS_TEMPERATURE", 0.6)  # 0.01 to 1.0, higher = more variation
+SARVAM_TTS_PACE = _env_float("SARVAM_TTS_PACE", 0.9)  # 0.5 to 2.0, higher = faster
+SARVAM_TTS_TEMPERATURE = _env_float("SARVAM_TTS_TEMPERATURE", 0.35)  # lower = cleaner voice
 SARVAM_TTS_ENABLED = _env_str("SARVAM_TTS_ENABLED", "true").lower() == "true"
+# Partial MP3 streaming decode causes hiss/clicks — batch decode is cleaner.
+TTS_STREAMING_ENABLED = _env_bool("TTS_STREAMING_ENABLED", False)
 
 # Recall.ai output mode (WebRTC requires media_url from API; file upload is more reliable)
 RECALL_USE_OUTPUT_MEDIA = _env_str("RECALL_USE_OUTPUT_MEDIA", "false").lower() == "true"
@@ -186,50 +186,95 @@ STARTUP_GREETING = _env_str("STARTUP_GREETING", _STARTUP_GREETING_DEFAULT)
 
 # Interview orchestration
 MAX_QUESTIONS = _env_int("MAX_QUESTIONS", 10)
-MAX_ANSWER_SEC = _env_int("MAX_ANSWER_SEC", 120)
+MAX_ANSWER_SEC = _env_int("MAX_ANSWER_SEC", 420)
 MAX_OFF_TOPIC_REDIRECTS = _env_int("MAX_OFF_TOPIC_REDIRECTS", 2)
 MAX_STRIKES = _env_int("MAX_STRIKES", 3)
 MAX_INTERVIEW_MINUTES = _env_int("MAX_INTERVIEW_MINUTES", 30)
+# Stage-1 gate: after Q6, continue to Q7–Q10 only if Q1–Q5 avg >= threshold
 CONTINUE_AVG_THRESHOLD = _env_float("CONTINUE_AVG_THRESHOLD", 7.0)
-ROLLING_WINDOW = _env_int("ROLLING_WINDOW", 4)
+STAGE1_QUESTION_COUNT = _env_int("STAGE1_QUESTION_COUNT", 5)
+STAGE1_BRIDGE_QUESTION = _env_int("STAGE1_BRIDGE_QUESTION", 6)  # always ask; decide after
+ROLLING_WINDOW = _env_int("ROLLING_WINDOW", STAGE1_QUESTION_COUNT)
 ABUSE_MAX_WARNINGS = _env_int("ABUSE_MAX_WARNINGS", 1)
 
-# Turn-taking: user cannot interrupt bot; bot may ask mid-answer clarifiers
+# --- Turn-taking (production) ---
+# Soft silence (~2s) ends an utterance capture; merge window keeps listening.
+# If speech resumes → same answer. If quiet through merge → hard end → next Q.
 USER_BARGE_IN_ENABLED = _env_str("USER_BARGE_IN_ENABLED", "false").lower() == "true"
+# Soft endpoint silence (VAD). ~2.5s then merge window → hard end ≈ 3.0s.
+CORE_ANSWER_SOFT_SILENCE_SEC = _env_float("CORE_ANSWER_SOFT_SILENCE_SEC", 2.0)
+# Extra listen-after-soft-end before committing (speech resume → same answer)
+CORE_ANSWER_MERGE_WINDOW_SEC = _env_float("CORE_ANSWER_MERGE_WINDOW_SEC", 0.5)
+# Alias used by STT long-answer path (same as soft silence)
+CORE_LONG_ANSWER_SILENCE_SEC = _env_float(
+    "CORE_LONG_ANSWER_SILENCE_SEC", CORE_ANSWER_SOFT_SILENCE_SEC
+)
+CORE_LONG_ANSWER_SPEECH_SEC = _env_float("CORE_LONG_ANSWER_SPEECH_SEC", 8.0)
+CORE_ANSWER_MAX_HOLD_SEC = _env_float("CORE_ANSWER_MAX_HOLD_SEC", 420.0)
+
+# Live Sarvam STT while speaking (avoids end-of-answer full rebatch latency)
+STREAM_STT_ENABLED = _env_bool("STREAM_STT_ENABLED", True)
+# Short flush/collect after silence — audio already streamed
+STREAM_STT_FINALIZE_SEC = _env_float("STREAM_STT_FINALIZE_SEC", 0.8)
+# Min live chars to trust streaming path (else fall back to batch)
+STREAM_STT_MIN_CHARS = _env_int("STREAM_STT_MIN_CHARS", 8)
+INCOMPLETE_MERGE_WINDOW_SEC = _env_float("INCOMPLETE_MERGE_WINDOW_SEC", 3.5)
+# Short utterances (repeat/rephrase): faster endpoint so total stays <= ~4s
+SHORT_UTTERANCE_MAX_SEC = _env_float("SHORT_UTTERANCE_MAX_SEC", 5.0)
+SHORT_UTTERANCE_SILENCE_SEC = _env_float("SHORT_UTTERANCE_SILENCE_SEC", 1.5)
+
+# Mid-answer: ONLY topic polls (no depth clarifiers / interrupt slots)
 BOT_INTERRUPT_ENABLED = _env_bool("BOT_INTERRUPT_ENABLED", True)
-BOT_INTERRUPT_MIN_SPEECH_SEC = _env_float("BOT_INTERRUPT_MIN_SPEECH_SEC", 15.0)
-BOT_INTERRUPT_CHECK_INTERVAL_SEC = _env_float("BOT_INTERRUPT_CHECK_INTERVAL_SEC", 10.0)
-BOT_INTERRUPT_SHORT_ANSWER_MAX_SEC = _env_float("BOT_INTERRUPT_SHORT_ANSWER_MAX_SEC", 13.0)
-BOT_INTERRUPT_MIN_PARTIAL_SEC = _env_float("BOT_INTERRUPT_MIN_PARTIAL_SEC", 2.5)
-# DRAG (off-topic): min 1 rephrase before force-complete; max rephrases per question
-BOT_INTERRUPT_DRAG_REPHRASE_MIN = _env_int("BOT_INTERRUPT_DRAG_REPHRASE_MIN", 1)
-BOT_INTERRUPT_DRAG_REPHRASE_MAX = _env_int("BOT_INTERRUPT_DRAG_REPHRASE_MAX", 2)
-# Legacy alias — force-complete after DRAG_REPHRASE_MAX rephrases exhausted
-BOT_INTERRUPT_DRAG_STRIKES_MAX = _env_int(
-    "BOT_INTERRUPT_DRAG_STRIKES_MAX", BOT_INTERRUPT_DRAG_REPHRASE_MAX + 1
-)
+BOT_INTERRUPT_MIN_PARTIAL_SEC = _env_float("BOT_INTERRUPT_MIN_PARTIAL_SEC", 3.0)
 BOT_INTERRUPT_GATE_MIN_CONFIDENCE = _env_float("BOT_INTERRUPT_GATE_MIN_CONFIDENCE", 0.75)
-# ON_TRACK depth clarifiers (e.g. "What is npm?" when they mention express without explaining npm)
+# Disabled legacy interrupt stack (kept for import compatibility; unused in live path)
+BOT_INTERRUPT_CLARIFIER_ON_TRACK = _env_bool("BOT_INTERRUPT_CLARIFIER_ON_TRACK", False)
 BOT_INTERRUPT_MAX_DEPTH_CLARIFIERS_PER_Q = _env_int(
-    "BOT_INTERRUPT_MAX_DEPTH_CLARIFIERS_PER_Q", 2
+    "BOT_INTERRUPT_MAX_DEPTH_CLARIFIERS_PER_Q", 0
 )
-BOT_INTERRUPT_MIN_DEPTH_CLARIFIERS_PER_Q = _env_int(
-    "BOT_INTERRUPT_MIN_DEPTH_CLARIFIERS_PER_Q", 0
+BOT_INTERRUPT_MIN_DEPTH_CLARIFIERS_PER_Q = 0
+BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q = _env_int("BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q", 0)
+BOT_INTERRUPT_DRAG_REPHRASE_MIN = _env_int("BOT_INTERRUPT_DRAG_REPHRASE_MIN", 0)
+BOT_INTERRUPT_DRAG_REPHRASE_MAX = _env_int("BOT_INTERRUPT_DRAG_REPHRASE_MAX", 0)
+BOT_INTERRUPT_DRAG_STRIKES_MAX = _env_int("BOT_INTERRUPT_DRAG_STRIKES_MAX", 0)
+BOT_INTERRUPT_MAX_DRAG_DEPTH_PER_Q = _env_int("BOT_INTERRUPT_MAX_DRAG_DEPTH_PER_Q", 0)
+BOT_INTERRUPT_MIN_SPEECH_SEC = _env_float("BOT_INTERRUPT_MIN_SPEECH_SEC", 30.0)
+BOT_INTERRUPT_CHECK_INTERVAL_SEC = _env_float("BOT_INTERRUPT_CHECK_INTERVAL_SEC", 30.0)
+BOT_INTERRUPT_SHORT_ANSWER_MAX_SEC = _env_float("BOT_INTERRUPT_SHORT_ANSWER_MAX_SEC", 13.0)
+CLARIFIER_MIN_SPEECH_SEC = _env_float("CLARIFIER_MIN_SPEECH_SEC", 999.0)
+CLARIFIER_ON_TRACK_MIN_SPEECH_SEC = _env_float("CLARIFIER_ON_TRACK_MIN_SPEECH_SEC", 999.0)
+CLARIFIER_MIN_INTERVAL_SEC = _env_float("CLARIFIER_MIN_INTERVAL_SEC", 999.0)
+CLARIFIER_REPLY_SCORE_MIN_CHARS = _env_int("CLARIFIER_REPLY_SCORE_MIN_CHARS", 120)
+CLARIFIER_REPLY_SILENCE_SEC = _env_float("CLARIFIER_REPLY_SILENCE_SEC", 1.5)
+DRAG_REPHRASE_SCORE_GRACE_SEC = _env_float("DRAG_REPHRASE_SCORE_GRACE_SEC", 0.0)
+DRAG_SKIP_SCORE = _env_int("DRAG_SKIP_SCORE", 2)
+DRAG_CONTEXT_MIN_OVERLAP = _env_int("DRAG_CONTEXT_MIN_OVERLAP", 1)
+MAIN_QUESTION_INTERRUPT_COOLDOWN_SEC = _env_float(
+    "MAIN_QUESTION_INTERRUPT_COOLDOWN_SEC", 5.0
 )
-BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q = _env_int(
-    "BOT_INTERRUPT_MAX_CLARIFIERS_PER_Q",
-    BOT_INTERRUPT_MAX_DEPTH_CLARIFIERS_PER_Q,
+MID_ANSWER_BOT_COOLDOWN_SEC = _env_float("MID_ANSWER_BOT_COOLDOWN_SEC", 8.0)
+
+# Topic poll every N seconds of speech (clock starts when candidate starts talking)
+ANSWER_TOPIC_POLL_INTERVAL_SEC = _env_float("ANSWER_TOPIC_POLL_INTERVAL_SEC", 30.0)
+ANSWER_TOPIC_POLL_WINDOW_SEC = _env_float("ANSWER_TOPIC_POLL_WINDOW_SEC", 30.0)
+MAX_TOPIC_REDIRECTS_PER_QUESTION = _env_int("MAX_TOPIC_REDIRECTS_PER_QUESTION", 2)
+# Legacy slot interrupts — disabled (0 / unreachable)
+ANSWER_FIRST_CHECK_SEC = _env_float("ANSWER_FIRST_CHECK_SEC", 9999.0)
+ANSWER_INTERRUPT_2_AFTER_SEC = _env_float("ANSWER_INTERRUPT_2_AFTER_SEC", 9999.0)
+ANSWER_SECOND_CHECK_SEC = _env_float("ANSWER_SECOND_CHECK_SEC", 9999.0)
+ANSWER_MAX_INTERRUPTS = _env_int("ANSWER_MAX_INTERRUPTS", 0)
+ANSWER_INTERRUPT_SLOT_TOLERANCE_SEC = _env_float("ANSWER_INTERRUPT_SLOT_TOLERANCE_SEC", 3.0)
+ANSWER_DEPTH_CHECK_WINDOW_SEC = _env_float("ANSWER_DEPTH_CHECK_WINDOW_SEC", 30.0)
+ANSWER_DRAG_GRACE_SEC = _env_float("ANSWER_DRAG_GRACE_SEC", 0.0)
+PROGRESS_GATE_LONG_ANSWER_SEC = _env_float("PROGRESS_GATE_LONG_ANSWER_SEC", 45.0)
+PROGRESS_GATE_MIN_TOPIC_OVERLAP = _env_int("PROGRESS_GATE_MIN_TOPIC_OVERLAP", 1)
+PROGRESS_GATE_UNCLEAR_ESCALATION_CHECKS = _env_int(
+    "PROGRESS_GATE_UNCLEAR_ESCALATION_CHECKS", 2
 )
-# Mid-answer ON_TRACK depth clarifiers (unexplained jargon); DRAG stays separate
-BOT_INTERRUPT_CLARIFIER_ON_TRACK = _env_bool("BOT_INTERRUPT_CLARIFIER_ON_TRACK", True)
-CLARIFIER_MIN_SPEECH_SEC = _env_float("CLARIFIER_MIN_SPEECH_SEC", 25.0)
-CLARIFIER_ON_TRACK_MIN_SPEECH_SEC = _env_float("CLARIFIER_ON_TRACK_MIN_SPEECH_SEC", 18.0)
-CLARIFIER_MIN_INTERVAL_SEC = _env_float("CLARIFIER_MIN_INTERVAL_SEC", 20.0)
-# Long CORE answers: longer VAD pause + merge window so one answer is not split into many LLM turns
-CORE_ANSWER_MERGE_WINDOW_SEC = _env_float("CORE_ANSWER_MERGE_WINDOW_SEC", 15.0)
-CORE_LONG_ANSWER_SPEECH_SEC = _env_float("CORE_LONG_ANSWER_SPEECH_SEC", 18.0)
-CORE_LONG_ANSWER_SILENCE_SEC = _env_float("CORE_LONG_ANSWER_SILENCE_SEC", 2.2)
-CORE_ANSWER_MAX_HOLD_SEC = _env_float("CORE_ANSWER_MAX_HOLD_SEC", 45.0)
+# Rule DRAG only when overlap is zero for this long (avoids false positives)
+PROGRESS_GATE_RULE_DRAG_MIN_SEC = _env_float("PROGRESS_GATE_RULE_DRAG_MIN_SEC", 45.0)
+PROGRESS_GATE_RULE_DRAG_MIN_WORDS = _env_int("PROGRESS_GATE_RULE_DRAG_MIN_WORDS", 40)
+
 # Allow Whisper fallback when Sarvam fails in Hinglish (final answers only)
 HINGLISH_WHISPER_FALLBACK = _env_bool("HINGLISH_WHISPER_FALLBACK", True)
 
@@ -241,39 +286,34 @@ MAX_QUESTION_REPHRASES = _env_int("MAX_QUESTION_REPHRASES", 1)
 NAME_NORMALIZE_ENABLED = _env_bool("NAME_NORMALIZE_ENABLED", True)
 MIN_ANSWER_WORDS = _env_int("MIN_ANSWER_WORDS", 8)
 MIN_SHORT_COMPLETE_WORDS = _env_int("MIN_SHORT_COMPLETE_WORDS", 5)
-MAX_ANSWER_CONTINUATIONS = _env_int("MAX_ANSWER_CONTINUATIONS", 1)
+MAX_ANSWER_CONTINUATIONS = _env_int("MAX_ANSWER_CONTINUATIONS", 2)
 INCOMPLETE_ANSWER_CHECK_ENABLED = _env_bool("INCOMPLETE_ANSWER_CHECK_ENABLED", True)
 
-# Post-TTS silence: confirm candidate can hear after bot finishes speaking
+# Presence: only before answer starts; never mid-answer
 POST_TTS_SILENCE_CHECK_ENABLED = _env_bool("POST_TTS_SILENCE_CHECK_ENABLED", True)
-POST_TTS_SILENCE_CHECK_SEC = _env_float("POST_TTS_SILENCE_CHECK_SEC", 18.0)
-# Minimum wait after a new main question before presence check (think time)
+POST_TTS_SILENCE_CHECK_SEC = _env_float("POST_TTS_SILENCE_CHECK_SEC", 22.0)
 POST_TTS_SILENCE_MIN_AFTER_QUESTION_SEC = _env_float(
-    "POST_TTS_SILENCE_MIN_AFTER_QUESTION_SEC", 18.0
+    "POST_TTS_SILENCE_MIN_AFTER_QUESTION_SEC", 22.0
 )
 MAX_PRESENCE_CHECKS_PER_QUESTION = _env_int("MAX_PRESENCE_CHECKS_PER_QUESTION", 1)
+POST_QUESTION_SILENCE_STEP1_SEC = _env_float("POST_QUESTION_SILENCE_STEP1_SEC", 22.0)
+POST_QUESTION_SILENCE_STEP2_SEC = _env_float("POST_QUESTION_SILENCE_STEP2_SEC", 12.0)
+POST_QUESTION_FINAL_WRAP_SEC = _env_float("POST_QUESTION_FINAL_WRAP_SEC", 15.0)
+PRESENCE_ONLY_AFTER_QUESTION = _env_bool("PRESENCE_ONLY_AFTER_QUESTION", True)
+PRESENCE_SKIP_DURING_ANSWER = _env_bool("PRESENCE_SKIP_DURING_ANSWER", True)
 
 # STT: do not flush/score tiny held turns while a long answer is in progress
 TURN_FLUSH_GUARD_MIN_CHARS = _env_int("TURN_FLUSH_GUARD_MIN_CHARS", 30)
 TURN_FLUSH_DEFER_SEC = _env_float("TURN_FLUSH_DEFER_SEC", 8.0)
 
-# After DRAG rephrase, wait before scoring a lone "that's it" / done phrase
-DRAG_REPHRASE_SCORE_GRACE_SEC = _env_float("DRAG_REPHRASE_SCORE_GRACE_SEC", 15.0)
-# DRAG handling: in-context tangent → one depth probe; off-context → skip to next Q
-DRAG_SKIP_SCORE = _env_int("DRAG_SKIP_SCORE", 2)
-BOT_INTERRUPT_MAX_DRAG_DEPTH_PER_Q = _env_int("BOT_INTERRUPT_MAX_DRAG_DEPTH_PER_Q", 1)
-DRAG_CONTEXT_MIN_OVERLAP = _env_int("DRAG_CONTEXT_MIN_OVERLAP", 1)
-# No mid-answer interrupts until this many seconds after a new main question finishes
-MAIN_QUESTION_INTERRUPT_COOLDOWN_SEC = _env_float(
-    "MAIN_QUESTION_INTERRUPT_COOLDOWN_SEC", 25.0
-)
-# No back-to-back bot mid-answer speech (depth clarifier / DRAG rephrase)
-MID_ANSWER_BOT_COOLDOWN_SEC = _env_float("MID_ANSWER_BOT_COOLDOWN_SEC", 18.0)
 # Reject tail fragments from the previous question shortly after advancing
 STALE_ANSWER_GUARD_SEC = _env_float("STALE_ANSWER_GUARD_SEC", 12.0)
 STALE_ANSWER_MAX_CHARS = _env_int("STALE_ANSWER_MAX_CHARS", 220)
-# Score clarifier reply directly instead of "continue kijiye" when reply is substantive
-CLARIFIER_REPLY_SCORE_MIN_CHARS = _env_int("CLARIFIER_REPLY_SCORE_MIN_CHARS", 40)
+
+# Latency: speak next question immediately; score in background
+ANSWER_ACK_BEFORE_EVAL = _env_bool("ANSWER_ACK_BEFORE_EVAL", False)
+PARALLEL_SCORE_ENABLED = _env_bool("PARALLEL_SCORE_ENABLED", True)
+STAGE1_GATE_WAIT_SEC = _env_float("STAGE1_GATE_WAIT_SEC", 8.0)
 
 # Intro phase: do not advance to Q1 on a short greeting-only pause
 INTRO_MIN_CHARS = _env_int("INTRO_MIN_CHARS", 80)
@@ -287,6 +327,14 @@ WHISPER_PRELOAD_ENABLED = _env_bool("WHISPER_PRELOAD_ENABLED", True)
 TURN_INTENT_CLASSIFIER_ENABLED = _env_bool("TURN_INTENT_CLASSIFIER_ENABLED", True)
 TURN_INTENT_MAX_CHARS = _env_int("TURN_INTENT_MAX_CHARS", 150)
 TURN_INTENT_MIN_CONFIDENCE = _env_float("TURN_INTENT_MIN_CONFIDENCE", 0.65)
+
+# Answer time budget (1 min initial → +30s extensions → hard cap)
+ANSWER_INITIAL_LISTEN_SEC = _env_float("ANSWER_INITIAL_LISTEN_SEC", 60.0)
+ANSWER_EXTEND_STEP_SEC = _env_float("ANSWER_EXTEND_STEP_SEC", 30.0)
+ANSWER_MAX_TOTAL_SEC = _env_float("ANSWER_MAX_TOTAL_SEC", float(MAX_ANSWER_SEC))
+
+# Sentinel queued when presence ladder exhausts without candidate speech
+PRESENCE_TIMEOUT_TOKEN = "__PRESENCE_TIMEOUT__"
 
 # Main asyncio event loop — set once by api_server.py's startup hook.
 # Stored here (not in api_server.py) so all modules share the same reference

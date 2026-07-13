@@ -45,7 +45,10 @@ class UIStrings:
     abuse_warning: str
     greeting_template: str
     nudge: str
+    topic_redirect: str
     presence_phrases: Tuple[str, ...]
+    presence_not_audible: str
+    presence_final_warning: str
     bridge_phrases: Tuple[str, ...]
 
 
@@ -77,12 +80,14 @@ _ENGLISH_UI = UIStrings(
     intro_thanks="Thank you for introducing yourself, {name}. {question}",
     stt_retry_prompt="Sorry, I didn't catch that clearly. Could you please say that again?",
     closing_low_average=(
-        "Thank you for your time today. We'll wrap up here. "
-        "The team will be in touch with next steps."
+        "Thank you for sharing your answers today — we really appreciate your time. "
+        "We'll wrap up the interview here. Our team will review your responses and "
+        "get back to you with next steps soon. Have a great day."
     ),
     closing_completed=(
-        "Thank you for completing the interview today. "
-        "We'll review your responses and be in touch soon."
+        "That brings us to the end of the interview. Thank you for your thoughtful "
+        "answers today — we appreciate the time you spent with us. We'll review "
+        "everything and be in touch with next steps. Take care."
     ),
     closing_abuse="I need to end our session here. Thank you for your time.",
     abuse_warning=(
@@ -93,12 +98,21 @@ _ENGLISH_UI = UIStrings(
         "Before we begin, could you please introduce yourself briefly?"
     ),
     nudge="Let's bring the focus back to the question whenever you're ready.",
+    topic_redirect=(
+        "Let's come back to the question — please focus your answer on what was asked."
+    ),
     presence_phrases=(
         "Can you hear me clearly?",
         "Just checking — are you still there?",
         "Take your time. Can you hear me okay?",
     ),
-    bridge_phrases=("Alright.", "Got it.", "Okay.", "Sure.", "Understood.", "Right."),
+    presence_not_audible=(
+        "I'm not hearing you clearly. Are you able to speak?"
+    ),
+    presence_final_warning=(
+        "If I don't hear from you in the next few seconds, we'll move to the next question."
+    ),
+    bridge_phrases=("Okay.", "So,", "Alright.", "Got it.", "Sure.", "Right."),
 )
 
 _HINGLISH_UI = UIStrings(
@@ -122,12 +136,14 @@ _HINGLISH_UI = UIStrings(
     intro_thanks="Intro dene ke liye dhanyavaad, {name}. {question}",
     stt_retry_prompt="Sorry, awaaz clear nahi aayi. Kya aap dobara bol sakte hain?",
     closing_low_average=(
-        "Aaj ke liye dhanyavaad. Yahan wrap up karte hain. "
-        "Team aapko next steps ke saath contact karegi."
+        "Aaj ke answers share karne ke liye bahut dhanyavaad — aapka time valuable hai. "
+        "Yahan interview wrap up karte hain. Team aapke responses review karke "
+        "jaldi next steps ke saath contact karegi. Aapka din shubh ho."
     ),
     closing_completed=(
-        "Interview complete karne ke liye dhanyavaad. "
-        "Hum aapke responses review karenge aur jald contact karenge."
+        "Yeh interview ka ant hai. Aapke thoughtful answers ke liye dhanyavaad — "
+        "hum aapka time appreciate karte hain. Sab review karke next steps ke saath "
+        "jald contact karenge. Take care."
     ),
     closing_abuse="Mujhe yahan session end karna hoga. Aaj ke liye dhanyavaad.",
     abuse_warning=(
@@ -138,12 +154,21 @@ _HINGLISH_UI = UIStrings(
         "Shuru karne se pehle, kripya apna brief introduction dijiye."
     ),
     nudge="Koi baat nahi — jab ready hon, sawal par wapas aate hain.",
+    topic_redirect=(
+        "Chaliye sawal par wapas aate hain — kripya jo pucha gaya hai usi par focus karke jawab dijiye."
+    ),
     presence_phrases=(
         "Kya aap mujhe clearly sun pa rahe hain?",
         "Bas check kar raha hoon — kya aap abhi bhi hain?",
         "Apna time lijiye. Kya aap mujhe sun pa rahe hain?",
     ),
-    bridge_phrases=("Theek hai.", "Samajh gaya.", "Okay.", "Achha.", "Right.", "Got it."),
+    presence_not_audible=(
+        "Mujhe aapki awaaz clearly nahi aa rahi. Kya aap bol sakte hain?"
+    ),
+    presence_final_warning=(
+        "Agar agle kuch seconds mein jawab nahi aaya, to hum agle sawal par chalenge."
+    ),
+    bridge_phrases=("Okay.", "So,", "Theek hai.", "Samajh gaya.", "Achha.", "Right."),
 )
 
 

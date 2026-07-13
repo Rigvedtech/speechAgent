@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Optional
 import edge_tts
 from recall_bot_service import RecallBotService
+from config import TTS_STREAMING_ENABLED
 
 # Import Sarvam TTS
 try:
@@ -79,6 +80,7 @@ class IntegratedAudioSender:
         self.webpage_ctrl_sender = webpage_ctrl_sender     # (dict)      → None
         self.use_webpage = webpage_broadcaster is not None
         self.use_webrtc = webrtc_manager is not None and not self.use_webpage
+        self._tts_sample_rate = 24000
         
         # Initialize Sarvam TTS if enabled
         self.sarvam_engine = None
@@ -89,6 +91,7 @@ class IntegratedAudioSender:
             try:
                 # Build Sarvam config
                 config_dict = sarvam_config or {}
+                self._tts_sample_rate = int(config_dict.get("sample_rate", 24000))
                 config = SarvamTTSConfig(
                     api_key=sarvam_api_key,
                     speaker=sarvam_speaker,
@@ -115,45 +118,44 @@ class IntegratedAudioSender:
             output_mode = "Webpage-PCM" if self.use_webpage else ("WebRTC" if self.use_webrtc else "File upload")
             logger.info(f"IntegratedAudioSender initialized — Edge-TTS only. Output: {output_mode}")
     
-    @staticmethod
-    def _mp3_to_pcm_int16(mp3_bytes: bytes, target_rate: int = 24000) -> bytes:
-        """
-        Convert MP3 bytes → raw Int16 PCM (little-endian, mono, target_rate Hz).
-        Used by the Output Media webpage path to feed the AudioWorklet.
-        """
+    def _decode_mp3_to_pcm(self, mp3_bytes: bytes) -> bytes:
+        """Convert MP3 → mono Int16 PCM at configured TTS sample rate."""
         try:
             from pydub import AudioSegment
             audio = AudioSegment.from_mp3(io.BytesIO(mp3_bytes))
-            audio = (
-                audio
-                .set_channels(1)
-                .set_sample_width(2)        # 16-bit = 2 bytes
-                .set_frame_rate(target_rate)
-            )
+            audio = audio.set_channels(1).set_sample_width(2)
+            if audio.frame_rate != self._tts_sample_rate:
+                audio = audio.set_frame_rate(self._tts_sample_rate)
             return audio.raw_data
         except Exception as e:
             logger.error(f"MP3→PCM conversion failed: {e}")
             return b""
 
-    @staticmethod
-    def _try_decode_mp3(mp3_bytes: bytes, target_rate: int = 24000) -> Optional[bytes]:
-        """
-        Attempt to decode a *partial* MP3 buffer.  Returns None if ffmpeg
-        cannot find enough sync frames — caller should keep accumulating.
-        Returns an empty-bytes sentinel (b"") on a genuine decode error.
-        """
+    def _try_decode_mp3(self, mp3_bytes: bytes) -> Optional[bytes]:
+        """Decode partial MP3; None if ffmpeg needs more frames."""
         try:
             from pydub import AudioSegment
             audio = AudioSegment.from_mp3(io.BytesIO(mp3_bytes))
-            audio = (
-                audio
-                .set_channels(1)
-                .set_sample_width(2)
-                .set_frame_rate(target_rate)
-            )
+            audio = audio.set_channels(1).set_sample_width(2)
+            if audio.frame_rate != self._tts_sample_rate:
+                audio = audio.set_frame_rate(self._tts_sample_rate)
             return audio.raw_data
         except Exception:
-            return None  # Partial / un-decodable — keep accumulating
+            return None
+
+    @staticmethod
+    def _mp3_to_pcm_int16(mp3_bytes: bytes, target_rate: int = 24000) -> bytes:
+        """Legacy static helper — prefer instance _decode_mp3_to_pcm."""
+        try:
+            from pydub import AudioSegment
+            audio = AudioSegment.from_mp3(io.BytesIO(mp3_bytes))
+            audio = audio.set_channels(1).set_sample_width(2)
+            if audio.frame_rate != target_rate:
+                audio = audio.set_frame_rate(target_rate)
+            return audio.raw_data
+        except Exception as e:
+            logger.error(f"MP3→PCM conversion failed: {e}")
+            return b""
 
     async def ensure_sarvam_connected(self) -> bool:
         """Pre-connect Sarvam WebSocket so first sentence has no connect delay."""
@@ -236,11 +238,12 @@ class IntegratedAudioSender:
         # Try Sarvam TTS first if enabled
         if self.use_sarvam and self.sarvam_engine and not self.using_fallback:
             try:
-                # Webpage mode: use streaming path so first audio hits the browser
-                # as soon as Sarvam sends ~4 KB (~256 ms) instead of waiting for
-                # the full sentence.  All other output paths use the original
-                # batch method (file upload / WebRTC don't benefit from streaming).
-                if self.use_webpage and self.webpage_broadcaster:
+                # Batch decode is cleaner (no partial-frame hiss). Streaming only if enabled.
+                if (
+                    self.use_webpage
+                    and self.webpage_broadcaster
+                    and TTS_STREAMING_ENABLED
+                ):
                     success = await self._send_via_sarvam_streaming(bot_id, text, state)
                 else:
                     success = await self._send_via_sarvam(bot_id, text, state)
@@ -312,7 +315,7 @@ class IntegratedAudioSender:
             # Output Media webpage: convert MP3 → PCM and stream over WebSocket
             if self.webpage_ctrl_sender:
                 self.webpage_ctrl_sender({"type": "start_speaking"})
-            pcm = self._mp3_to_pcm_int16(audio_mp3)
+            pcm = self._decode_mp3_to_pcm(audio_mp3)
             if not pcm:
                 logger.error("Sarvam TTS: MP3→PCM conversion returned empty bytes")
                 return False
@@ -380,7 +383,7 @@ class IntegratedAudioSender:
         DECODE_THRESHOLD = 4096
         # Discard decoded PCM that is suspiciously short (ffmpeg decoded garbage).
         # 50 ms at 24 kHz / 16-bit = 2400 bytes.
-        MIN_PCM_OUTPUT = 2400
+        MIN_PCM_OUTPUT = max(int(self._tts_sample_rate * 0.05 * 2), 2400)
         PCM_CHUNK = 4096
 
         mp3_buffer        = bytearray()
@@ -418,7 +421,7 @@ class IntegratedAudioSender:
             # Final flush — remaining bytes that didn't reach DECODE_THRESHOLD
             # or couldn't be decoded early.
             if mp3_buffer and not (state and state.interrupt_flag.is_set()):
-                pcm = self._mp3_to_pcm_int16(bytes(mp3_buffer))
+                pcm = self._decode_mp3_to_pcm(bytes(mp3_buffer))
                 if pcm:
                     _broadcast_pcm(pcm)
 
@@ -493,7 +496,7 @@ class IntegratedAudioSender:
             if self.use_webpage and self.webpage_broadcaster:
                 if self.webpage_ctrl_sender:
                     self.webpage_ctrl_sender({"type": "start_speaking"})
-                pcm = self._mp3_to_pcm_int16(mp3_data)
+                pcm = self._decode_mp3_to_pcm(mp3_data)
                 if not pcm:
                     logger.error("Edge-TTS: MP3→PCM conversion returned empty bytes")
                     return False

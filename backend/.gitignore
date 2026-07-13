@@ -20,6 +20,16 @@ __pycache__/
 *.pyd
 *.log
 
+# Runtime artifacts (keep folders via .gitkeep)
+logs/*
+!logs/.gitkeep
+transcripts/*
+!transcripts/.gitkeep
+reports/*
+!reports/.gitkeep
+feedback/*
+!feedback/.gitkeep
+
 # Temp audio files & large models
 *.mp3
 *.wav
