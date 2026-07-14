@@ -1,4 +1,4 @@
--- Job openings / positions created by recruiters (source of truth for job title).
+-- Job openings / positions (manual, upload, or org ATS import).
 
 CREATE TABLE job_postings (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -7,6 +7,8 @@ CREATE TABLE job_postings (
     job_title           VARCHAR(255) NOT NULL,
     jd_text             TEXT,
     jd_document_id      UUID REFERENCES documents (id) ON DELETE SET NULL,
+    source              VARCHAR(20) NOT NULL DEFAULT 'manual',
+    external_ats_id     VARCHAR(255),
     status              VARCHAR(20) NOT NULL DEFAULT 'open',
     description         TEXT,
     is_active           BOOLEAN NOT NULL DEFAULT TRUE,
@@ -16,6 +18,9 @@ CREATE TABLE job_postings (
 
     CONSTRAINT job_postings_status_valid CHECK (
         status IN ('draft', 'open', 'closed', 'filled')
+    ),
+    CONSTRAINT job_postings_source_valid CHECK (
+        source IN ('manual', 'upload', 'ats')
     ),
     CONSTRAINT job_postings_title_nonempty CHECK (LENGTH(TRIM(job_title)) >= 2),
     CONSTRAINT job_postings_jd_min_len CHECK (
@@ -29,6 +34,9 @@ CREATE INDEX idx_job_postings_status ON job_postings (organization_id, status)
     WHERE is_active = TRUE AND deleted_at IS NULL;
 CREATE INDEX idx_job_postings_title_trgm ON job_postings
     USING GIN (job_title gin_trgm_ops);
+CREATE INDEX idx_job_postings_source ON job_postings (organization_id, source);
+CREATE UNIQUE INDEX idx_job_postings_org_ats_id ON job_postings (organization_id, external_ats_id)
+    WHERE external_ats_id IS NOT NULL;
 
 ALTER TABLE document_extractions
     ADD CONSTRAINT document_extractions_job_posting_id_fkey
@@ -36,4 +44,9 @@ ALTER TABLE document_extractions
 
 CREATE INDEX idx_document_extractions_job_posting ON document_extractions (job_posting_id);
 
-COMMENT ON TABLE job_postings IS 'Recruiter-owned job requisitions; interview sessions link here for title search and reporting.';
+COMMENT ON TABLE job_postings IS
+    'Recruiter-owned job requisitions; may come from manual entry, upload, or ATS.';
+COMMENT ON COLUMN job_postings.source IS
+    'How this job entered the system: manual, upload, or ats.';
+COMMENT ON COLUMN job_postings.external_ats_id IS
+    'Job id in the org ATS; used for dedupe/re-import. NULL if not from ATS.';

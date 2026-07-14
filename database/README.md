@@ -18,13 +18,13 @@ psql -U postgres -d speechagent -f database/init.sql
 
 | File | Object | Purpose |
 |------|--------|---------|
-| `001_organization.sql` | `organization` | Tenant / hiring company |
+| `001_organization.sql` | `organization` | Tenant + optional org-wide ATS connection |
 | `002_users.sql` | `users` | Recruiters & admins |
-| `003_candidates.sql` | `candidates` | People interviewed |
-| `004_documents.sql` | `documents` | Uploaded JD/CV files |
+| `003_candidates.sql` | `candidates` | People interviewed (manual / upload / ATS) |
+| `004_documents.sql` | `documents` | JD/CV files (upload or ATS) |
 | `005_document_extractions.sql` | `document_extractions` | One generate/extract run (JD+CV → questions) |
-| `006_job_postings.sql` | `job_postings` | Job title / role |
-| `009_interview_sessions.sql` | `interview_sessions` | One bot interview |
+| `006_job_postings.sql` | `job_postings` | Job title / role (manual / upload / ATS) |
+| `009_interview_sessions.sql` | `interview_sessions` | Scheduled or live bot interview |
 | `010_interview_configs.sql` | `interview_configs` | Frozen JD/CV + thresholds for that run |
 | `011_interview_questions.sql` | `interview_questions` | This interview’s question plan + status |
 | `012_interview_answers.sql` | `interview_answers` | Scored answers |
@@ -53,10 +53,13 @@ organization
 
 | Need | Use |
 |------|-----|
-| Session / bot / meeting | `interview_sessions` (`interview_id` stays stable on rejoin; update `bot_id`) |
+| Session / bot / meeting | `interview_sessions` (`bot_id` NULL = scheduled; set on Send to lobby) |
 | JD/CV used in the interview | `interview_configs` |
 | Latest candidate CV text | `candidates.cv_text` |
-| Uploaded files | `documents` |
+| Files (ours vs ATS) | `documents` (`source`, `external_ats_id`) |
+| Our candidates vs ATS | `candidates.source` / `external_ats_id` |
+| Our jobs vs ATS | `job_postings.source` / `external_ats_id` |
+| Org ATS connection | `organization.ats_provider` + `ats_config` |
 | Generated Q list before join | `document_extractions.questions_json` |
 | Asked / remaining questions | `interview_questions` |
 | Scores | `interview_answers` |
@@ -66,5 +69,6 @@ organization
 ## Notes
 
 - Questions are generated **per interview** from JD + CV (no reusable question-bank tables).
+- ATS connection is **org-wide**; imported rows stay in the same tables with `source = 'ats'`.
 - Filter by recruiter with `created_by = :user_id` on candidates, jobs, and sessions.
 - `v_interview_overview` / `v_job_posting_stats` are for lists and role stats.
