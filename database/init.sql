@@ -24,5 +24,6 @@
 \ir 015_session_events.sql
 \ir 016_views.sql
 \ir 017_candidate_feedback.sql
+\ir 018_organization_ats_api_key.sql
 
 \echo 'Schema applied successfully.'

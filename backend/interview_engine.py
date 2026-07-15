@@ -776,6 +776,8 @@ class InterviewOrchestrator:
     # not_needed | pending | ready | failed
     localization_status: str = "not_needed"
     localization_error: str = ""
+    # Postgres interview_sessions.id when persistence is enabled
+    db_interview_id: Optional[str] = None
 
     def is_localization_ready(self) -> bool:
         if self.language_mode != "hinglish":
@@ -808,6 +810,13 @@ class InterviewOrchestrator:
             self._spoken_question_cache.update(cache)
             self.localization_status = status
             self.localization_error = ""
+        if self.db_interview_id and cache:
+            try:
+                from interview_persist import update_spoken_questions
+
+                update_spoken_questions(self.db_interview_id, dict(cache))
+            except Exception as ex:
+                logger.warning("[interview] spoken cache persist failed: %s", ex)
 
     def mark_localization_failed(self, error: str) -> None:
         with self._lock:
@@ -824,18 +833,37 @@ class InterviewOrchestrator:
         cv_text: str,
         bank: List[BankQuestion],
         language_mode: LanguageMode = "english",
+        planned: Optional[List[BankQuestion]] = None,
+        db_interview_id: Optional[str] = None,
     ) -> "InterviewOrchestrator":
-        planned = QuestionSelector.select(bank, config.MAX_QUESTIONS)
+        planned_qs = planned if planned is not None else QuestionSelector.select(
+            bank, config.MAX_QUESTIONS
+        )
         orch = cls(
             bot_id=bot_id,
             candidate_name=candidate_name.strip(),
             jd_text=jd_text.strip(),
             cv_text=cv_text.strip(),
-            planned_questions=planned,
+            planned_questions=planned_qs,
             language_mode=language_mode,
+            db_interview_id=db_interview_id,
         )
         orch._log_injection()
         return orch
+
+    def _persist_answer_record(self, record: AnswerRecord) -> None:
+        if not self.db_interview_id:
+            return
+        try:
+            from interview_persist import persist_answer
+
+            persist_answer(self.db_interview_id, record)
+        except Exception as ex:
+            logger.warning(
+                "[interview] persist answer failed bot=%s: %s",
+                self.bot_id[:8] if self.bot_id else "?",
+                ex,
+            )
 
     def _ui(self):
         return get_ui_strings(self.language_mode)
@@ -1537,6 +1565,7 @@ class InterviewOrchestrator:
                 evaluation.score,
                 f"{avg:.2f}" if avg is not None else "n/a",
             )
+        self._persist_answer_record(record)
 
     def decide_after_bridge(
         self,
@@ -1569,6 +1598,7 @@ class InterviewOrchestrator:
             if not any(r.question_index == record.question_index for r in self.answer_records):
                 self.answer_records.append(record)
                 self.answer_records.sort(key=lambda r: r.question_index)
+                self._persist_answer_record(record)
 
             stage_avg = self.stage1_average()
             if stage_avg is None:
@@ -1871,6 +1901,7 @@ class InterviewOrchestrator:
                 evaluation.score,
             )
             self._log_score(record, rolling_avg, can_continue)
+            self._persist_answer_record(record)
 
             self._reset_clarifier_state()
 
@@ -2041,6 +2072,7 @@ class InterviewOrchestrator:
             can_continue = self._rolling.can_continue(config.CONTINUE_AVG_THRESHOLD)
 
             self._log_score(record, rolling_avg, can_continue)
+            self._persist_answer_record(record)
             if clarifier_count:
                 logger.info(
                     "[SCORE] bot=%s Q%d scored with %d clarifier exchange(s) included",

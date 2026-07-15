@@ -1,3 +1,5 @@
+import { clearAuth, getAccessToken } from '@/lib/auth-store'
+
 export class ApiError extends Error {
   status: number
   detail: unknown
@@ -11,6 +13,25 @@ export class ApiError extends Error {
 }
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? ''
+
+function authHeaders(): Record<string, string> {
+  const token = getAccessToken()
+  if (!token) return {}
+  return { Authorization: `Bearer ${token}` }
+}
+
+function handleUnauthorized(path: string, status: number) {
+  if (status !== 401) return
+  // Don't clear session while trying to log in / register
+  if (path.startsWith('/api/auth/login') || path.startsWith('/api/auth/register-org')) {
+    return
+  }
+  if (!getAccessToken()) return
+  clearAuth()
+  if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+    window.location.assign('/login')
+  }
+}
 
 async function readResponseBody(res: Response): Promise<unknown> {
   const text = await res.text()
@@ -27,6 +48,10 @@ function parseErrorMessage(status: number, body: unknown): { message: string; de
     const detail = (body as { detail: unknown }).detail
     if (typeof detail === 'string') {
       return { message: detail, detail }
+    }
+    if (Array.isArray(detail)) {
+      const first = detail[0] as { msg?: string } | undefined
+      return { message: first?.msg ?? `Request failed (${status})`, detail }
     }
     if (detail && typeof detail === 'object') {
       const d = detail as { message?: string }
@@ -50,11 +75,13 @@ export async function request<T>(
       signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
+        ...authHeaders(),
         ...init.headers,
       },
     })
 
     if (!res.ok) {
+      handleUnauthorized(path, res.status)
       const body = await readResponseBody(res)
       const { message, detail } = parseErrorMessage(res.status, body)
       throw new ApiError(res.status, message, detail)
@@ -83,7 +110,7 @@ export async function requestFormData<T>(
   formData: FormData,
   options: { timeoutMs?: number } = {},
 ): Promise<T> {
-  const { timeoutMs = 180000, ...rest } = options
+  const { timeoutMs = 180000 } = options
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
 
@@ -92,10 +119,13 @@ export async function requestFormData<T>(
       method: 'POST',
       body: formData,
       signal: controller.signal,
-      ...rest,
+      headers: {
+        ...authHeaders(),
+      },
     })
 
     if (!res.ok) {
+      handleUnauthorized(path, res.status)
       const body = await readResponseBody(res)
       const { message, detail } = parseErrorMessage(res.status, body)
       throw new ApiError(res.status, message, detail)

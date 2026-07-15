@@ -18,6 +18,14 @@ export interface InterviewDraftMeta {
   questionsGenerated?: boolean
   cvInputMode?: DocumentInputMode
   jdInputMode?: DocumentInputMode
+  candidateId?: string | null
+  jobPostingId?: string | null
+  extractionId?: string | null
+  /** ATS requirement id for the selected job (locks candidate ATS list). */
+  atsJobExternalId?: string | null
+  pendingAtsJobExternalId?: string | null
+  pendingAtsCandidateExternalId?: string | null
+  pendingAtsCandidateParentId?: string | null
 }
 
 const emptyDraft: JoinFormValues = {

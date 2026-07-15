@@ -1,5 +1,5 @@
 import { useRef } from 'react'
-import { FileText, Upload, X } from 'lucide-react'
+import { Eye, FileText, Upload, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { cn } from '@/lib/utils'
 
@@ -13,6 +13,18 @@ interface CompactFileUploadProps {
   error?: string
 }
 
+function canPreview(file: File) {
+  const name = file.name.toLowerCase()
+  return (
+    name.endsWith('.pdf') ||
+    name.endsWith('.txt') ||
+    name.endsWith('.doc') ||
+    name.endsWith('.docx') ||
+    file.type.startsWith('text/') ||
+    file.type === 'application/pdf'
+  )
+}
+
 export function CompactFileUpload({
   label,
   hint = 'PDF, DOC, DOCX, or TXT',
@@ -23,6 +35,18 @@ export function CompactFileUpload({
   error,
 }: CompactFileUploadProps) {
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const openPreview = () => {
+    if (!file) return
+    const url = URL.createObjectURL(file)
+    const win = window.open(url, '_blank', 'noopener,noreferrer')
+    if (!win) {
+      URL.revokeObjectURL(url)
+      return
+    }
+    // Revoke after the tab has a chance to load
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  }
 
   return (
     <div className="select-none">
@@ -68,16 +92,32 @@ export function CompactFileUpload({
           </span>
         </button>
         {file ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8 shrink-0"
-            disabled={disabled}
-            onClick={() => onFileSelect(null)}
-          >
-            <X className="h-4 w-4" />
-          </Button>
+          <div className="flex shrink-0 items-center gap-0.5">
+            {canPreview(file) ? (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                disabled={disabled}
+                title="Preview file"
+                onClick={openPreview}
+              >
+                <Eye className="h-4 w-4" strokeWidth={1.5} />
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              disabled={disabled}
+              title="Remove file"
+              onClick={() => onFileSelect(null)}
+            >
+              <X className="h-4 w-4" />
+            </Button>
+          </div>
         ) : null}
       </div>
       {error ? <p className="mt-1.5 text-xs text-destructive">{error}</p> : null}

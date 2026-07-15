@@ -340,3 +340,26 @@ PRESENCE_TIMEOUT_TOKEN = "__PRESENCE_TIMEOUT__"
 # Stored here (not in api_server.py) so all modules share the same reference
 # regardless of whether api_server is run as __main__ or imported as a module.
 main_event_loop = None
+
+# --- PostgreSQL + JWT auth (Phase 0) ---
+DATABASE_URL = _env_str("DATABASE_URL", "")
+APP_ENV = _env_str("APP_ENV", "development").lower()  # development | production
+JWT_SECRET = _env_str("JWT_SECRET", "dev-change-me-speechagent-jwt-secret")
+JWT_ALGORITHM = _env_str("JWT_ALGORITHM", "HS256")
+# Shorter sessions in production by default
+JWT_EXPIRE_MINUTES = _env_int(
+    "JWT_EXPIRE_MINUTES",
+    60 * 8 if APP_ENV == "production" else 60 * 24 * 7,
+)
+JWT_ISSUER = _env_str("JWT_ISSUER", "speechagent")
+JWT_AUDIENCE = _env_str("JWT_AUDIENCE", "speechagent-api")
+
+# Master key for encrypting per-org ATS API keys in organization.ats_api_key_encrypted.
+# Prefer a Fernet key (python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+# or any long passphrase (SHA-256 derived). Falls back to JWT_SECRET in development only.
+ATS_SECRET_ENCRYPTION_KEY = _env_str("ATS_SECRET_ENCRYPTION_KEY", "")
+
+# --- Document uploads (CV/JD files on disk + documents table) ---
+# Relative paths resolve under backend/; absolute paths used as-is.
+DOCUMENT_UPLOAD_DIR = _env_str("DOCUMENT_UPLOAD_DIR", "uploads")
+DOCUMENT_MAX_BYTES = _env_int("DOCUMENT_MAX_BYTES", 15 * 1024 * 1024)  # 15 MB

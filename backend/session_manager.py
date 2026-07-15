@@ -62,6 +62,8 @@ class MeetingSession:
     # Stored at join; used when POST /api/start triggers greeting
     pending_greeting_message: Optional[str] = None
     created_at: float = field(default_factory=time.time)
+    # Postgres interview_sessions.id when this live bot is linked to a DB row
+    db_interview_id: Optional[str] = None
 
     def __post_init__(self):
         """Initialize processing components that don't need Sarvam config."""

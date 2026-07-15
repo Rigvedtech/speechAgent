@@ -29,6 +29,8 @@ reports/*
 !reports/.gitkeep
 feedback/*
 !feedback/.gitkeep
+uploads/*
+!uploads/.gitkeep
 
 # Temp audio files & large models
 *.mp3

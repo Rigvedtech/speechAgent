@@ -1,27 +1,51 @@
-import { NavLink, Outlet, useLocation } from 'react-router-dom'
+import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { LayoutDashboard, PlusCircle, FileText, Moon, Sun } from 'lucide-react'
+import {
+  LayoutDashboard,
+  PlusCircle,
+  CalendarClock,
+  FileText,
+  Moon,
+  Sun,
+  Users,
+  LogOut,
+  Plug,
+} from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getHealth } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { useTheme } from '@/hooks/useTheme'
+import { useAuth } from '@/hooks/useAuth'
 import { PrabhatBrand } from '@/components/brand/PrabhatBrand'
 
 const navItems = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/interviews/new', label: 'New Interview', icon: PlusCircle },
+  { to: '/interviews/scheduled', label: 'Scheduled', icon: CalendarClock },
   { to: '/reports', label: 'Reports', icon: FileText },
 ]
 
 const pageTitles: Record<string, string> = {
   '/dashboard': 'Overview',
   '/interviews/new': 'Schedule interview',
+  '/interviews/scheduled': 'Scheduled interviews',
   '/reports': 'Reports',
+  '/settings/team': 'Team',
+  '/settings/ats': 'ATS',
 }
 
 function resolveTitle(pathname: string) {
   if (pathname === '/interviews/new') {
     return 'Schedule interview'
+  }
+  if (pathname === '/interviews/scheduled') {
+    return 'Scheduled interviews'
+  }
+  if (pathname === '/settings/team') {
+    return 'Team'
+  }
+  if (pathname === '/settings/ats') {
+    return 'ATS connection'
   }
   if (pathname.startsWith('/interviews/') && pathname.endsWith('/report')) {
     return 'Interview Report'
@@ -34,8 +58,10 @@ function resolveTitle(pathname: string) {
 
 export function AppShell() {
   const location = useLocation()
+  const navigate = useNavigate()
   const title = resolveTitle(location.pathname)
   const { theme, toggleTheme } = useTheme()
+  const { user, organization, isAdmin, logout } = useAuth()
 
   const health = useQuery({
     queryKey: queryKeys.health,
@@ -46,17 +72,26 @@ export function AppShell() {
 
   const online = health.isSuccess && health.data?.status === 'healthy'
   const isInterviewWizard = location.pathname === '/interviews/new'
+  const isScheduledPage = location.pathname === '/interviews/scheduled'
   const isLiveSession =
     /^\/interviews\/[^/]+$/.test(location.pathname) &&
-    !location.pathname.endsWith('/report')
+    !location.pathname.endsWith('/report') &&
+    location.pathname !== '/interviews/scheduled'
   const isReportsPage = location.pathname === '/reports'
+  const isTeamPage = location.pathname === '/settings/team'
+  const isAtsPage = location.pathname === '/settings/ats'
   const isReportDetailPage = /^\/interviews\/[^/]+\/report$/.test(location.pathname)
   const isFixedHeightPage =
-    isInterviewWizard || isLiveSession || isReportsPage || isReportDetailPage
+    isInterviewWizard ||
+    isScheduledPage ||
+    isLiveSession ||
+    isReportsPage ||
+    isReportDetailPage ||
+    isTeamPage ||
+    isAtsPage
 
   return (
     <div className="flex min-h-screen bg-background">
-      {/* Sticky sidebar — same tone as header (unified shell, not black vs white) */}
       <aside className="no-print sticky top-0 flex h-screen w-56 shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
         <div className="flex h-14 shrink-0 items-center border-b border-sidebar-border px-2">
           <div className="px-3">
@@ -72,7 +107,7 @@ export function AppShell() {
               end={end}
               className={({ isActive }) =>
                 cn(
-                  'surface-hover flex items-center gap-2.5 rounded-md px-3 py-2.5 text-base',
+                  'surface-hover flex items-center gap-2.5 rounded-md px-3 py-2 text-base',
                   isActive
                     ? 'bg-sidebar-active font-medium text-sidebar-foreground'
                     : 'text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-foreground',
@@ -83,34 +118,75 @@ export function AppShell() {
               {label}
             </NavLink>
           ))}
+          {isAdmin ? (
+            <>
+              <NavLink
+                to="/settings/team"
+                className={({ isActive }) =>
+                  cn(
+                    'surface-hover flex items-center gap-2.5 rounded-md px-3 py-2 text-sm',
+                    isActive
+                      ? 'bg-sidebar-active font-medium text-sidebar-foreground'
+                      : 'text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-foreground',
+                  )
+                }
+              >
+                <Users className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+                Team
+              </NavLink>
+              <NavLink
+                to="/settings/ats"
+                className={({ isActive }) =>
+                  cn(
+                    'surface-hover flex items-center gap-2.5 rounded-md px-3 py-2 text-sm',
+                    isActive
+                      ? 'bg-sidebar-active font-medium text-sidebar-foreground'
+                      : 'text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-foreground',
+                  )
+                }
+              >
+                <Plug className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+                ATS
+              </NavLink>
+            </>
+          ) : null}
         </nav>
 
         <div className="shrink-0 border-t border-sidebar-border p-2">
-          <div
-            className={cn(
-              'flex items-center gap-2.5 rounded-md px-3 py-2.5',
-              online ? 'bg-success/5' : 'bg-destructive/5',
-            )}
-            role="status"
-            aria-live="polite"
-          >
-            <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+          <div className="rounded-md px-3 py-1">
+            <div className="flex items-center gap-2">
+              <p className="min-w-0 flex-1 truncate text-xs font-medium leading-tight text-sidebar-foreground">
+                {user?.full_name}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  logout()
+                  navigate('/login', { replace: true })
+                }}
+                className="surface-hover inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-foreground"
+                aria-label="Sign out"
+                title="Sign out"
+              >
+                <LogOut className="h-3.5 w-3.5" strokeWidth={1.5} />
+              </button>
+            </div>
+            <div className="flex items-center gap-2">
+              <p className="min-w-0 flex-1 truncate text-[11px] leading-tight text-sidebar-muted">
+                {organization?.name} · {user?.role}
+              </p>
               <span
                 className={cn(
-                  'h-2 w-2 rounded-full',
-                  online ? 'bg-success shadow-[0_0_6px_rgba(34,197,94,0.45)]' : 'bg-destructive',
+                  'mr-2 h-1 w-0.5 shrink-0 rounded-full',
+                  online
+                    ? 'animate-pulse bg-success shadow-[0_0_5px_rgba(34,197,94,0.4)]'
+                    : 'bg-destructive',
                 )}
-                aria-hidden
+                role="status"
+                aria-label={online ? 'Server online' : 'Server offline'}
+                title={online ? 'Server online' : 'Server offline'}
               />
-            </span>
-            <span
-              className={cn(
-                'text-xs font-medium leading-none',
-                online ? 'text-sidebar-foreground' : 'text-sidebar-muted',
-              )}
-            >
-              {online ? 'Server is up' : 'Server is down'}
-            </span>
+            </div>
           </div>
         </div>
       </aside>

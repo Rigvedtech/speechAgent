@@ -853,7 +853,12 @@ class LLMBrain:
             if orch:
                 orch.mark_ended()
                 try:
-                    save_report(orch.bot_id, orch.build_report())
+                    report = orch.build_report()
+                    save_report(orch.bot_id, report)
+                    if orch.db_interview_id:
+                        from interview_persist import save_interview_report
+
+                        save_interview_report(orch.db_interview_id, report)
                 except Exception as ex:
                     logger.warning(
                         "[REPORT STORE] failed at interview end bot=%s: %s",

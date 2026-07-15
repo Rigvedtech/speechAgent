@@ -33,6 +33,7 @@ psql -U postgres -d speechagent -f database/init.sql
 | `015_session_events.sql` | `session_events` | Ops timeline |
 | `016_views.sql` | views | Dashboard read models |
 | `017_candidate_feedback.sql` | `candidate_feedback` | Post-interview feedback |
+| `018_organization_ats_api_key.sql` | `organization` alter | Encrypted per-org ATS API key |
 
 ## Relationships
 
@@ -59,7 +60,7 @@ organization
 | Files (ours vs ATS) | `documents` (`source`, `external_ats_id`) |
 | Our candidates vs ATS | `candidates.source` / `external_ats_id` |
 | Our jobs vs ATS | `job_postings.source` / `external_ats_id` |
-| Org ATS connection | `organization.ats_provider` + `ats_config` |
+| Org ATS connection | `organization.ats_provider` + `ats_config` + `ats_api_key_encrypted` |
 | Generated Q list before join | `document_extractions.questions_json` |
 | Asked / remaining questions | `interview_questions` |
 | Scores | `interview_answers` |

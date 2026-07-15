@@ -1,5 +1,5 @@
 """
-Shared logic for resolving interview reports (live session or persisted).
+Shared logic for resolving interview reports (live session, DB, or disk).
 """
 
 from __future__ import annotations
@@ -29,9 +29,20 @@ def resolve_interview_report(
     """
     Return a completed report for bot_id.
 
-    - Persisted report on disk (survives session cleanup / new join)
-    - Live session only when interview_ended is set
+    Order:
+    1. Postgres interview_reports (preferred)
+    2. Disk file under backend/reports/ (legacy / fallback)
+    3. Live in-memory session when interview_ended is set
     """
+    try:
+        from interview_persist import load_report_by_bot_id
+
+        db_report = load_report_by_bot_id(bot_id)
+        if db_report:
+            return db_report
+    except Exception as ex:
+        logger.warning("[REPORT] DB load failed bot=%s: %s", bot_id[:8], ex)
+
     stored = load_report(bot_id)
     if stored:
         return stored
@@ -55,5 +66,15 @@ def resolve_interview_report(
         save_report(bot_id, report)
     except Exception as ex:
         logger.warning("[REPORT] persist failed bot=%s: %s", bot_id[:8], ex)
+
+    if getattr(orch, "db_interview_id", None):
+        try:
+            from interview_persist import save_interview_report
+
+            save_interview_report(orch.db_interview_id, report)
+        except Exception as ex:
+            logger.warning(
+                "[REPORT] DB persist failed bot=%s: %s", bot_id[:8], ex
+            )
 
     return report
