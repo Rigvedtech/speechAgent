@@ -363,3 +363,30 @@ ATS_SECRET_ENCRYPTION_KEY = _env_str("ATS_SECRET_ENCRYPTION_KEY", "")
 # Relative paths resolve under backend/; absolute paths used as-is.
 DOCUMENT_UPLOAD_DIR = _env_str("DOCUMENT_UPLOAD_DIR", "uploads")
 DOCUMENT_MAX_BYTES = _env_int("DOCUMENT_MAX_BYTES", 15 * 1024 * 1024)  # 15 MB
+
+# --- Local camera integrity test (camera_detection_test.py) ---
+# production = eye-first labels (default); interview = soft screen look; strict = QA
+CAMERA_GAZE_MODE = _env_str("CAMERA_GAZE_MODE", "production")
+CAMERA_GAZE_DEBUG = _env_bool("CAMERA_GAZE_DEBUG", True)
+CAMERA_WARN_TTS_ENABLED = _env_bool("CAMERA_WARN_TTS_ENABLED", True)
+CAMERA_WARN_AFTER_SEC = _env_float("CAMERA_WARN_AFTER_SEC", 8.0)
+# Looking-away needs longer hold (screen glances / thinking are common)
+CAMERA_WARN_AFTER_AWAY_SEC = _env_float("CAMERA_WARN_AFTER_AWAY_SEC", 14.0)
+CAMERA_WARN_COOLDOWN_SEC = _env_float("CAMERA_WARN_COOLDOWN_SEC", 20.0)
+# Side look off by default — glasses / gestures often false-trigger
+CAMERA_WARN_INCLUDE_SIDE_LOOK = _env_bool("CAMERA_WARN_INCLUDE_SIDE_LOOK", False)
+# looking_down = hard head nod (desk/phone); mild screen look stays center
+CAMERA_WARN_ON_LOOKING_DOWN = _env_bool("CAMERA_WARN_ON_LOOKING_DOWN", True)
+CAMERA_WARN_ON_NO_FACE = _env_bool("CAMERA_WARN_ON_NO_FACE", True)
+CAMERA_WARN_ON_MULTI_FACE = _env_bool("CAMERA_WARN_ON_MULTI_FACE", True)
+CAMERA_WARN_ON_LOOKING_AWAY = _env_bool("CAMERA_WARN_ON_LOOKING_AWAY", True)
+# While candidate is speaking (lip motion), ignore looking_away
+CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING = _env_bool(
+    "CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING", True
+)
+# Extra face must be this fraction of primary area to count as multi_face
+CAMERA_WARN_MULTI_FACE_MIN_AREA_RATIO = _env_float(
+    "CAMERA_WARN_MULTI_FACE_MIN_AREA_RATIO", 0.18
+)
+# Consecutive risk frames before the warn timer starts (~8 @ 30fps ≈ 0.25s)
+CAMERA_WARN_HOLD_FRAMES = _env_int("CAMERA_WARN_HOLD_FRAMES", 8)

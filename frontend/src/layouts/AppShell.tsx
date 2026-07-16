@@ -95,7 +95,7 @@ export function AppShell() {
       <aside className="no-print sticky top-0 flex h-screen w-56 shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
         <div className="flex h-14 shrink-0 items-center border-b border-sidebar-border px-2">
           <div className="px-3">
-            <PrabhatBrand />
+            <PrabhatBrand serverOnline={online} />
           </div>
         </div>
 
@@ -171,22 +171,9 @@ export function AppShell() {
                 <LogOut className="h-3.5 w-3.5" strokeWidth={1.5} />
               </button>
             </div>
-            <div className="flex items-center gap-2">
-              <p className="min-w-0 flex-1 truncate text-[11px] leading-tight text-sidebar-muted">
-                {organization?.name} · {user?.role}
-              </p>
-              <span
-                className={cn(
-                  'mr-2 h-1 w-0.5 shrink-0 rounded-full',
-                  online
-                    ? 'animate-pulse bg-success shadow-[0_0_5px_rgba(34,197,94,0.4)]'
-                    : 'bg-destructive',
-                )}
-                role="status"
-                aria-label={online ? 'Server online' : 'Server offline'}
-                title={online ? 'Server online' : 'Server offline'}
-              />
-            </div>
+            <p className="truncate text-[11px] leading-tight text-sidebar-muted text-transform: capitalize">
+              {organization?.name} · {user?.role}
+            </p>
           </div>
         </div>
       </aside>

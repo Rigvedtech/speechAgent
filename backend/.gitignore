@@ -36,6 +36,9 @@ uploads/*
 *.mp3
 *.wav
 *.onnx
+*.task
+models/*
+!models/.gitkeep
 
 # Generated meeting-bot greeting audio
 meeting-bot/wwwroot/generated-audio/

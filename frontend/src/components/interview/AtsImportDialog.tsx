@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Eye, Loader2, Search } from 'lucide-react'
+import { ChevronDown, Eye, Loader2, Search } from 'lucide-react'
 import {
   getAtsCandidate,
   getAtsJob,
@@ -343,15 +343,23 @@ export function AtsImportDialog({
                   <Button
                     type="button"
                     variant="ghost"
-                    className="h-9 w-full text-xs text-muted-foreground"
+                    className="h-9 w-full gap-1 text-xs text-muted-foreground"
                     disabled={jobsQuery.isFetching}
                     onClick={() => setJobsPage((p) => p + 1)}
                   >
-                    {jobsQuery.isFetching
-                      ? 'Loading…'
-                      : `Show next ${PAGE_SIZE}${
-                          jobsTotal != null ? ` · ${jobsAccum.length}/${jobsTotal}` : ''
-                        }`}
+                    {jobsQuery.isFetching ? (
+                      'Loading…'
+                    ) : (
+                      <>
+                        Show more
+                        <ChevronDown className="h-3.5 w-3.5" strokeWidth={1.75} />
+                        {jobsTotal != null ? (
+                          <span className="text-muted-foreground/70">
+                            · {jobsAccum.length}/{jobsTotal}
+                          </span>
+                        ) : null}
+                      </>
+                    )}
                   </Button>
                 ) : null}
               </>
