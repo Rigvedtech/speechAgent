@@ -43,7 +43,7 @@ class AgentState:
         self.on_candidate_speech = None
         self.on_candidate_speech_started = None
         self.on_question_advanced = None
-        # Last bot utterance kind: main | clarifier | drag | prompt — for interrupt cooldowns
+        # Last bot utterance kind: main | clarifier | drag | prompt | camera
         self.last_bot_speech_kind: str = ""
 
         # Structured interview orchestrator (set on POST /api/join or legacy /api/start).
@@ -51,3 +51,9 @@ class AgentState:
         self.interview_ended = threading.Event()
         # Resolved at POST /api/start: "english" | "hinglish"
         self.interview_language: str = "english"
+
+        # Camera integrity (populated when CAMERA_INTEGRITY_ENABLED + Start interview)
+        self.camera_integrity_armed: bool = False
+        self.camera_locked_participant_id: Optional[str] = None
+        self.last_face_snapshot: Optional[dict] = None
+        self.last_camera_warn_at: float = 0.0

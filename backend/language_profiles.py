@@ -49,6 +49,13 @@ class UIStrings:
     presence_phrases: Tuple[str, ...]
     presence_not_audible: str
     presence_final_warning: str
+    # CAMERA_INTEGRITY_ENABLED — silence ladder uses these when face signal is clear
+    presence_cannot_see: str
+    presence_muted_mic: str
+    camera_multi_face: str
+    camera_looking_away: str
+    camera_looking_down: str
+    camera_no_face: str
     bridge_phrases: Tuple[str, ...]
 
 
@@ -112,6 +119,24 @@ _ENGLISH_UI = UIStrings(
     presence_final_warning=(
         "If I don't hear from you in the next few seconds, we'll move to the next question."
     ),
+    presence_cannot_see=(
+        "I can't see you on camera right now. Please stay in frame so we can continue."
+    ),
+    presence_muted_mic=(
+        "I can see you, but I'm not hearing your voice. Please unmute your microphone and try again."
+    ),
+    camera_multi_face=(
+        "Please make sure only you are visible on camera."
+    ),
+    camera_looking_away=(
+        "Please face the camera and keep looking at the screen."
+    ),
+    camera_looking_down=(
+        "Please lift your head and look at the interview screen."
+    ),
+    camera_no_face=(
+        "Please stay in front of the camera so I can see your face."
+    ),
     bridge_phrases=("Okay.", "So,", "Alright.", "Got it.", "Sure.", "Right."),
 )
 
@@ -167,6 +192,25 @@ _HINGLISH_UI = UIStrings(
     ),
     presence_final_warning=(
         "Agar agle kuch seconds mein jawab nahi aaya, to hum agle sawal par chalenge."
+    ),
+    presence_cannot_see=(
+        "Mujhe aap camera par nahi dikh rahe. Kripya frame mein rahiye taaki interview continue ho sake."
+    ),
+    presence_muted_mic=(
+        "Main aapko dekh paa raha hoon, lekin awaaz nahi aa rahi. "
+        "Kripya microphone unmute karke dobara boliye."
+    ),
+    camera_multi_face=(
+        "Kripya ensure kijiye ki camera par sirf aap hi dikh rahe hain."
+    ),
+    camera_looking_away=(
+        "Kripya camera ki taraf dekhiye aur screen par focus rakhiye."
+    ),
+    camera_looking_down=(
+        "Kripya sir upar uthayiye aur interview screen ki taraf dekhiye."
+    ),
+    camera_no_face=(
+        "Kripya camera ke saamne rahiye taaki main aapka chehra dekh sakun."
     ),
     bridge_phrases=("Okay.", "So,", "Theek hai.", "Samajh gaya.", "Achha.", "Right."),
 )

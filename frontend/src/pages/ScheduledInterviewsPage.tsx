@@ -1,7 +1,7 @@
 import { Link, useNavigate } from 'react-router-dom'
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CalendarClock, Search } from 'lucide-react'
+import { CalendarClock, Check, Copy, Search } from 'lucide-react'
 import {
   cancelScheduledInterview,
   listScheduledInterviews,
@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
+import { MeetingPlatformIcon } from '@/components/meeting/MeetingPlatformIcon'
 import { truncate } from '@/lib/utils'
 
 export function ScheduledInterviewsPage() {
@@ -23,6 +24,19 @@ export function ScheduledInterviewsPage() {
   const queryClient = useQueryClient()
   const [search, setSearch] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [copiedMeetingId, setCopiedMeetingId] = useState<string | null>(null)
+
+  const copyMeetingUrl = async (id: string, url: string) => {
+    try {
+      await navigator.clipboard.writeText(url)
+      setCopiedMeetingId(id)
+      window.setTimeout(() => {
+        setCopiedMeetingId((current) => (current === id ? null : current))
+      }, 2000)
+    } catch {
+      setError('Could not copy meeting link')
+    }
+  }
 
   const scheduled = useQuery({
     queryKey: queryKeys.scheduledInterviews,
@@ -170,8 +184,40 @@ export function ScheduledInterviewsPage() {
                         <Badge variant="secondary">{row.language_mode}</Badge>
                       </td>
                       <td className="py-3 pr-4 tabular-nums">{row.questions_planned}</td>
-                      <td className="py-3 pr-4 text-muted-foreground">
-                        {truncate(row.meeting_url, 36)}
+                      <td className="py-3 pr-4">
+                        <div className="flex min-w-0 max-w-[16rem] items-center gap-2">
+                          <MeetingPlatformIcon url={row.meeting_url} size={16} />
+                          <span
+                            className="min-w-0 flex-1 truncate text-muted-foreground"
+                            title={row.meeting_url}
+                          >
+                            {truncate(row.meeting_url, 28)}
+                          </span>
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
+                            title={
+                              copiedMeetingId === row.id ? 'Copied' : 'Copy meeting link'
+                            }
+                            aria-label={
+                              copiedMeetingId === row.id
+                                ? 'Meeting link copied'
+                                : 'Copy meeting link'
+                            }
+                            onClick={() => {
+                              setError(null)
+                              void copyMeetingUrl(row.id, row.meeting_url)
+                            }}
+                          >
+                            {copiedMeetingId === row.id ? (
+                              <Check className="h-3.5 w-3.5 text-success" />
+                            ) : (
+                              <Copy className="h-3.5 w-3.5" />
+                            )}
+                          </Button>
+                        </div>
                       </td>
                       <td className="py-3 pr-4 text-muted-foreground">
                         {new Date(row.created_at).toLocaleDateString(undefined, {

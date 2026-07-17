@@ -186,6 +186,8 @@ class BotConfig:
     join_at: Optional[str] = None  # ISO 8601 format for scheduled join
     use_output_media: bool = True   # Use Output Media API (webpage) for low latency
     output_media_url: Optional[str] = None  # Public URL of /voice-agent page (e.g. https://ngrok/voice-agent)
+    # Per-participant webcam PNG over the realtime websocket (camera integrity)
+    enable_camera_integrity: bool = False
 
 
 class RecallBotService:
@@ -270,6 +272,16 @@ class RecallBotService:
                 },
             }
         }
+        if config.enable_camera_integrity:
+            # Separate webcam streams for candidate face integrity
+            # https://docs.recall.ai/docs/how-to-get-separate-videos-per-participant-realtime
+            # Requires web_4_core variant (set below) + gallery_view_v2.
+            payload["recording_config"]["video_mixed_layout"] = "gallery_view_v2"
+            payload["recording_config"]["video_separate_png"] = {}
+            logger.info(
+                "Camera integrity enabled — requesting video_separate_png + "
+                "gallery_view_v2 (web_4_core required)"
+            )
         
         # Choose audio output method
         if config.use_output_media and config.output_media_url:
@@ -311,13 +323,21 @@ class RecallBotService:
                 }
             }
         
-        # Add WebSocket endpoint for real-time audio if provided
+        # Add WebSocket endpoint for real-time audio (and optional per-participant video)
         if config.websocket_url:
+            ws_events = ["audio_mixed_raw.data", "transcript.data"]
+            if config.enable_camera_integrity:
+                ws_events.append("video_separate_png.data")
             payload["recording_config"]["realtime_endpoints"] = [{
                 "type": "websocket",
                 "url": config.websocket_url,
-                "events": ["audio_mixed_raw.data", "transcript.data"],
+                "events": ws_events,
             }]
+            logger.info(
+                "[CAMERA] realtime_endpoints url=%s events=%s",
+                config.websocket_url,
+                ws_events,
+            )
         
         # Override with custom greeting audio (only for output_audio API)
         if not config.use_output_media and config.greeting_audio_path and os.path.exists(config.greeting_audio_path):

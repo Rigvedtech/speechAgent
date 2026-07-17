@@ -364,29 +364,42 @@ ATS_SECRET_ENCRYPTION_KEY = _env_str("ATS_SECRET_ENCRYPTION_KEY", "")
 DOCUMENT_UPLOAD_DIR = _env_str("DOCUMENT_UPLOAD_DIR", "uploads")
 DOCUMENT_MAX_BYTES = _env_int("DOCUMENT_MAX_BYTES", 15 * 1024 * 1024)  # 15 MB
 
-# --- Local camera integrity test (camera_detection_test.py) ---
-# production = eye-first labels (default); interview = soft screen look; strict = QA
-CAMERA_GAZE_MODE = _env_str("CAMERA_GAZE_MODE", "production")
+# --- Camera integrity (interview + local test) ---
+# false = current interview flow (no Recall face tracking / camera presence phrases)
+CAMERA_INTEGRITY_ENABLED = _env_bool("CAMERA_INTEGRITY_ENABLED", False)
+# production = eye-first labels; interview = soft screen look (default live); strict = QA
+CAMERA_GAZE_MODE = _env_str("CAMERA_GAZE_MODE", "interview")
 CAMERA_GAZE_DEBUG = _env_bool("CAMERA_GAZE_DEBUG", True)
 CAMERA_WARN_TTS_ENABLED = _env_bool("CAMERA_WARN_TTS_ENABLED", True)
-CAMERA_WARN_AFTER_SEC = _env_float("CAMERA_WARN_AFTER_SEC", 8.0)
-# Looking-away needs longer hold (screen glances / thinking are common)
-CAMERA_WARN_AFTER_AWAY_SEC = _env_float("CAMERA_WARN_AFTER_AWAY_SEC", 14.0)
-CAMERA_WARN_COOLDOWN_SEC = _env_float("CAMERA_WARN_COOLDOWN_SEC", 20.0)
-# Side look off by default — glasses / gestures often false-trigger
+CAMERA_WARN_AFTER_SEC = _env_float("CAMERA_WARN_AFTER_SEC", 5.0)
+# Live interview: two faces must persist this long before TTS warn
+CAMERA_WARN_AFTER_MULTI_FACE_SEC = _env_float("CAMERA_WARN_AFTER_MULTI_FACE_SEC", 5.0)
+# Off-screen (away / down) hold before warn — longer than thinking glances
+CAMERA_WARN_AFTER_AWAY_SEC = _env_float("CAMERA_WARN_AFTER_AWAY_SEC", 12.0)
+CAMERA_WARN_COOLDOWN_SEC = _env_float("CAMERA_WARN_COOLDOWN_SEC", 15.0)
+# Live path analyzes ~2 fps — fewer consecutive hits than local 30fps test
+CAMERA_WARN_HOLD_FRAMES_LIVE = _env_int("CAMERA_WARN_HOLD_FRAMES_LIVE", 2)
+# Brief drop in multi-face / no_face before clearing the risk timer
+CAMERA_WARN_RISK_GRACE_SEC = _env_float("CAMERA_WARN_RISK_GRACE_SEC", 2.0)
+# false = ignore left/right iris for TTS (thinking glances); looking_up never warns
 CAMERA_WARN_INCLUDE_SIDE_LOOK = _env_bool("CAMERA_WARN_INCLUDE_SIDE_LOOK", False)
 # looking_down = hard head nod (desk/phone); mild screen look stays center
 CAMERA_WARN_ON_LOOKING_DOWN = _env_bool("CAMERA_WARN_ON_LOOKING_DOWN", True)
 CAMERA_WARN_ON_NO_FACE = _env_bool("CAMERA_WARN_ON_NO_FACE", True)
 CAMERA_WARN_ON_MULTI_FACE = _env_bool("CAMERA_WARN_ON_MULTI_FACE", True)
 CAMERA_WARN_ON_LOOKING_AWAY = _env_bool("CAMERA_WARN_ON_LOOKING_AWAY", True)
-# While candidate is speaking (lip motion), ignore looking_away
+# true = skip away/down warn while lips move (answering / thinking aloud)
 CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING = _env_bool(
     "CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING", True
 )
 # Extra face must be this fraction of primary area to count as multi_face
 CAMERA_WARN_MULTI_FACE_MIN_AREA_RATIO = _env_float(
-    "CAMERA_WARN_MULTI_FACE_MIN_AREA_RATIO", 0.18
+    "CAMERA_WARN_MULTI_FACE_MIN_AREA_RATIO", 0.10
 )
 # Consecutive risk frames before the warn timer starts (~8 @ 30fps ≈ 0.25s)
 CAMERA_WARN_HOLD_FRAMES = _env_int("CAMERA_WARN_HOLD_FRAMES", 8)
+# Proactive lips+silence unmute warn (off by default — use silence presence ladder instead)
+CAMERA_WARN_ON_MUTED_MIC = _env_bool("CAMERA_WARN_ON_MUTED_MIC", False)
+CAMERA_WARN_MUTED_MIC_AFTER_SEC = _env_float("CAMERA_WARN_MUTED_MIC_AFTER_SEC", 4.0)
+# Audio older than this counts as silence for mute detection
+CAMERA_WARN_MUTED_MIC_SILENCE_SEC = _env_float("CAMERA_WARN_MUTED_MIC_SILENCE_SEC", 2.0)

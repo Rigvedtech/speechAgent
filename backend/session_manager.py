@@ -64,6 +64,10 @@ class MeetingSession:
     created_at: float = field(default_factory=time.time)
     # Postgres interview_sessions.id when this live bot is linked to a DB row
     db_interview_id: Optional[str] = None
+    # Candidate webcam face tracker (Recall video_separate_png) — optional
+    camera_tracker: Optional[object] = None
+    # Camera integrity TTS deferred until bot finishes current question/turn
+    _pending_camera_warn: Optional[str] = None
 
     def __post_init__(self):
         """Initialize processing components that don't need Sarvam config."""
@@ -262,6 +266,27 @@ class SessionManager:
                     else None
                 )
             )
+            # Pre-create camera tracker so Recall video frames can register webcams
+            # before Start interview (analyze still only runs after arm()).
+            if config.CAMERA_INTEGRITY_ENABLED:
+                try:
+                    from candidate_camera import CandidateCameraTracker
+                    import os as _os
+
+                    session.camera_tracker = CandidateCameraTracker(
+                        candidate_name=session.scheduled_candidate_name or "",
+                        bot_name=_os.getenv("BOT_NAME", "Prabhat"),
+                        gaze_mode=config.CAMERA_GAZE_MODE,
+                    )
+                    logger.info(
+                        "[CAMERA] Tracker created (unarmed) for bot=%s — "
+                        "waiting for video_separate_png frames",
+                        bot_id[:8],
+                    )
+                except Exception as ex:
+                    logger.warning("[CAMERA] Early tracker create failed: %s", ex)
+                    session.camera_tracker = None
+
             session.state.on_question_advanced = (
                 lambda s=session: (
                     s.stt_engine._sync_turn_question_index()
@@ -712,13 +737,7 @@ class SessionManager:
 
             lang = getattr(session.state, "interview_language", "english") or "english"
             ui = get_ui_strings(lang)
-            if step == 0:
-                import random
-                phrase = random.choice(ui.presence_phrases)
-            elif step == 1:
-                phrase = ui.presence_not_audible
-            else:
-                phrase = ui.presence_final_warning
+            phrase = self._select_presence_phrase(session, ui, step)
 
             session._presence_checks_this_question += 1
             session.state.pending_presence_check = True
@@ -860,9 +879,87 @@ class SessionManager:
                 )
         if session.audio_sender and session.tts_loop:
             session.audio_sender.ensure_sarvam_connected_sync(session.tts_loop)
+        self._flush_pending_camera_warn(session)
         logger.info(
             f"[audio-stream] playback_done — STT unblocked for bot {session.bot_id[:8]}…"
         )
+
+    def _camera_warn_phrase(self, session: MeetingSession, kind: str) -> Optional[str]:
+        from language_profiles import get_ui_strings
+
+        mode = getattr(session.state, "language_mode", None) or "english"
+        ui = get_ui_strings(mode)
+        mapping = {
+            "multi_face": "camera_multi_face",
+            "looking_away": "camera_looking_away",
+            "looking_down": "camera_looking_down",
+            "no_face": "camera_no_face",
+        }
+        attr = mapping.get(kind)
+        if not attr:
+            return None
+        return getattr(ui, attr, None)
+
+    def _enqueue_camera_warn(self, session: MeetingSession, kind: str) -> None:
+        """Speak camera warn via tts_queue; defer if bot is mid-question."""
+        if not config.CAMERA_WARN_TTS_ENABLED:
+            return
+        phrase = self._camera_warn_phrase(session, kind)
+        if not phrase:
+            return
+        if session.state.is_ai_speaking.is_set() or session._awaiting_turn_playback:
+            session._pending_camera_warn = phrase
+            logger.info(
+                "[CAMERA] Defer warn kind=%s until playback_done bot=%s",
+                kind,
+                session.bot_id[:8],
+            )
+            return
+        try:
+            session.state.tts_queue.put(phrase)
+            session.state.tts_queue.put("<END_OF_TURN>")
+            logger.info(
+                "[CAMERA] Warn spoken kind=%s bot=%s phrase=%r",
+                kind,
+                session.bot_id[:8],
+                phrase[:60],
+            )
+        except Exception as ex:
+            logger.warning("[CAMERA] Failed to enqueue warn: %s", ex)
+
+    def _flush_pending_camera_warn(self, session: MeetingSession) -> None:
+        phrase = session._pending_camera_warn
+        if not phrase:
+            return
+        if session.state.is_ai_speaking.is_set():
+            return
+        session._pending_camera_warn = None
+        try:
+            session.state.tts_queue.put(phrase)
+            session.state.tts_queue.put("<END_OF_TURN>")
+            logger.info(
+                "[CAMERA] Flushed deferred warn bot=%s phrase=%r",
+                session.bot_id[:8],
+                phrase[:60],
+            )
+        except Exception as ex:
+            logger.warning("[CAMERA] Failed to flush warn: %s", ex)
+
+    def _try_camera_lock_on_answer(self, session: MeetingSession) -> None:
+        """
+        After the bot finishes a question, the next human speech is the candidate.
+        Lock / correct lock even when Teams display name != form name.
+        """
+        if not config.CAMERA_INTEGRITY_ENABLED:
+            return
+        tracker = session.camera_tracker
+        if tracker is None or not getattr(tracker, "armed", False):
+            return
+        # Prefer locking once the bot is done asking (not while TTS is playing)
+        if session.state.is_ai_speaking.is_set():
+            return
+        if tracker.lock_on_candidate_answer():
+            session.state.camera_locked_participant_id = tracker.locked_participant_id
 
     def on_candidate_speech_started(self, session: MeetingSession) -> None:
         """VAD detected speech — cancel pending presence check (before STT completes)."""
@@ -871,12 +968,14 @@ class SessionManager:
         orch = session.state.interview_orchestrator
         if orch is not None:
             orch.mark_answer_speech_started()
+        self._try_camera_lock_on_answer(session)
 
     def on_candidate_speech(self, session: MeetingSession) -> None:
         """Track candidate activity and cancel pending silence check."""
         session.state.last_candidate_speech_at = time.monotonic()
         session.state.pending_presence_check = False
         self.cancel_silence_check(session)
+        self._try_camera_lock_on_answer(session)
 
     def handle_audio_chunk(self, bot_id: str, audio_array: np.ndarray):
         """
@@ -921,12 +1020,142 @@ class SessionManager:
     )
     _FILLER_RE = re.compile(r'\b(um|uh|hmm|ah|uhm)\b[\.,]?', re.IGNORECASE)
 
+    def _select_presence_phrase(self, session: MeetingSession, ui, step: int) -> str:
+        """Pick presence TTS; camera-aware when integrity is armed."""
+        import random
+
+        if step >= 2:
+            return ui.presence_final_warning
+        if step == 1:
+            # Second ladder step — prefer mute hint if lips were moving
+            if (
+                config.CAMERA_INTEGRITY_ENABLED
+                and session.state.camera_integrity_armed
+                and session.camera_tracker is not None
+            ):
+                reason = session.camera_tracker.presence_reason()
+                if reason == "muted_mic":
+                    return ui.presence_muted_mic
+            return ui.presence_not_audible
+
+        # step 0
+        if (
+            config.CAMERA_INTEGRITY_ENABLED
+            and session.state.camera_integrity_armed
+            and session.camera_tracker is not None
+        ):
+            reason = session.camera_tracker.presence_reason()
+            if reason == "cannot_see":
+                return ui.presence_cannot_see
+            if reason == "muted_mic":
+                return ui.presence_muted_mic
+        return random.choice(ui.presence_phrases)
+
+    def arm_camera_integrity(self, session: MeetingSession) -> bool:
+        """Start candidate face tracking after Start interview (flag must be on)."""
+        if not config.CAMERA_INTEGRITY_ENABLED:
+            return False
+        if session.state.camera_integrity_armed and session.camera_tracker is not None:
+            if getattr(session.camera_tracker, "armed", False):
+                return True
+        orch = session.state.interview_orchestrator
+        candidate_name = ""
+        if orch is not None:
+            candidate_name = getattr(orch, "candidate_name", "") or ""
+        if not candidate_name:
+            candidate_name = session.scheduled_candidate_name or ""
+        try:
+            from candidate_camera import CandidateCameraTracker
+
+            import os
+
+            tracker = session.camera_tracker
+            if tracker is None:
+                tracker = CandidateCameraTracker(
+                    candidate_name=candidate_name,
+                    bot_name=os.getenv("BOT_NAME", "Prabhat"),
+                    gaze_mode=config.CAMERA_GAZE_MODE,
+                )
+                session.camera_tracker = tracker
+            else:
+                tracker.set_candidate_name(candidate_name)
+            tracker.arm()
+            session.state.camera_integrity_armed = True
+            session.state.camera_locked_participant_id = tracker.locked_participant_id
+            logger.info(
+                "[CAMERA] Integrity armed for bot=%s candidate=%r locked=%s",
+                session.bot_id[:8],
+                candidate_name,
+                tracker.locked_participant_id,
+            )
+            return True
+        except Exception as ex:
+            logger.exception("[CAMERA] arm_camera_integrity failed: %s", ex)
+            session.camera_tracker = None
+            session.state.camera_integrity_armed = False
+            return False
+
+    def handle_video_frame(
+        self,
+        bot_id: str,
+        png_bytes: bytes,
+        participant_id: str,
+        participant_name: Optional[str],
+        media_type: str = "webcam",
+    ) -> None:
+        """Recall video_separate_png.data → register webcam; analyze after Start/arm."""
+        with self.sessions_lock:
+            session = self.sessions.get(bot_id)
+        if not session or not session.is_active:
+            return
+        if not config.CAMERA_INTEGRITY_ENABLED:
+            return
+        tracker = session.camera_tracker
+        if tracker is None:
+            # Frames can arrive before create_session finishes wiring the tracker
+            try:
+                from candidate_camera import CandidateCameraTracker
+                import os as _os
+
+                tracker = CandidateCameraTracker(
+                    candidate_name=session.scheduled_candidate_name or "",
+                    bot_name=_os.getenv("BOT_NAME", "Prabhat"),
+                    gaze_mode=config.CAMERA_GAZE_MODE,
+                )
+                session.camera_tracker = tracker
+                logger.info(
+                    "[CAMERA] Tracker created lazily from first video frame bot=%s",
+                    bot_id[:8],
+                )
+            except Exception as ex:
+                logger.warning("[CAMERA] Lazy tracker create failed: %s", ex)
+                return
+        snap = tracker.process_png_frame(
+            png_bytes=png_bytes,
+            participant_id=participant_id,
+            participant_name=participant_name,
+            media_type=media_type or "webcam",
+        )
+        if tracker.locked_participant_id:
+            session.state.camera_locked_participant_id = tracker.locked_participant_id
+        if snap is not None:
+            session.state.last_face_snapshot = snap.to_dict()
+        # Camera integrity warns (off-screen / multi-face / no-face / …)
+        # Mute/unmute hints use the silence presence ladder, not a mid-answer warn.
+        consume = getattr(tracker, "consume_warn", None)
+        if callable(consume):
+            kind = consume()
+            if kind:
+                self._enqueue_camera_warn(session, kind)
+
     def handle_recall_transcript(
         self,
         bot_id: str,
         text: str,
         is_final: bool,
         is_bot_speaker: bool,
+        participant_id: Optional[str] = None,
+        participant_name: Optional[str] = None,
     ):
         """
         Called by AudioReceiver when Recall.ai fires a transcript.data event.
@@ -963,6 +1192,17 @@ class SessionManager:
                 f"bot={bot_id[:8]} '{text[:40]}'"
             )
             return
+
+        # Lock candidate camera from first human speaker after Start (name-match fallback)
+        tracker = session.camera_tracker
+        if tracker is not None and participant_id and not is_bot_speaker:
+            tracker.note_speaker(
+                participant_id=participant_id,
+                participant_name=participant_name,
+                is_bot=False,
+            )
+            session.state.camera_locked_participant_id = tracker.locked_participant_id
+
         if session.state.is_ai_speaking.is_set():
             # Candidate is speaking while bot is — this is an interrupt.
             # The VAD pipeline already handles interrupt_flag; transcript
@@ -1137,6 +1377,13 @@ class SessionManager:
             close_session(bot_id)
             session.is_active = False
             session.state.is_running = False
+            if session.camera_tracker is not None:
+                try:
+                    session.camera_tracker.close()
+                except Exception as e:
+                    logger.warning("[CAMERA] tracker close failed: %s", e)
+                session.camera_tracker = None
+                session.state.camera_integrity_armed = False
 
             if (
                 session.audio_sender

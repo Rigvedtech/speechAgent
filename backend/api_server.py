@@ -617,6 +617,7 @@ async def join_meeting(
             websocket_url=PUBLIC_WEBSOCKET_URL,
             use_output_media=app_config.RECALL_USE_OUTPUT_MEDIA,
             output_media_url=output_media_page_url,
+            enable_camera_integrity=bool(app_config.CAMERA_INTEGRITY_ENABLED),
         )
 
         bot_data = recall_service.create_bot(config)
@@ -923,6 +924,7 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
 
         if greeting_message:
             session.state.is_started.set()
+            session_manager.arm_camera_integrity(session)
             session.state.llm_queue.put(greeting_message)
         else:
             ui = get_ui_strings(resolved_language)
@@ -932,6 +934,7 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
             )
 
             session.state.is_started.set()
+            session_manager.arm_camera_integrity(session)
             log_transcript(bot_id, "assistant", greeting_text)
             session.state.tts_queue.put(greeting_text)
             session.state.tts_queue.put("<END_OF_TURN>")
@@ -1398,6 +1401,7 @@ async def rejoin_bot_to_lobby(bot_id: str):
             websocket_url=PUBLIC_WEBSOCKET_URL,
             use_output_media=app_config.RECALL_USE_OUTPUT_MEDIA,
             output_media_url=output_media_page_url,
+            enable_camera_integrity=bool(app_config.CAMERA_INTEGRITY_ENABLED),
         )
         
         # Rejoin bot (creates new bot, preserves session)
@@ -1720,6 +1724,7 @@ if __name__ == "__main__":
             port=WEBSOCKET_PORT,
             audio_callback=session_manager.handle_audio_chunk,
             transcript_callback=session_manager.handle_recall_transcript,
+            video_callback=session_manager.handle_video_frame,
         )
         receiver.run()
     
@@ -1733,6 +1738,10 @@ if __name__ == "__main__":
     logger.info(f"WebSocket: ws://0.0.0.0:{WEBSOCKET_PORT}")
     logger.info(f"Docs: http://0.0.0.0:8000/docs")
     logger.info(f"Bot Name: {BOT_NAME}")
+    logger.info(
+        "Camera integrity: %s",
+        "ON" if app_config.CAMERA_INTEGRITY_ENABLED else "OFF",
+    )
     logger.info("=" * 60)
     
     # Start FastAPI server
