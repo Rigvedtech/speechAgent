@@ -114,6 +114,8 @@ class STTEngine:
         self._pending_until: float = 0.0
         self._pending_sarvam_failed: bool = False
         self._pending_core_deadline: float = 0.0
+        # Utterance finished STT while bot TTS still playing — hold until playback_done
+        self._pending_during_tts: bool = False
         self._turn_q_index: int = -1
         # Dedicated flush timer — must not depend on next mic chunk (fixes 40s+ silence deadlock)
         self._flush_timer: Optional[threading.Timer] = None
@@ -437,6 +439,36 @@ class STTEngine:
         self._pending_until = 0.0
         self._pending_sarvam_failed = False
         self._pending_core_deadline = 0.0
+        self._pending_during_tts = False
+
+    def flush_held_during_tts(self) -> None:
+        """
+        After bot TTS ends: commit held mid-TTS transcript if useful.
+        Drops pure backchannels (okay/hmm); keeps meta (repeat) and real answers.
+        """
+        with self._pending_commit_lock:
+            if not self._pending_during_tts or self._pending_audio is None:
+                return
+            text = (self._pending_text or "").strip()
+            pending_sec = len(self._pending_audio) / SAMPLE_RATE
+            self._pending_during_tts = False
+            if not text or self._is_backchannel(text):
+                logger.info(
+                    "[TURN DROP] mid-TTS hold was backchannel/empty chars=%d text=%r",
+                    len(text),
+                    text[:60],
+                )
+                self._clear_pending_turn()
+                return
+            logger.info(
+                "[TURN FLUSH] mid-TTS hold after playback — committing "
+                "(audio=%.1fs chars=%d): %r",
+                pending_sec,
+                len(text),
+                text[:80],
+            )
+            self._commit_turn(text)
+            self._clear_pending_turn()
 
     def _should_flush_held_core_turn(self, text: str, audio_sec: float) -> bool:
         stripped = (text or "").strip()
@@ -715,6 +747,18 @@ class STTEngine:
                         timeout=stt_timeout,
                         collect_deadline=collect_deadline,
                     )
+                    # One reconnect + retry on empty/fail before Whisper
+                    if not (result and result.strip()):
+                        logger.warning(
+                            "[STT] Sarvam batch empty — reconnect once and retry same audio"
+                        )
+                        if self.sarvam_engine.force_reconnect_sync():
+                            result = self.sarvam_engine.transcribe_sync(
+                                audio_data,
+                                sample_rate=self.actual_samplerate or SAMPLE_RATE,
+                                timeout=stt_timeout,
+                                collect_deadline=collect_deadline,
+                            )
                     if result and result.strip():
                         candidate = result.strip()
                         if (
@@ -733,7 +777,21 @@ class STTEngine:
                     else:
                         print("\n[SARVAM STT] No result — falling back to Whisper", file=sys.stderr)
                 except Exception as e:
-                    print(f"\n[SARVAM STT Error]: {e} — falling back to Whisper", file=sys.stderr)
+                    print(f"\n[SARVAM STT Error]: {e} — reconnect once then Whisper", file=sys.stderr)
+                    try:
+                        if self.sarvam_engine.force_reconnect_sync():
+                            result = self.sarvam_engine.transcribe_sync(
+                                audio_data,
+                                sample_rate=self.actual_samplerate or SAMPLE_RATE,
+                                timeout=stt_timeout,
+                                collect_deadline=collect_deadline,
+                            )
+                            if result and result.strip():
+                                full_text = result.strip()
+                                sarvam_ok = True
+                                print(f"\n[SARVAM STT] Transcript after reconnect: {full_text}")
+                    except Exception as e2:
+                        print(f"\n[SARVAM STT retry Error]: {e2}", file=sys.stderr)
 
             if not sarvam_ok and self._allow_whisper_fallback():
                 try:
@@ -1294,10 +1352,29 @@ class STTEngine:
             full_text = new_text
 
         if self.state.is_ai_speaking.is_set():
+            # Race: utterance transcribed while bot TTS still playing.
+            # Hold instead of discard — flush_held_during_tts on playback_done.
+            held = (full_text or "").strip()
+            if not held or self._is_backchannel(held):
+                logger.info(
+                    "[TURN DROP] Q%s bot speaking — empty/backchannel during TTS text=%r",
+                    self._current_q_label(),
+                    held[:60],
+                )
+                self._abort_live_stream()
+                return
             logger.info(
-                "[TURN DISCARD] Q%s bot speaking during transcription — dropping utterance",
+                "[TURN HOLD] Q%s bot speaking during transcription — defer until TTS ends "
+                "chars=%d text=%r",
                 self._current_q_label(),
+                len(held),
+                held[:80],
             )
+            self._pending_audio = audio_data.copy()
+            self._pending_text = held
+            self._pending_until = time.monotonic() + 60.0
+            self._pending_sarvam_failed = sarvam_failed
+            self._pending_during_tts = True
             self._abort_live_stream()
             return
 

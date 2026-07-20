@@ -147,7 +147,11 @@ class SarvamSTTEngine:
             inner = data.get("data") or {}
             err = inner.get("error") if isinstance(inner, dict) else data.get("error")
             code = inner.get("code") if isinstance(inner, dict) else data.get("code")
-            logger.error(f"Sarvam STT API error ({code}): {err}")
+            # Log full payload when code/err are empty — otherwise debugging is blind
+            if code is None and err is None:
+                logger.error("Sarvam STT API error (None): None raw=%s", data)
+            else:
+                logger.error(f"Sarvam STT API error ({code}): {err}")
             return None, False, "error", None
 
         # Legacy flat format fallback
@@ -417,6 +421,20 @@ class SarvamSTTEngine:
             logger.warning("[STT LANG] Sarvam reconnect failed: %s", ex)
             return False
 
+    def force_reconnect_sync(self, timeout: float = 12.0) -> bool:
+        """Thread-safe: force disconnect + reconnect (used before batch retry)."""
+        if not self._loop or not self._loop.is_running():
+            return False
+        future = asyncio.run_coroutine_threadsafe(
+            self.reconnect_with_settings(), self._loop
+        )
+        try:
+            ok = bool(future.result(timeout=timeout))
+            logger.info("[STT] Sarvam force reconnect ok=%s", ok)
+            return ok
+        except Exception as ex:
+            logger.warning("[STT] Sarvam force reconnect failed: %s", ex)
+            return False
 
     def _append_live_transcript(self, transcript: str) -> None:
         text = (transcript or "").strip()

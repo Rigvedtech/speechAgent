@@ -850,6 +850,12 @@ class LLMBrain:
 
         if not decision.should_continue:
             self.state.interview_ended.set()
+            hook = getattr(self.state, "on_interview_ended", None)
+            if callable(hook):
+                try:
+                    hook()
+                except Exception as ex:
+                    logger.warning("[INTERVIEW END] cleanup hook failed: %s", ex)
             if orch:
                 orch.mark_ended()
                 try:
@@ -1054,7 +1060,8 @@ class LLMBrain:
                 self._emit_orchestrated_turn(checkin)
                 return True
 
-            if detect_inability_answer(user_text):
+            inability = detect_inability_answer(user_text)
+            if inability:
                 intent = TurnIntent.ACTUAL_ANSWER.value
             elif detect_explicit_question_repeat(user_text):
                 if self._apply_intent_decision(TurnIntent.REPEAT_MAIN.value):
@@ -1102,6 +1109,40 @@ class LLMBrain:
                 )
                 user_text = merged_done
 
+            # Honest inability — skip incomplete-continue loop; warm ack + next Q
+            if inability:
+                logger.info(
+                    "[INABILITY] bot=%s Q%d text=%r",
+                    orch.bot_id[:8] if orch.bot_id else "?",
+                    orch.current_index + 1,
+                    (user_text or "")[:80],
+                )
+                warm = orch._ui().inability_ack
+                if orch.should_gate_after_bridge():
+                    self._wait_stage1_scores(orch, float(config.STAGE1_GATE_WAIT_SEC))
+                    evaluation = self._evaluate_answer(user_text, question)
+                    decision = orch.decide_after_bridge(user_text, evaluation)
+                    # Warm ack is only for the parallel advance path; gate keeps its own close/continue
+                    self._emit_orchestrated_turn(decision)
+                    return True
+                if config.PARALLEL_SCORE_ENABLED and config.ANSWER_ACK_BEFORE_EVAL is False:
+                    q_index = orch.current_index + 1
+                    answer_snapshot = user_text
+                    question_snapshot = question
+                    decision = orch.advance_without_score(user_text, bridge=warm)
+                    if getattr(decision, "defer_close", False):
+                        evaluation = self._evaluate_answer(answer_snapshot, question_snapshot)
+                        decision = orch.process_answer(answer_snapshot, evaluation)
+                        self._emit_orchestrated_turn(decision)
+                        return True
+                    self._emit_orchestrated_turn(decision)
+                    self._score_in_background(q_index, answer_snapshot, question_snapshot)
+                    return True
+                evaluation = self._evaluate_answer(user_text, question)
+                decision = orch.process_answer(user_text, evaluation)
+                self._emit_orchestrated_turn(decision)
+                return True
+
             incomplete = orch.try_handle_incomplete_answer(user_text)
             if incomplete is not None:
                 self._emit_orchestrated_turn(incomplete)
@@ -1116,7 +1157,7 @@ class LLMBrain:
                 self._emit_orchestrated_turn(decision)
                 return True
 
-            # Q1–Q5 and Q7–Q9: speak next immediately, score in background
+            # Q1–Q5 and Q7–Q9: speak next immediately; score in background
             if config.PARALLEL_SCORE_ENABLED and config.ANSWER_ACK_BEFORE_EVAL is False:
                 q_index = orch.current_index + 1
                 answer_snapshot = user_text

@@ -201,6 +201,22 @@ _CONTINUATION_CHECKIN = re.compile(
     re.IGNORECASE,
 )
 
+# After "please continue" — candidate asks permission / confirms scope (not an answer).
+_CONTINUATION_PERMISSION = re.compile(
+    r"|".join([
+        r"\bshould\s+i\b",
+        r"\bshall\s+i\b",
+        r"\bdo\s+you\s+want\s+me\s+to\b",
+        r"\bwould\s+you\s+like\s+me\s+to\b",
+        r"\bcan\s+i\s+(just\s+)?(explain|continue|tell|describe|share|walk)\b",
+        r"\bmay\s+i\s+(just\s+)?(explain|continue|tell|describe)\b",
+        r"\byou\s+want\s+me\s+to\b",
+        r"\bkya\s+(main|mein)\s+(batau|explain|continue)\b",
+        r"\bmujhe\s+(explain|bataana)\s+chahiye\b",
+    ]),
+    re.IGNORECASE,
+)
+
 _CLARIFIER_CONFUSION = re.compile(
     r"|".join([
         r"\bsorry\b",
@@ -224,12 +240,21 @@ _INABILITY_PATTERNS = re.compile(
         r"\b(don'?t|do\s+not)\s+have\s+(an?\s+)?answer\b",
         r"\bno\s+answer\b",
         r"\bnot\s+able\s+to\s+answer\b",
-        r"\bhaven'?t\s+(used|worked)\b",
+        r"\bhaven'?t\s+(used|worked|done)\b",
+        r"\b(have|has)\s+not\s+(yet\s+)?(used|worked|done)\b",
+        r"\b(did\s+not|didn'?t)\s+(work|use|get\s+to\s+work)\b",
+        r"\bno\s+(hands[-\s]?on\s+)?experience\b",
+        r"\b(don'?t|do\s+not)\s+have\s+(any\s+)?(experience|exposure)\b",
+        r"\bnot\s+(yet\s+)?worked\s+on\b",
+        r"\bnever\s+worked\s+(on|with)\b",
+        r"\bsorry[,\s]+i\s+(don'?t|do\s+not|haven'?t|have\s+not)\b",
         r"\bnahi\s+pata\b",
         r"\bpata\s+nahi\b",
         r"\b(nahi|na)\s+yaad\b",
         r"\bmalum\s+nahi\b",
         r"\bjawab\s+nahi\b",
+        r"\bexperience\s+nahi\b",
+        r"\bkaam\s+nahi\s+kiya\b",
     ]),
     re.IGNORECASE,
 )
@@ -455,14 +480,6 @@ def detect_clarifier_confusion(text: str) -> bool:
     return bool(_CLARIFIER_CONFUSION.search(t))
 
 
-def detect_inability_answer(text: str) -> bool:
-    """Short honest 'I don't know' — complete thought, not a cut-off fragment."""
-    t = (text or "").strip()
-    if not t or len(t) > 80:
-        return False
-    return bool(_INABILITY_PATTERNS.search(t))
-
-
 def detect_turn_intent_fallback(text: str, awaiting_clarifier: bool) -> str:
     """
     Regex fallback when LLM classifier is unavailable.
@@ -519,13 +536,34 @@ def detect_short_complete_answer(text: str) -> bool:
 def detect_continuation_checkin(text: str) -> bool:
     """Social / check-in phrase after we asked the candidate to continue."""
     t = (text or "").strip()
-    if not t or len(t) > 60:
+    if not t or len(t) > 80:
         return False
     if _CONTINUATION_CHECKIN.search(t):
         return True
     if _SHORT_IMMEDIATE_TURN.search(t) and len(t.split()) <= 4:
         return True
     return False
+
+
+def detect_continuation_permission(text: str) -> bool:
+    """
+    Candidate asking permission / confirming scope after 'please continue'
+    (e.g. 'Should I just explain…?') — not a scored answer.
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 160:
+        return False
+    if detect_inability_answer(t):
+        return False
+    return bool(_CONTINUATION_PERMISSION.search(t))
+
+
+def detect_inability_answer(text: str) -> bool:
+    """Short honest 'I don't know / haven't worked on it' — complete thought."""
+    t = (text or "").strip()
+    if not t or len(t) > 120:
+        return False
+    return bool(_INABILITY_PATTERNS.search(t))
 
 
 _PRESENCE_CONFIRM = re.compile(
@@ -1463,7 +1501,12 @@ class InterviewOrchestrator:
     def topic_redirect_limit_reached(self) -> bool:
         return self.spoken_interrupt_count >= int(config.MAX_TOPIC_REDIRECTS_PER_QUESTION)
 
-    def advance_without_score(self, answer_text: str) -> TurnDecision:
+    def advance_without_score(
+        self,
+        answer_text: str,
+        *,
+        bridge: Optional[str] = None,
+    ) -> TurnDecision:
         """Speak next question immediately; score previous answer in background."""
         with self._lock:
             if self.phase == InterviewPhase.ENDED:
@@ -1503,7 +1546,17 @@ class InterviewOrchestrator:
                 return self._complete_all()
 
             spoken_q = self.get_spoken_question(next_q)
-            spoken = f"{self._next_bridge()} {spoken_q}"
+            prefix = (bridge or "").strip() or self._next_bridge()
+            spoken = f"{prefix} {spoken_q}".strip()
+            # Custom bridge (e.g. inability ack) — speak directly in both languages
+            if bridge and (bridge or "").strip():
+                return TurnDecision(
+                    action=TurnAction.SPEAK,
+                    spoken_text=spoken,
+                    should_continue=True,
+                    spoken_kind="main",
+                    pending_background_score=True,
+                )
             if self.language_mode == "hinglish":
                 return TurnDecision(
                     action=TurnAction.REPHRASE,
@@ -1968,22 +2021,27 @@ class InterviewOrchestrator:
         self.answer_continuation_count = 0
 
     def try_handle_continuation_checkin(self, answer_text: str) -> Optional[TurnDecision]:
-        """Respond to hello/check-in while waiting for a continued answer — do not score."""
+        """Respond to hello/check-in/permission while waiting for a continued answer — do not score."""
         if self.answer_continuation_count <= 0:
             return None
         if self.phase != InterviewPhase.CORE:
             return None
-        if not detect_continuation_checkin(answer_text):
+        is_permission = detect_continuation_permission(answer_text)
+        is_checkin = detect_continuation_checkin(answer_text)
+        if not is_permission and not is_checkin:
             return None
+        ui = self._ui()
+        spoken = ui.permission_to_continue if is_permission else ui.please_continue_when_ready
         logger.info(
-            "[CONTINUATION CHECKIN] bot=%s Q%d text=%r",
+            "[CONTINUATION CHECKIN] bot=%s Q%d permission=%s text=%r",
             self.bot_id[:8] if self.bot_id else "?",
             self.current_index + 1,
+            is_permission,
             (answer_text or "")[:80],
         )
         return TurnDecision(
             action=TurnAction.SPEAK,
-            spoken_text=self._ui().please_continue_when_ready,
+            spoken_text=spoken,
             should_continue=True,
             spoken_kind="prompt",
         )

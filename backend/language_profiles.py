@@ -28,7 +28,9 @@ class SpeechProfile:
 class UIStrings:
     please_continue: str
     please_continue_when_ready: str
+    permission_to_continue: str
     continue_after_clarifier: str
+    inability_ack: str
     repeat_last_clarifier: str
     repeat_intro: str
     repeat_limit: str
@@ -67,9 +69,11 @@ class LanguageProfile:
 
 
 _ENGLISH_UI = UIStrings(
-    please_continue="Please continue your answer.",
+    please_continue="Take your time — I'd like to hear a bit more about that.",
     please_continue_when_ready="No problem. Please continue with your answer when you're ready.",
+    permission_to_continue="Yes — please go ahead and explain.",
     continue_after_clarifier="Thanks for clarifying. Please continue from where you left off.",
+    inability_ack="That's fine — no worries. Let's move on.",
     repeat_last_clarifier="Of course. I asked: {target}",
     repeat_intro="Sure. The question is: {question}",
     repeat_limit=(
@@ -141,9 +145,11 @@ _ENGLISH_UI = UIStrings(
 )
 
 _HINGLISH_UI = UIStrings(
-    please_continue="Kripya apna jawab continue kijiye.",
+    please_continue="Apna time lijiye — us example ke baare mein thoda aur sunna chahta hoon.",
     please_continue_when_ready="Koi baat nahi. Jab ready hon tab apna jawab continue kijiye.",
+    permission_to_continue="Haan — bilkul, aage explain kariye.",
     continue_after_clarifier="Theek hai. Jahan se chhoda tha wahan se continue kijiye.",
+    inability_ack="Koi baat nahi — theek hai. Aage badhte hain.",
     repeat_last_clarifier="Bilkul. Maine pucha tha: {target}",
     repeat_intro="Bilkul. Sawal yeh hai: {question}",
     repeat_limit=(

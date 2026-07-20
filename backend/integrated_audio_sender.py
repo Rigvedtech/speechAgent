@@ -143,6 +143,17 @@ class IntegratedAudioSender:
         except Exception:
             return None
 
+    def _streaming_pcm_tail_guard_bytes(self) -> int:
+        """
+        Hold back this many PCM bytes on early flushes.
+
+        MP3 bit-reservoir means the last ~1–2 frames can change slightly when
+        more stream data arrives. Keeping a short tail unsent avoids word-end
+        clicks while still allowing early playback (~2s TTFB).
+        """
+        # 40 ms of Int16 mono at TTS rate
+        return max(int(self._tts_sample_rate * 0.04 * 2), 1920)
+
     @staticmethod
     def _mp3_to_pcm_int16(mp3_bytes: bytes, target_rate: int = 24000) -> bytes:
         """Legacy static helper — prefer instance _decode_mp3_to_pcm."""
@@ -347,15 +358,18 @@ class IntegratedAudioSender:
     
     async def _send_via_sarvam_streaming(self, bot_id: str, text: str, state=None) -> bool:
         """
-        Stream Sarvam TTS to the Output Media webpage page incrementally.
+        Stream Sarvam TTS to the Output Media webpage with low TTFB (~2s)
+        and clean word endings.
 
-        Instead of collecting the full sentence MP3 (~1-4 s) before sending,
-        we decode and forward each accumulated chunk the moment we have enough
-        bytes for a reliable ffmpeg decode (~4 KB ≈ 256 ms of audio at 128 kbps).
+        Strategy (keeps streaming latency, fixes click/break artifacts):
+          - Keep the full MP3 byte stream in memory for the utterance.
+          - Re-decode the growing buffer with ffmpeg/pydub.
+          - Broadcast only *new* PCM since the last emit.
+          - Hold back a short PCM tail on early flushes (bit-reservoir guard)
+            so frame edges are not cut mid-word.
+          - On stream end, flush the remaining PCM with no guard.
 
-        Latency improvement per turn:
-          Short sentence (12 KB MP3, 900 ms from Sarvam): 300 ms → first audio
-          Long  sentence (50 KB MP3, 2.4 s from Sarvam):  300 ms → first audio
+        Never clears the MP3 buffer mid-stream (old clear() caused word-end breaks).
         """
         import re
 
@@ -377,62 +391,94 @@ class IntegratedAudioSender:
         # playback_done, unblocking STT 3-4 s too early.
         # We send start_speaking only when the first PCM chunk is about to stream.
 
-        # At 128 kbps, 4096 bytes ≈ 256 ms of audio — enough for ffmpeg to find
-        # MP3 frame sync words and produce clean PCM.  Anything smaller risks
-        # partial frames that produce clicks or silence.
+        # First decode once we have ~256 ms of MP3 @ 128 kbps — keeps TTFB ~2s.
         DECODE_THRESHOLD = 4096
+        # After first audio, re-decode when this many new MP3 bytes arrive.
+        DECODE_STEP = 1536
         # Discard decoded PCM that is suspiciously short (ffmpeg decoded garbage).
         # 50 ms at 24 kHz / 16-bit = 2400 bytes.
         MIN_PCM_OUTPUT = max(int(self._tts_sample_rate * 0.05 * 2), 2400)
         PCM_CHUNK = 4096
+        TAIL_GUARD = self._streaming_pcm_tail_guard_bytes()
 
-        mp3_buffer        = bytearray()
-        total_pcm         = 0
-        start_speaking_sent = False  # sent on first real PCM, not before
+        mp3_buffer = bytearray()
+        pcm_emitted = 0  # bytes of PCM already sent to the browser
+        total_pcm = 0
+        start_speaking_sent = False
+        last_decode_at_len = 0
 
-        def _broadcast_pcm(pcm: bytes):
+        def _broadcast_pcm(pcm: bytes) -> None:
             """Send PCM to browser, emitting start_speaking on the very first call."""
             nonlocal start_speaking_sent, total_pcm
+            if not pcm:
+                return
             if not start_speaking_sent:
                 if self.webpage_ctrl_sender:
                     self.webpage_ctrl_sender({"type": "start_speaking"})
                 start_speaking_sent = True
             total_pcm += len(pcm)
             for i in range(0, len(pcm), PCM_CHUNK):
-                self.webpage_broadcaster(pcm[i:i + PCM_CHUNK])
+                self.webpage_broadcaster(pcm[i : i + PCM_CHUNK])
+
+        def _emit_stable_pcm(*, final: bool) -> None:
+            """Decode full MP3-so-far; send only new stable PCM (or all on final)."""
+            nonlocal pcm_emitted, last_decode_at_len
+            if not mp3_buffer:
+                return
+            if final:
+                pcm = self._decode_mp3_to_pcm(bytes(mp3_buffer))
+            else:
+                pcm = self._try_decode_mp3(bytes(mp3_buffer))
+            last_decode_at_len = len(mp3_buffer)
+            if not pcm:
+                return
+            if not final and len(pcm) < MIN_PCM_OUTPUT:
+                return
+            if final:
+                stable_end = len(pcm)
+            else:
+                # Hold tail that may revise when more MP3 frames arrive
+                stable_end = max(pcm_emitted, len(pcm) - TAIL_GUARD)
+            if stable_end > pcm_emitted:
+                _broadcast_pcm(pcm[pcm_emitted:stable_end])
+                logger.debug(
+                    "[TTS Streaming] emit +%d PCM (emitted=%d total_dec=%d final=%s)",
+                    stable_end - pcm_emitted,
+                    stable_end,
+                    len(pcm),
+                    final,
+                )
+                pcm_emitted = stable_end
 
         try:
             async for mp3_chunk in self.sarvam_engine.speak_streaming_mp3(text, state):
                 if state and state.interrupt_flag.is_set():
                     break
 
+                if not mp3_chunk:
+                    continue
                 mp3_buffer.extend(mp3_chunk)
 
-                if len(mp3_buffer) >= DECODE_THRESHOLD:
-                    pcm = self._try_decode_mp3(bytes(mp3_buffer))
-                    if pcm and len(pcm) >= MIN_PCM_OUTPUT:
-                        _broadcast_pcm(pcm)
-                        logger.debug(
-                            f"[TTS Streaming] Early flush: {len(pcm)} PCM bytes"
-                        )
-                        mp3_buffer.clear()
-                    # If decode returns None (partial frames), keep accumulating
+                # First audio: wait for DECODE_THRESHOLD so ffmpeg can sync frames.
+                # Later: decode every DECODE_STEP bytes to keep the ring buffer fed
+                # without clearing / re-cutting the MP3 stream.
+                if pcm_emitted == 0:
+                    if len(mp3_buffer) >= DECODE_THRESHOLD:
+                        _emit_stable_pcm(final=False)
+                elif len(mp3_buffer) - last_decode_at_len >= DECODE_STEP:
+                    _emit_stable_pcm(final=False)
 
-            # Final flush — remaining bytes that didn't reach DECODE_THRESHOLD
-            # or couldn't be decoded early.
+            # Final flush — no tail guard; send every remaining sample.
             if mp3_buffer and not (state and state.interrupt_flag.is_set()):
-                pcm = self._decode_mp3_to_pcm(bytes(mp3_buffer))
-                if pcm:
-                    _broadcast_pcm(pcm)
+                _emit_stable_pcm(final=True)
 
         except Exception as e:
             logger.error(f"Sarvam TTS streaming error: {e}", exc_info=True)
-            # Fall through: return success based on whether any audio was sent
-        
+
         if total_pcm > 0:
             logger.info(
                 f"✓ Streamed {total_pcm} PCM bytes via WebSocket to Output Media page "
-                f"(Sarvam TTS streaming)"
+                f"(Sarvam TTS streaming, frame-safe)"
             )
             return True
 

@@ -68,6 +68,9 @@ class MeetingSession:
     camera_tracker: Optional[object] = None
     # Camera integrity TTS deferred until bot finishes current question/turn
     _pending_camera_warn: Optional[str] = None
+    # After interview_ended + wrap-up TTS, schedule auto leave
+    _leave_after_wrapup: bool = False
+    _leave_after_wrapup_task: Optional[asyncio.Task] = None
 
     def __post_init__(self):
         """Initialize processing components that don't need Sarvam config."""
@@ -293,6 +296,9 @@ class SessionManager:
                     if s.stt_engine
                     else None
                 )
+            )
+            session.state.on_interview_ended = (
+                lambda s=session: self.on_interview_ended(s)
             )
 
             if config.STT_FALLBACK_ENABLED and config.WHISPER_PRELOAD_ENABLED:
@@ -833,6 +839,24 @@ class SessionManager:
 
         loop.call_soon_threadsafe(_create_task)
 
+    def on_interview_ended(self, session: MeetingSession) -> None:
+        """Stop listening / camera as soon as interview ends; leave after wrap-up TTS."""
+        logger.info(
+            "[INTERVIEW END] disarming STT/camera for bot=%s — leave after wrap-up TTS",
+            session.bot_id[:8],
+        )
+        session.state.is_started.clear()
+        session.state.clear_stt_buffer.set()
+        self.cancel_silence_check(session)
+        session._leave_after_wrapup = True
+        if session.camera_tracker is not None:
+            try:
+                session.camera_tracker.close()
+            except Exception as e:
+                logger.warning("[CAMERA] disarm on interview end failed: %s", e)
+            session.camera_tracker = None
+            session.state.camera_integrity_armed = False
+
     def on_playback_done(self, session: MeetingSession) -> None:
         """Called when browser finishes playing bot audio — start silence watcher."""
         # Ignore stale playback_done from a previous turn while new TTS is in flight
@@ -849,6 +873,19 @@ class SessionManager:
             session._speaking_fallback_task = None
         session.state.is_ai_speaking.clear()
         session.state.last_playback_done_at = time.monotonic()
+        # Flush any turn that finished transcribing while bot was still speaking
+        stt = session.stt_engine
+        if stt is not None:
+            flush_hook = getattr(stt, "flush_held_during_tts", None)
+            if callable(flush_hook):
+                try:
+                    flush_hook()
+                except Exception as ex:
+                    logger.warning(
+                        "[STT] flush_held_during_tts failed bot=%s: %s",
+                        session.bot_id[:8],
+                        ex,
+                    )
         orch = session.state.interview_orchestrator
         bot_kind = getattr(session.state, "last_bot_speech_kind", "")
         if orch is not None:
@@ -860,6 +897,16 @@ class SessionManager:
                 orch.mark_bot_question_asked(bot_kind)
         if session._awaiting_turn_playback:
             session._awaiting_turn_playback = False
+            # Wrap-up finished — schedule auto leave (do not start silence watcher)
+            if session._leave_after_wrapup or session.state.interview_ended.is_set():
+                self._schedule_auto_leave_after_wrapup(session)
+                if session.audio_sender and session.tts_loop:
+                    session.audio_sender.ensure_sarvam_connected_sync(session.tts_loop)
+                logger.info(
+                    f"[audio-stream] playback_done — wrap-up complete, leave scheduled "
+                    f"for bot {session.bot_id[:8]}…"
+                )
+                return
             mid_answer = getattr(session.state, "mid_answer_interrupt", False)
             if mid_answer:
                 session.state.mid_answer_interrupt = False
@@ -883,6 +930,59 @@ class SessionManager:
         logger.info(
             f"[audio-stream] playback_done — STT unblocked for bot {session.bot_id[:8]}…"
         )
+
+    def _schedule_auto_leave_after_wrapup(self, session: MeetingSession) -> None:
+        """Leave the meeting shortly after wrap-up TTS finishes."""
+        if session._leave_after_wrapup_task and not session._leave_after_wrapup_task.done():
+            return
+        delay = max(0.5, float(config.INTERVIEW_AUTO_LEAVE_AFTER_WRAPUP_SEC))
+        bot_id = session.bot_id
+
+        async def _leave() -> None:
+            try:
+                await asyncio.sleep(delay)
+                logger.info(
+                    "[INTERVIEW END] auto-leaving meeting bot=%s after wrap-up",
+                    bot_id[:8],
+                )
+                await asyncio.get_event_loop().run_in_executor(
+                    None, lambda: self.end_session(bot_id)
+                )
+            except asyncio.CancelledError:
+                pass
+            except Exception as ex:
+                logger.warning(
+                    "[INTERVIEW END] auto-leave failed bot=%s: %s",
+                    bot_id[:8],
+                    ex,
+                )
+
+        loop = None
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = getattr(session, "tts_loop", None) or getattr(
+                config, "main_event_loop", None
+            )
+        if loop is None or not loop.is_running():
+            logger.warning(
+                "[INTERVIEW END] no event loop for auto-leave bot=%s — leaving sync",
+                bot_id[:8],
+            )
+            threading.Thread(
+                target=lambda: (
+                    time.sleep(delay),
+                    self.end_session(bot_id),
+                ),
+                name=f"AutoLeave-{bot_id[:8]}",
+                daemon=True,
+            ).start()
+            return
+
+        def _create() -> None:
+            session._leave_after_wrapup_task = loop.create_task(_leave())
+
+        loop.call_soon_threadsafe(_create)
 
     def _camera_warn_phrase(self, session: MeetingSession, kind: str) -> Optional[str]:
         from language_profiles import get_ui_strings

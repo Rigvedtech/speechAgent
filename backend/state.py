@@ -43,6 +43,8 @@ class AgentState:
         self.on_candidate_speech = None
         self.on_candidate_speech_started = None
         self.on_question_advanced = None
+        # Optional hook — stop STT/camera when interview ends (before wrap-up leave)
+        self.on_interview_ended = None
         # Last bot utterance kind: main | clarifier | drag | prompt | camera
         self.last_bot_speech_kind: str = ""
 
