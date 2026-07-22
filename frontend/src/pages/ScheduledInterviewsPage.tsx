@@ -53,7 +53,7 @@ export function ScheduledInterviewsPage() {
         botId: data.bot_id,
         candidateName: row.candidate_name,
         meetingUrl: data.meeting_url,
-        languageMode: data.language_mode,
+        languageMode: data.language_mode ?? 'english',
         createdAt: new Date().toISOString(),
       })
       navigate(`/interviews/${data.bot_id}`, {
