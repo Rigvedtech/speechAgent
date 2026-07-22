@@ -9,7 +9,7 @@ import {
   Clock,
   Radio,
 } from 'lucide-react'
-import { listReports } from '@/lib/api'
+import { listReports, listScheduledInterviews } from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import {
   computeDashboardKpis,
@@ -35,6 +35,11 @@ export function DashboardPage() {
     queryFn: listReports,
     retry: 2,
   })
+  const scheduled = useQuery({
+    queryKey: queryKeys.scheduledInterviews,
+    queryFn: listScheduledInterviews,
+    retry: 2,
+  })
 
   const reportList = reports.data?.reports ?? []
 
@@ -42,8 +47,9 @@ export function DashboardPage() {
   const recentReports = useMemo(() => reportList.slice(0, 4), [reportList])
 
   const liveCount = sessions.data?.active_sessions ?? 0
+  const scheduledCount = scheduled.data?.length ?? 0
   const showActiveSection = !sessions.isLoading && liveCount > 0
-  const loadingKpis = reports.isLoading
+  const loadingKpis = reports.isLoading || scheduled.isLoading
 
   return (
     <div className="space-y-8">
@@ -67,11 +73,12 @@ export function DashboardPage() {
         ) : (
           <>
             <KpiCard
-              label="Live now"
-              value={String(liveCount)}
-              hint="Active bot sessions"
+              label="Live & scheduled"
+              value={String(scheduledCount)}
+              hint={`${liveCount} live, ${scheduledCount} scheduled`}
               icon={Radio}
               iconClassName="text-success"
+              to="/interviews/scheduled"
             />
             <KpiCard
               label="Interviews finished"

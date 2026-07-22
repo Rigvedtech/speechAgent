@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
-import { Check, Copy, Loader2 } from 'lucide-react'
+import { Check, Copy, Loader2, RefreshCcw } from 'lucide-react'
 import { useBotStatus } from '@/hooks/useBotStatus'
-import { cancelInterviewSetup, getHealth, leaveMeeting, startInterview } from '@/lib/api'
+import { cancelInterviewSetup, getHealth, leaveMeeting, rejoinBot, startInterview } from '@/lib/api'
 import { ApiError } from '@/lib/api-client'
 import { formatApiError } from '@/lib/error-messages'
 import { queryKeys } from '@/lib/query-keys'
@@ -108,11 +108,48 @@ export function LiveSessionPage() {
     },
   })
 
+  const rejoinMutation = useMutation({
+    mutationFn: () => rejoinBot(botId),
+    onSuccess: (res) => {
+      setError(null)
+      // Navigate to new bot session
+      navigate(`/interviews/${res.new_bot_id}`, { 
+        state: { plannedQuestions: cachedQuestions },
+        replace: true,
+      })
+    },
+    onError: (err) => {
+      if (err instanceof ApiError) {
+        setError(formatApiError(err.message, err.detail))
+      } else {
+        setError('Failed to rejoin bot to lobby')
+      }
+    },
+  })
+
   const questions = data?.planned_questions?.length
     ? data.planned_questions
     : cachedQuestions
 
   const setupNotStarted = !data?.interview_started && !data?.interview_ended
+
+  // Show rejoin button only when bot is denied/failed (not when successfully in lobby)
+  // Button is enabled when bot was denied or failed to join
+  const showRejoinButton = Boolean(
+    data?.interview_configured &&
+    !data?.interview_started &&
+    !data?.interview_ended &&
+    data?.recall_phase !== 'in_meeting'
+  )
+  
+  const canRejoin = Boolean(
+    showRejoinButton &&
+    !data?.ready_to_start &&
+    (data?.recall_phase === 'ended' ||
+     data?.status === 'failed' ||
+     data?.status === 'fatal' ||
+     data?.status === 'done')
+  )
 
   const copyMeetingUrl = async (url: string) => {
     try {
@@ -260,6 +297,25 @@ export function LiveSessionPage() {
                   'Start interview'
                 )}
               </Button>
+              {showRejoinButton && (
+                <Button
+                  variant="secondary"
+                  onClick={() => rejoinMutation.mutate()}
+                  disabled={!canRejoin || rejoinMutation.isPending}
+                >
+                  {rejoinMutation.isPending ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      Rejoining…
+                    </>
+                  ) : (
+                    <>
+                      <RefreshCcw className="h-4 w-4" />
+                      Resend to Lobby
+                    </>
+                  )}
+                </Button>
+              )}
               {setupNotStarted ? (
                 <Button
                   variant="outline"

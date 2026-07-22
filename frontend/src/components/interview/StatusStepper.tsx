@@ -63,9 +63,9 @@ export function StatusStepper(props: StatusStepperProps) {
             key={step.key}
             className={cn(
               'flex items-center gap-2 rounded-md px-2 py-1.5 text-sm',
-              current && 'bg-[#f0fdf4] font-medium text-foreground',
+              current && 'bg-[#f0fdf4] dark:bg-[#166534] font-medium text-foreground',
               done && 'text-muted-foreground',
-              !done && !current && 'text-muted-foreground/70',
+              !done && !current && 'text-muted-foreground',
             )}
           >
             <span

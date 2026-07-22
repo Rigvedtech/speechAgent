@@ -56,7 +56,9 @@ class RecallMeetingBot:
         self.audio_receiver = AudioReceiver(
             host=self.websocket_host,
             port=self.websocket_port,
-            audio_callback=self.session_manager.handle_audio_chunk
+            audio_callback=self.session_manager.handle_audio_chunk,
+            transcript_callback=self.session_manager.handle_recall_transcript,
+            video_callback=self.session_manager.handle_video_frame,
         )
         
         # Shutdown flag

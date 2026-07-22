@@ -45,6 +45,8 @@ def log_transcript(
     text: str,
     *,
     persist: bool = True,
+    interview_id: Optional[str] = None,
+    turn_type: str = "other",
 ) -> None:
     """
     Log one turn. role: 'assistant' -> [AI], 'user' -> [You].
@@ -73,6 +75,22 @@ def log_transcript(
         if path:
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(stamped + "\n")
+
+    db_id = interview_id
+    if not db_id:
+        try:
+            from interview_persist import get_cached_interview_id
+
+            db_id = get_cached_interview_id(bot_id)
+        except Exception:
+            db_id = None
+    if db_id:
+        try:
+            from interview_persist import persist_transcript_turn
+
+            persist_transcript_turn(db_id, role, text, turn_type=turn_type)
+        except Exception as ex:
+            logger.warning("[TRANSCRIPT] DB persist failed: %s", ex)
 
 
 def get_session_transcript(bot_id: str) -> List[str]:

@@ -9,7 +9,7 @@ import logging
 from pathlib import Path
 from typing import Optional, List, Literal
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, File, UploadFile
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, File, UploadFile, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +17,8 @@ from pydantic import BaseModel, field_validator
 from dotenv import load_dotenv
 import uvicorn
 import requests
+from uuid import UUID
+from sqlalchemy.orm import Session
 
 from recall_bot_service import (
     RecallBotService,
@@ -36,15 +38,30 @@ from n8n_extraction import extract_cv_file, extract_jd_file, generate_questions
 from language_profiles import resolve_language_mode, get_ui_strings
 import config as app_config
 import ws_hub
-
+from auth.deps import get_optional_db, get_optional_user
+from db.models import User
+from extraction_store import (
+    save_cv_extraction,
+    save_jd_extraction,
+    save_question_generation,
+)
+from routers.interviews import router as interviews_router
+from routers.documents import router as documents_router
+from routers.ats import router as ats_router
+import interview_persist
+import document_store
 load_dotenv()
 
-# Setup logging
+# Setup logging (console + full file under backend/logs/)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
+from file_logging import setup_file_logging
+
+_run_log = setup_file_logging(prefix="api_server")
 logger = logging.getLogger(__name__)
+logger.info("Server log file: %s", _run_log)
 
 # Initialize FastAPI
 app = FastAPI(title="Recall.ai Bot API", version="1.0.0")
@@ -57,9 +74,25 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in _cors_origins if o.strip()],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
+
+# Phase 0–1: auth + candidates + job postings (requires DATABASE_URL)
+from auth.routes import router as auth_router
+from auth.routes import users_router
+from routers.candidates import router as candidates_router
+from routers.job_postings import router as job_postings_router
+from routers.extractions import router as extractions_router
+
+app.include_router(auth_router)
+app.include_router(users_router)
+app.include_router(candidates_router)
+app.include_router(job_postings_router)
+app.include_router(extractions_router)
+app.include_router(interviews_router)
+app.include_router(documents_router)
+app.include_router(ats_router)
 
 # Serve audio-worklet-processor.js and other static assets
 STATIC_DIR = Path(__file__).parent / "static"
@@ -92,8 +125,13 @@ async def _capture_main_loop():
     importers.  config.py is always imported under the same key in sys.modules.
     """
     import config as _cfg
+    from db.session import init_db
+    from auth.security import validate_jwt_config
+
     _cfg.main_event_loop = asyncio.get_running_loop()
     logger.info("[startup] Main event loop captured in config.main_event_loop")
+    validate_jwt_config()
+    init_db()
     asyncio.create_task(_lobby_janitor_loop())
 
 
@@ -146,6 +184,12 @@ class JoinMeetingRequest(BaseModel):
     language_mode: Optional[Literal["english", "hinglish"]] = None
     greeting_message: Optional[str] = None
     replace_existing: bool = False
+    # Persistence (auth required when set)
+    interview_id: Optional[UUID] = None
+    candidate_id: Optional[UUID] = None
+    job_posting_id: Optional[UUID] = None
+    job_title: Optional[str] = None
+    document_extraction_id: Optional[UUID] = None
 
 
 class PlannedQuestionSummary(BaseModel):
@@ -169,6 +213,7 @@ class JoinMeetingResponse(BaseModel):
     localization_status: Optional[str] = None
     questions_planned: Optional[int] = None
     planned_questions: Optional[List[PlannedQuestionSummary]] = None
+    interview_id: Optional[UUID] = None
 
 
 class LeaveResponse(BaseModel):
@@ -225,9 +270,26 @@ class SubmitFeedbackRequest(BaseModel):
 def _feedback_bot_context(bot_id: str) -> dict:
     """Resolve interview identity for feedback; 404 if bot unknown."""
     session = session_manager.get_session(bot_id)
-    report = load_report(bot_id)
+    report = None
+    try:
+        from interview_persist import load_report_by_bot_id
+
+        report = load_report_by_bot_id(bot_id)
+    except Exception:
+        report = None
+    if not report:
+        report = load_report(bot_id)
     if not session and not report:
-        raise HTTPException(status_code=404, detail="Interview not found")
+        # Last chance: interview session exists in DB even without a report yet
+        try:
+            from interview_persist import find_interview_id_by_bot
+
+            if not find_interview_id_by_bot(bot_id):
+                raise HTTPException(status_code=404, detail="Interview not found")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=404, detail="Interview not found")
 
     candidate_name = None
     if session:
@@ -346,6 +408,9 @@ async def _attach_interview_to_session(
     bank,
     resolved_language: str,
     greeting_message: Optional[str],
+    *,
+    planned=None,
+    db_interview_id: Optional[str] = None,
 ) -> None:
     from interview_engine import InterviewOrchestrator
 
@@ -356,24 +421,85 @@ async def _attach_interview_to_session(
         cv_text=cv_text,
         bank=bank,
         language_mode=resolved_language,
+        planned=planned,
+        db_interview_id=db_interview_id,
     )
     session_manager.configure_interview_session(
         session, orchestrator, resolved_language, greeting_message
     )
+    session.db_interview_id = db_interview_id
     await session_manager.apply_language_profile(session, resolved_language)
     session_manager.start_question_localization(session)
 
 
 @app.post("/api/join", response_model=JoinMeetingResponse)
-async def join_meeting(request: JoinMeetingRequest):
+async def join_meeting(
+    request: JoinMeetingRequest,
+    user: Optional[User] = Depends(get_optional_user),
+    db: Optional[Session] = Depends(get_optional_db),
+):
     """
     Join a Teams/Zoom/Google Meet meeting.
     One bot per meeting URL — duplicate joins return 409 with a clear message.
+    Pass interview_id to send a scheduled interview to lobby, or candidate_id +
+    job_posting_id to persist a new interview row when authenticated.
     """
     bot_name = request.bot_name or BOT_NAME
     raw_meeting_url = request.meeting_url.strip()
     if not raw_meeting_url:
         raise HTTPException(status_code=400, detail="meeting_url is required")
+
+    planned_from_db = None
+    db_interview_id: Optional[str] = None
+    persist_candidate_id = request.candidate_id
+    persist_job_id = request.job_posting_id
+    persist_job_title = request.job_title
+    persist_extraction_id = request.document_extraction_id
+
+    if request.interview_id is not None:
+        if user is None or db is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required to send a scheduled interview to lobby",
+            )
+        payload = interview_persist.load_join_payload(db, user, request.interview_id)
+        if payload["interview"].bot_id is not None and not request.replace_existing:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "This interview already has a bot in lobby.",
+                    "bot_id": str(payload["interview"].bot_id),
+                    "interview_id": str(request.interview_id),
+                },
+            )
+        raw_meeting_url = payload["meeting_url"]
+        bot_name = payload["bot_name"] or bot_name
+        request.candidate_name = payload["candidate_name"]
+        request.jdText = payload["jdText"]
+        request.cvText = payload["cvText"]
+        request.questions = [
+            QuestionBankItem(**q) for q in payload["questions"]
+        ]
+        request.language_mode = payload["language_mode"]
+        if payload.get("greeting_message") and not request.greeting_message:
+            request.greeting_message = payload["greeting_message"]
+        planned_from_db = payload["planned_bank"]
+        db_interview_id = str(request.interview_id)
+        persist_candidate_id = payload["candidate_id"]
+        persist_job_id = payload["job_posting_id"]
+        persist_job_title = payload["job_title"]
+        persist_extraction_id = payload.get("document_extraction_id")
+    elif request.candidate_id or request.job_posting_id:
+        if user is None or db is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Authentication required to persist interview entities",
+            )
+        if not request.candidate_id or not request.job_posting_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Both candidate_id and job_posting_id are required to persist",
+            )
 
     try:
         meeting_url = resolve_meeting_url_for_recall(raw_meeting_url)
@@ -491,6 +617,10 @@ async def join_meeting(request: JoinMeetingRequest):
             websocket_url=PUBLIC_WEBSOCKET_URL,
             use_output_media=app_config.RECALL_USE_OUTPUT_MEDIA,
             output_media_url=output_media_page_url,
+            enable_camera_integrity=bool(app_config.CAMERA_INTEGRITY_ENABLED),
+            include_bot_audio_in_recording=bool(
+                app_config.RECALL_INCLUDE_BOT_AUDIO_IN_RECORDING
+            ),
         )
 
         bot_data = recall_service.create_bot(config)
@@ -526,6 +656,61 @@ async def join_meeting(request: JoinMeetingRequest):
             candidate_name, jd_text, cv_text, bank, resolved_language = (
                 _validate_interview_config(request)
             )
+
+            # Persist / attach DB interview before wiring orchestrator
+            if user is not None and db is not None and (
+                request.interview_id is not None
+                or (persist_candidate_id and persist_job_id)
+            ):
+                try:
+                    if request.interview_id is not None:
+                        row = interview_persist.attach_bot_to_interview(
+                            db,
+                            user,
+                            request.interview_id,
+                            bot_id,
+                            replace_existing=request.replace_existing,
+                        )
+                        db_interview_id = str(row.id)
+                    else:
+                        from interview_engine import QuestionSelector
+                        import config as _cfg
+
+                        planned_persist = planned_from_db or QuestionSelector.select(
+                            bank, _cfg.MAX_QUESTIONS
+                        )
+                        row = interview_persist.create_interview_with_bot(
+                            db,
+                            user,
+                            bot_id=bot_id,
+                            meeting_url=meeting_url,
+                            candidate_id=persist_candidate_id,
+                            job_posting_id=persist_job_id,
+                            candidate_name=candidate_name,
+                            job_title=persist_job_title
+                            or request.job_title
+                            or "Interview",
+                            jd_text=jd_text,
+                            cv_text=cv_text,
+                            planned=planned_persist,
+                            language_mode=resolved_language,
+                            bot_name=bot_name,
+                            greeting_message=request.greeting_message,
+                            document_extraction_id=persist_extraction_id,
+                        )
+                        db_interview_id = str(row.id)
+                        planned_from_db = planned_persist
+                except HTTPException:
+                    session_manager.end_session(bot_id)
+                    raise
+                except Exception as persist_ex:
+                    logger.warning(
+                        "[interview] persist on join failed bot=%s: %s",
+                        bot_id[:8],
+                        persist_ex,
+                        exc_info=True,
+                    )
+
             await _attach_interview_to_session(
                 session,
                 bot_id,
@@ -535,6 +720,8 @@ async def join_meeting(request: JoinMeetingRequest):
                 bank,
                 resolved_language,
                 request.greeting_message,
+                planned=planned_from_db,
+                db_interview_id=db_interview_id,
             )
             interview_configured = True
             orch = session.state.interview_orchestrator
@@ -565,6 +752,7 @@ async def join_meeting(request: JoinMeetingRequest):
             planned_questions=(
                 orch.planned_questions_summary() if orch else None
             ),
+            interview_id=UUID(db_interview_id) if db_interview_id else None,
         )
 
     except HTTPException:
@@ -739,6 +927,7 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
 
         if greeting_message:
             session.state.is_started.set()
+            session_manager.arm_camera_integrity(session)
             session.state.llm_queue.put(greeting_message)
         else:
             ui = get_ui_strings(resolved_language)
@@ -748,6 +937,7 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
             )
 
             session.state.is_started.set()
+            session_manager.arm_camera_integrity(session)
             log_transcript(bot_id, "assistant", greeting_text)
             session.state.tts_queue.put(greeting_text)
             session.state.tts_queue.put("<END_OF_TURN>")
@@ -758,6 +948,15 @@ async def start_interview(bot_id: str, request: StartInterviewRequest = None):
                 "[INTERVIEW GREETING] bot=%s fixed greeting sent to TTS",
                 bot_id[:8],
             )
+
+        db_id = getattr(session, "db_interview_id", None) or getattr(
+            orchestrator, "db_interview_id", None
+        )
+        if db_id:
+            try:
+                interview_persist.mark_interview_started(db_id)
+            except Exception as ex:
+                logger.warning("[interview] mark started failed: %s", ex)
 
         logger.info(
             "Interview started for bot %s candidate=%s language=%s planned_questions=%d",
@@ -792,18 +991,47 @@ class GenerateQuestionsRequest(BaseModel):
     cvText: str
     candidate_name: Optional[str] = None
     language_mode: Optional[str] = None
+    candidate_id: Optional[UUID] = None
+    job_posting_id: Optional[UUID] = None
+    extraction_id: Optional[UUID] = None
 
 
 @app.post("/api/extract-cv")
-async def extract_cv(cv_file: UploadFile = File(...)):
-    """Proxy CV upload to n8n (N8N_CV_URI) and return normalized resume text."""
-    logger.info("[EXTRACT-CV] received cv=%s", bool(cv_file))
+async def extract_cv(
+    cv_file: UploadFile = File(...),
+    candidate_id: Optional[UUID] = Form(None),
+    user: Optional[User] = Depends(get_optional_user),
+    db: Optional[Session] = Depends(get_optional_db),
+):
+    """
+    Proxy CV upload to n8n.
+    When authenticated: save file to documents + link document_extractions.cv_document_id.
+    """
+    logger.info("[EXTRACT-CV] received cv=%s auth=%s", bool(cv_file), bool(user))
     if not cv_file.filename:
         raise HTTPException(status_code=400, detail="Upload a CV file")
 
     cv_bytes = await cv_file.read()
     if not cv_bytes:
         raise HTTPException(status_code=400, detail="CV file is empty")
+
+    doc_row = None
+    if user is not None and db is not None:
+        try:
+            doc_row = document_store.create_uploaded_document(
+                db,
+                user,
+                document_type="cv",
+                file_bytes=cv_bytes,
+                original_filename=cv_file.filename,
+                mime_type=cv_file.content_type,
+                candidate_id=candidate_id,
+                source="upload",
+            )
+        except HTTPException:
+            raise
+        except Exception as ex:
+            logger.warning("[EXTRACT-CV] document persist failed: %s", ex, exc_info=True)
 
     try:
         result = await asyncio.to_thread(
@@ -812,21 +1040,73 @@ async def extract_cv(cv_file: UploadFile = File(...)):
             cv_filename=cv_file.filename,
         )
     except ValueError as ve:
+        if doc_row is not None and db is not None:
+            document_store.mark_document_failed(db, doc_row.id, error=str(ve))
         raise HTTPException(status_code=502, detail=str(ve))
 
-    return {"success": True, **result}
+    payload = {"success": True, **result}
+    if user is not None and db is not None:
+        try:
+            if doc_row is not None:
+                document_store.mark_document_ready(
+                    db,
+                    doc_row.id,
+                    extracted_text=result.get("cvText") or "",
+                )
+            row = save_cv_extraction(
+                db,
+                user,
+                cv_text=result.get("cvText") or "",
+                candidate_id=candidate_id,
+                cv_document_id=doc_row.id if doc_row else None,
+                raw_response=result.get("cvStructured"),
+            )
+            payload["extraction_id"] = str(row.id)
+            if doc_row is not None:
+                payload["document_id"] = str(doc_row.id)
+        except HTTPException:
+            raise
+        except Exception as ex:
+            logger.warning("[EXTRACT-CV] extraction persist failed: %s", ex, exc_info=True)
+    return payload
 
 
 @app.post("/api/extract-jd")
-async def extract_jd(jd_file: UploadFile = File(...)):
-    """Proxy JD upload to n8n (N8N_JD_URI) and return normalized job description text."""
-    logger.info("[EXTRACT-JD] received jd=%s", bool(jd_file))
+async def extract_jd(
+    jd_file: UploadFile = File(...),
+    job_posting_id: Optional[UUID] = Form(None),
+    user: Optional[User] = Depends(get_optional_user),
+    db: Optional[Session] = Depends(get_optional_db),
+):
+    """
+    Proxy JD upload to n8n.
+    When authenticated: save file to documents + link document_extractions.jd_document_id.
+    """
+    logger.info("[EXTRACT-JD] received jd=%s auth=%s", bool(jd_file), bool(user))
     if not jd_file.filename:
         raise HTTPException(status_code=400, detail="Upload a JD file")
 
     jd_bytes = await jd_file.read()
     if not jd_bytes:
         raise HTTPException(status_code=400, detail="JD file is empty")
+
+    doc_row = None
+    if user is not None and db is not None:
+        try:
+            doc_row = document_store.create_uploaded_document(
+                db,
+                user,
+                document_type="jd",
+                file_bytes=jd_bytes,
+                original_filename=jd_file.filename,
+                mime_type=jd_file.content_type,
+                job_posting_id=job_posting_id,
+                source="upload",
+            )
+        except HTTPException:
+            raise
+        except Exception as ex:
+            logger.warning("[EXTRACT-JD] document persist failed: %s", ex, exc_info=True)
 
     try:
         result = await asyncio.to_thread(
@@ -835,15 +1115,50 @@ async def extract_jd(jd_file: UploadFile = File(...)):
             jd_filename=jd_file.filename,
         )
     except ValueError as ve:
+        if doc_row is not None and db is not None:
+            document_store.mark_document_failed(db, doc_row.id, error=str(ve))
         raise HTTPException(status_code=502, detail=str(ve))
 
-    return {"success": True, **result}
+    payload = {"success": True, **result}
+    if user is not None and db is not None:
+        try:
+            if doc_row is not None:
+                document_store.mark_document_ready(
+                    db,
+                    doc_row.id,
+                    extracted_text=result.get("jdText") or "",
+                )
+            row = save_jd_extraction(
+                db,
+                user,
+                jd_text=result.get("jdText") or "",
+                job_posting_id=job_posting_id,
+                jd_document_id=doc_row.id if doc_row else None,
+                raw_response=result.get("jdStructured"),
+            )
+            payload["extraction_id"] = str(row.id)
+            if doc_row is not None:
+                payload["document_id"] = str(doc_row.id)
+        except HTTPException:
+            raise
+        except Exception as ex:
+            logger.warning("[EXTRACT-JD] extraction persist failed: %s", ex, exc_info=True)
+    return payload
 
 
 @app.post("/api/generate-questions")
-async def generate_questions_endpoint(body: GenerateQuestionsRequest):
-    """Forward confirmed JD/CV text to n8n (N8N_QUESTIONS_URI) and return question bank."""
-    logger.info("[GENERATE-QUESTIONS] jd_len=%s cv_len=%s", len(body.jdText), len(body.cvText))
+async def generate_questions_endpoint(
+    body: GenerateQuestionsRequest,
+    user: Optional[User] = Depends(get_optional_user),
+    db: Optional[Session] = Depends(get_optional_db),
+):
+    """Forward JD/CV to n8n; persist questions_json when authenticated."""
+    logger.info(
+        "[GENERATE-QUESTIONS] jd_len=%s cv_len=%s auth=%s",
+        len(body.jdText),
+        len(body.cvText),
+        bool(user),
+    )
 
     try:
         result = await asyncio.to_thread(
@@ -854,18 +1169,65 @@ async def generate_questions_endpoint(body: GenerateQuestionsRequest):
             language_mode=body.language_mode,
         )
     except ValueError as ve:
+        if user is not None and db is not None:
+            save_question_generation(
+                db,
+                user,
+                jd_text=body.jdText,
+                cv_text=body.cvText,
+                questions=None,
+                candidate_id=body.candidate_id,
+                job_posting_id=body.job_posting_id,
+                extraction_id=body.extraction_id,
+                error_message=str(ve),
+                success=False,
+            )
         raise HTTPException(status_code=502, detail=str(ve))
 
-    return {"success": True, **result}
+    payload = {"success": True, **result}
+    if user is not None and db is not None:
+        row = save_question_generation(
+            db,
+            user,
+            jd_text=body.jdText,
+            cv_text=body.cvText,
+            questions=result.get("questions"),
+            candidate_id=body.candidate_id,
+            job_posting_id=body.job_posting_id,
+            extraction_id=body.extraction_id,
+            raw_response=result,
+            success=True,
+        )
+        payload["extraction_id"] = str(row.id)
+    return payload
 
 
 @app.get("/api/reports")
 async def list_interview_reports():
-    """List persisted interview report summaries, newest first."""
-    summaries = list_reports()
+    """List interview report summaries from DB (preferred), merged with disk fallback."""
+    from interview_persist import list_db_report_summaries
+
+    db_rows = list_db_report_summaries()
+    by_bot: dict[str, dict] = {}
+    for row in db_rows:
+        bid = row.get("bot_id")
+        if bid:
+            by_bot[str(bid)] = row
+
+    for row in list_reports():
+        bid = row.get("bot_id")
+        if not bid or str(bid) in by_bot:
+            continue
+        row = dict(row)
+        row["has_feedback"] = feedback_exists(str(bid))
+        by_bot[str(bid)] = row
+
+    summaries = list(by_bot.values())
+    summaries.sort(key=lambda r: r.get("completed_at") or "", reverse=True)
     for row in summaries:
         bid = row.get("bot_id")
-        row["has_feedback"] = feedback_exists(bid) if bid else False
+        if bid and "has_feedback" not in row:
+            row["has_feedback"] = feedback_exists(str(bid))
     return {"reports": summaries}
 
 
@@ -917,7 +1279,7 @@ async def submit_interview_feedback(bot_id: str, body: SubmitFeedbackRequest):
 async def get_interview_report(bot_id: str):
     """
     Get structured interview report card (scores, develop/fix areas).
-    Returns 409 until the interview ends; persists to disk so report survives /api/leave.
+    Prefers Postgres; falls back to disk / live session.
     """
     report = resolve_interview_report(bot_id, session_manager)
     logger.info(
@@ -958,11 +1320,20 @@ async def get_interview_report_html(bot_id: str):
 @app.post("/api/interviews/{bot_id}/cancel", response_model=LeaveResponse)
 async def cancel_interview_setup(bot_id: str):
     """
-    Cancel interview setup — removes bot from meeting lobby before or during setup.
+    Cancel live interview setup — removes Recall bot from meeting lobby.
+    Distinct from POST /api/interviews/scheduled/{id}/cancel (DB-only schedule cancel).
     """
     try:
         logger.info(f"Cancelling interview setup for bot {bot_id}")
         recall_removed = session_manager.end_session(bot_id)
+        try:
+            interview_persist.detach_bot_after_lobby_cancel(bot_id)
+        except Exception as db_ex:
+            logger.warning(
+                "[interview] detach after lobby cancel failed bot=%s: %s",
+                bot_id[:8],
+                db_ex,
+            )
         if not recall_removed:
             raise HTTPException(
                 status_code=502,
@@ -976,8 +1347,94 @@ async def cancel_interview_setup(bot_id: str):
             bot_id=bot_id,
             message="Interview setup cancelled; bot removed from meeting",
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to cancel interview setup: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/rejoin/{bot_id}")
+async def rejoin_bot_to_lobby(bot_id: str):
+    """
+    Rejoin bot to meeting lobby after denial.
+    Creates new bot instance while preserving session state (CV, JD, questions).
+    
+    Path Parameter:
+    - bot_id: Current bot ID to rejoin
+    
+    Response:
+    {
+        "success": true,
+        "old_bot_id": "abc-123",
+        "new_bot_id": "def-456",
+        "message": "Bot rejoined to lobby"
+    }
+    """
+    try:
+        session = session_manager.get_session(bot_id)
+        if not session:
+            raise HTTPException(status_code=404, detail=f"Session not found for bot {bot_id}")
+        
+        if session.state.is_started.is_set():
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot rejoin - interview already started"
+            )
+        
+        meeting_url = session.meeting_url
+        
+        # Build bot config (same as original join)
+        import uuid as _uuid
+        public_base = os.getenv("PUBLIC_NGROK_URL", "").rstrip("/")
+        page_session_id = str(_uuid.uuid4())
+        output_media_page_url: Optional[str] = None
+        
+        if app_config.RECALL_USE_OUTPUT_MEDIA and public_base:
+            import urllib.parse
+            output_media_page_url = (
+                f"{public_base}/voice-agent"
+                f"?page_session_id={page_session_id}"
+                f"&name={urllib.parse.quote(BOT_NAME)}"
+            )
+        
+        config = BotConfig(
+            meeting_url=meeting_url,
+            bot_name=BOT_NAME,
+            websocket_url=PUBLIC_WEBSOCKET_URL,
+            use_output_media=app_config.RECALL_USE_OUTPUT_MEDIA,
+            output_media_url=output_media_page_url,
+            enable_camera_integrity=bool(app_config.CAMERA_INTEGRITY_ENABLED),
+            include_bot_audio_in_recording=bool(
+                app_config.RECALL_INCLUDE_BOT_AUDIO_IN_RECORDING
+            ),
+        )
+        
+        # Rejoin bot (creates new bot, preserves session)
+        logger.info(f"Rejoining bot {bot_id[:8]} to lobby for {meeting_url[:50]}...")
+        new_bot_id = session_manager.rejoin_bot(bot_id, config)
+        
+        # Register new page session if using output media
+        if output_media_page_url:
+            ws_hub.register_page_session(page_session_id, new_bot_id)
+        
+        logger.info(
+            f"Bot rejoined successfully: {bot_id[:8]} → {new_bot_id[:8]}"
+        )
+        
+        return {
+            "success": True,
+            "old_bot_id": bot_id,
+            "new_bot_id": new_bot_id,
+            "message": "Bot rejoined to lobby - admit from Teams to continue",
+        }
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Failed to rejoin bot: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1273,6 +1730,7 @@ if __name__ == "__main__":
             port=WEBSOCKET_PORT,
             audio_callback=session_manager.handle_audio_chunk,
             transcript_callback=session_manager.handle_recall_transcript,
+            video_callback=session_manager.handle_video_frame,
         )
         receiver.run()
     
@@ -1286,6 +1744,10 @@ if __name__ == "__main__":
     logger.info(f"WebSocket: ws://0.0.0.0:{WEBSOCKET_PORT}")
     logger.info(f"Docs: http://0.0.0.0:8000/docs")
     logger.info(f"Bot Name: {BOT_NAME}")
+    logger.info(
+        "Camera integrity: %s",
+        "ON" if app_config.CAMERA_INTEGRITY_ENABLED else "OFF",
+    )
     logger.info("=" * 60)
     
     # Start FastAPI server

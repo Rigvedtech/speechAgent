@@ -5,7 +5,7 @@ interface JoinWizardStepsProps {
   labels?: string[]
 }
 
-const DEFAULT_LABELS = ['Candidate', 'Job', 'Questions', 'Join']
+const DEFAULT_LABELS = ['Job', 'Candidate', 'Questions', 'Join']
 
 export function JoinWizardSteps({ step, labels = DEFAULT_LABELS }: JoinWizardStepsProps) {
   const count = labels.length

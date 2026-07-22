@@ -24,6 +24,7 @@ class AudioReceiver:
         port: int = 8765,
         audio_callback: Optional[Callable] = None,
         transcript_callback: Optional[Callable] = None,
+        video_callback: Optional[Callable] = None,
     ):
         """
         Initialize audio receiver WebSocket server.
@@ -34,13 +35,17 @@ class AudioReceiver:
             audio_callback: Invoked per PCM audio chunk.
                            Signature: callback(bot_id: str, audio_array: np.ndarray)
             transcript_callback: Invoked per transcript segment from Recall.ai.
-                           Signature: callback(bot_id: str, text: str,
-                                               is_final: bool, is_bot_speaker: bool)
+                           Signature: callback(bot_id, text, is_final, is_bot_speaker,
+                                               participant_id=None, participant_name=None)
+            video_callback: Invoked per separate participant PNG frame.
+                           Signature: callback(bot_id, png_bytes, participant_id,
+                                               participant_name, media_type)
         """
         self.host = host
         self.port = port
         self.audio_callback = audio_callback
         self.transcript_callback = transcript_callback
+        self.video_callback = video_callback
         self.active_connections: Dict[str, WebSocketServerProtocol] = {}
         self.bot_sessions: Dict[str, dict] = {}  # bot_id -> session info
     
@@ -75,6 +80,15 @@ class AudioReceiver:
                             await self._process_audio_message(data, bot_id)
                         elif event_type == "transcript.data":
                             await self._process_transcript_message(data, bot_id)
+                        elif event_type == "video_separate_png.data":
+                            await self._process_video_png_message(data, bot_id)
+                        elif event_type and "video" in str(event_type).lower():
+                            # Surface unexpected video event names (schema drift)
+                            logger.info(
+                                "[CAMERA] Unhandled video-related event=%s keys=%s",
+                                event_type,
+                                list((data.get("data") or {}).keys())[:12],
+                            )
                         elif event_type:
                             logger.debug(f"Received event: {event_type}")
                     
@@ -177,7 +191,19 @@ class AudioReceiver:
                 f"is_bot={is_bot_speaker} text='{text[:60]}'"
             )
 
+            participant_id = speaker.get("id")
+            participant_name = speaker.get("name")
             try:
+                self.transcript_callback(
+                    bot_id,
+                    text,
+                    is_final,
+                    is_bot_speaker,
+                    participant_id=participant_id,
+                    participant_name=participant_name,
+                )
+            except TypeError:
+                # Backward-compatible callers without participant kwargs
                 self.transcript_callback(bot_id, text, is_final, is_bot_speaker)
             except Exception as e:
                 logger.error(f"Error in transcript callback: {e}", exc_info=True)
@@ -191,18 +217,92 @@ class AudioReceiver:
         except Exception as e:
             logger.error(f"Failed to process transcript: {e}", exc_info=True)
 
+    async def _process_video_png_message(self, data: dict, bot_id: Optional[str]):
+        """Parse video_separate_png.data and invoke video_callback."""
+        if not self.video_callback or not bot_id:
+            if not getattr(self, "_logged_video_no_cb", False):
+                self._logged_video_no_cb = True
+                logger.warning(
+                    "[CAMERA] video_separate_png received but callback/bot_id missing "
+                    "callback=%s bot_id=%s",
+                    bool(self.video_callback),
+                    bot_id,
+                )
+            return
+        try:
+            # Recall nests payload under data.data; tolerate slight schema drift
+            outer = data.get("data") or {}
+            payload = outer.get("data") if isinstance(outer.get("data"), dict) else outer
+            if not isinstance(payload, dict):
+                logger.warning("[CAMERA] unexpected video payload type=%s", type(payload))
+                return
+            buffer_b64 = payload.get("buffer")
+            if not buffer_b64:
+                logger.warning(
+                    "[CAMERA] video event missing buffer keys=%s",
+                    list(payload.keys())[:20],
+                )
+                return
+            png_bytes = base64.b64decode(buffer_b64)
+            participant = payload.get("participant") or {}
+            if not isinstance(participant, dict):
+                participant = {}
+            participant_id = participant.get("id")
+            participant_name = participant.get("name")
+            media_type = payload.get("type") or "webcam"
+            if participant_id is None:
+                logger.warning(
+                    "[CAMERA] video event missing participant.id keys=%s",
+                    list(payload.keys())[:20],
+                )
+                return
+            if not getattr(self, "_logged_first_video", False):
+                self._logged_first_video = True
+                logger.info(
+                    "[CAMERA] First video_separate_png frame bot=%s id=%s name=%r "
+                    "type=%s bytes=%d",
+                    str(bot_id)[:8],
+                    participant_id,
+                    participant_name,
+                    media_type,
+                    len(png_bytes),
+                )
+            try:
+                self.video_callback(
+                    bot_id,
+                    png_bytes,
+                    str(participant_id),
+                    participant_name,
+                    media_type,
+                )
+            except Exception as e:
+                logger.error(f"Error in video callback: {e}", exc_info=True)
+        except (KeyError, TypeError, ValueError) as e:
+            logger.warning(
+                "[CAMERA] Could not parse video_separate_png.data (key=%s). Raw: %s",
+                e,
+                str(data)[:400],
+            )
+        except Exception as e:
+            logger.error(f"Failed to process video PNG: {e}", exc_info=True)
+
     async def start(self):
         """Start the WebSocket server."""
         logger.info(f"Starting audio receiver on ws://{self.host}:{self.port}")
         
+        # PNG frames in JSON can exceed the default 1 MiB message cap
         async with websockets.serve(
             self.handle_connection,
             self.host,
             self.port,
             ping_interval=20,
-            ping_timeout=10
+            ping_timeout=10,
+            max_size=8 * 1024 * 1024,
+            max_queue=64,
         ):
-            logger.info("Audio receiver started successfully")
+            logger.info(
+                "Audio receiver started successfully (max_size=8MiB for video PNG)"
+            )
             await asyncio.Future()  # Run forever
     
     def run(self):

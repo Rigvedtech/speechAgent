@@ -6,7 +6,7 @@ import threading
 import time
 from typing import Optional
 import config
-from config import GROQ_API_KEY, GROQ_MODEL, GROQ_TEMPERATURE, GROQ_MAX_TOKENS, OLLAMA_MODEL
+from config import GROQ_API_KEY, GROQ_MODEL, GROQ_EVALUATOR_MODEL, GROQ_EVALUATOR_MAX_TOKENS, GROQ_TEMPERATURE, GROQ_MAX_TOKENS, OLLAMA_MODEL
 import document as interview_documents
 from state import AgentState
 from system_prompt import (
@@ -28,6 +28,7 @@ from interview_engine import (
     TurnDecision,
     TurnIntent,
     detect_answer_done_phrase,
+    detect_bot_alive_check,
     detect_explicit_question_repeat,
     detect_inability_answer,
     detect_presence_confirm,
@@ -564,9 +565,9 @@ class LLMBrain:
         if client:
             try:
                 completion = client.chat.completions.create(
-                    model=GROQ_MODEL,
+                    model=GROQ_EVALUATOR_MODEL,
                     messages=messages,
-                    max_tokens=200,
+                    max_tokens=GROQ_EVALUATOR_MAX_TOKENS,
                     temperature=0.1,
                     response_format={"type": "json_object"},
                 )
@@ -819,9 +820,9 @@ class LLMBrain:
                 elif decision.spoken_kind == "clarifier" and orch._last_clarifier_question:
                     record_text = orch._last_clarifier_question
                 orch.record_spoken(record_text, decision.spoken_kind)
-                if (
-                    decision.spoken_kind == "main"
-                    and decision.score_record is not None
+                if decision.spoken_kind == "main" and (
+                    decision.score_record is not None
+                    or getattr(decision, "pending_background_score", False)
                 ):
                     self.state.presence_check_delay_sec = (
                         config.POST_TTS_SILENCE_MIN_AFTER_QUESTION_SEC
@@ -849,10 +850,21 @@ class LLMBrain:
 
         if not decision.should_continue:
             self.state.interview_ended.set()
+            hook = getattr(self.state, "on_interview_ended", None)
+            if callable(hook):
+                try:
+                    hook()
+                except Exception as ex:
+                    logger.warning("[INTERVIEW END] cleanup hook failed: %s", ex)
             if orch:
                 orch.mark_ended()
                 try:
-                    save_report(orch.bot_id, orch.build_report())
+                    report = orch.build_report()
+                    save_report(orch.bot_id, report)
+                    if orch.db_interview_id:
+                        from interview_persist import save_interview_report
+
+                        save_interview_report(orch.db_interview_id, report)
                 except Exception as ex:
                     logger.warning(
                         "[REPORT STORE] failed at interview end bot=%s: %s",
@@ -868,11 +880,15 @@ class LLMBrain:
     def _should_skip_junk_turn(self, user_text: str, orch) -> bool:
         """
         Drop tiny/stale turns while a long answer is in progress or right after Q advance.
-        Prevents scoring 'Those. Yeah.' while the real answer is still being spoken.
+        Never drop presence / "are you there?" recovery phrases.
         """
         text = (user_text or "").strip()
         if not text:
             return True
+
+        # Always allow presence / alive checks through
+        if detect_presence_confirm(text) or detect_bot_alive_check(text):
+            return False
 
         recording = getattr(self.state, "candidate_recording", False)
         active = orch.has_active_answer_progress() or recording
@@ -906,6 +922,65 @@ class LLMBrain:
             return True
 
         return False
+
+    def _score_in_background(self, question_index: int, answer_text: str, question) -> None:
+        """Score previous answer while next question is already being spoken."""
+        def _worker():
+            try:
+                # Score against the finished question snapshot (index already advanced)
+                orch = self.state.interview_orchestrator
+                if orch is None or not question:
+                    return
+                merged = (answer_text or "").strip()
+                context_block = orch.evaluator_context(question, merged_answer=merged)
+                user_content = f"{context_block}\n\nCandidate answer:\n{merged}"
+                messages = [
+                    {"role": "system", "content": EVALUATOR_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_content},
+                ]
+                raw = ""
+                client = self._make_groq_client()
+                if client:
+                    try:
+                        completion = client.chat.completions.create(
+                            model=GROQ_EVALUATOR_MODEL,
+                            messages=messages,
+                            max_tokens=GROQ_EVALUATOR_MAX_TOKENS,
+                            temperature=0.1,
+                            response_format={"type": "json_object"},
+                        )
+                        raw = (completion.choices[0].message.content or "").strip()
+                    except Exception as ex:
+                        logger.warning("[BG SCORE] Groq failed Q%d: %s", question_index, ex)
+                evaluation = EvaluationResult()
+                if raw:
+                    try:
+                        cleaned = re.sub(
+                            r"^```(?:json)?\s*|\s*```$",
+                            "",
+                            raw.strip(),
+                            flags=re.IGNORECASE,
+                        )
+                        evaluation = EvaluationResult.from_dict(json.loads(cleaned))
+                    except (json.JSONDecodeError, TypeError, ValueError) as ex:
+                        logger.warning("[BG SCORE] JSON parse failed Q%d: %s", question_index, ex)
+                orch.apply_background_score(question_index, answer_text, evaluation)
+            except Exception as ex:
+                logger.warning("[BG SCORE] failed Q%d: %s", question_index, ex)
+
+        threading.Thread(
+            target=_worker,
+            name=f"bg-score-Q{question_index}",
+            daemon=True,
+        ).start()
+
+    def _wait_stage1_scores(self, orch, timeout: float) -> None:
+        """Brief wait so Q1–Q5 draft scores finish before gate after Q6."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        while time.monotonic() < deadline:
+            if orch.stage1_scores_ready():
+                return
+            time.sleep(0.15)
 
     def _handle_drag_grace_done_phrase(self, user_text: str, orch) -> bool:
         """After DRAG rephrase, ignore lone 'that's it' until grace expires or partial exists."""
@@ -969,15 +1044,14 @@ class LLMBrain:
             return True
 
         if orch.phase == InterviewPhase.CORE:
-            if self.state.pending_presence_check and detect_presence_confirm(user_text):
+            # Presence confirm OR candidate asking "are you there?" → re-ask current Q
+            if (
+                self.state.pending_presence_check and detect_presence_confirm(user_text)
+            ) or detect_bot_alive_check(user_text):
                 self.state.pending_presence_check = False
-                ui = get_ui_strings(self._language_mode())
-                decision = TurnDecision(
-                    action=TurnAction.SPEAK,
-                    spoken_text=ui.presence_confirm_ack,
-                    should_continue=True,
-                    spoken_kind="prompt",
-                )
+                orch.progress_checks = []
+                orch._answer_initial_partial = ""
+                decision = orch._on_repeat_question()
                 self._emit_orchestrated_turn(decision)
                 return True
 
@@ -986,7 +1060,8 @@ class LLMBrain:
                 self._emit_orchestrated_turn(checkin)
                 return True
 
-            if detect_inability_answer(user_text):
+            inability = detect_inability_answer(user_text)
+            if inability:
                 intent = TurnIntent.ACTUAL_ANSWER.value
             elif detect_explicit_question_repeat(user_text):
                 if self._apply_intent_decision(TurnIntent.REPEAT_MAIN.value):
@@ -1034,10 +1109,76 @@ class LLMBrain:
                 )
                 user_text = merged_done
 
+            # Honest inability — skip incomplete-continue loop; warm ack + next Q
+            if inability:
+                logger.info(
+                    "[INABILITY] bot=%s Q%d text=%r",
+                    orch.bot_id[:8] if orch.bot_id else "?",
+                    orch.current_index + 1,
+                    (user_text or "")[:80],
+                )
+                warm = orch._ui().inability_ack
+                if orch.should_gate_after_bridge():
+                    self._wait_stage1_scores(orch, float(config.STAGE1_GATE_WAIT_SEC))
+                    evaluation = self._evaluate_answer(user_text, question)
+                    decision = orch.decide_after_bridge(user_text, evaluation)
+                    # Warm ack is only for the parallel advance path; gate keeps its own close/continue
+                    self._emit_orchestrated_turn(decision)
+                    return True
+                if config.PARALLEL_SCORE_ENABLED and config.ANSWER_ACK_BEFORE_EVAL is False:
+                    q_index = orch.current_index + 1
+                    answer_snapshot = user_text
+                    question_snapshot = question
+                    decision = orch.advance_without_score(user_text, bridge=warm)
+                    if getattr(decision, "defer_close", False):
+                        evaluation = self._evaluate_answer(answer_snapshot, question_snapshot)
+                        decision = orch.process_answer(answer_snapshot, evaluation)
+                        self._emit_orchestrated_turn(decision)
+                        return True
+                    self._emit_orchestrated_turn(decision)
+                    self._score_in_background(q_index, answer_snapshot, question_snapshot)
+                    return True
+                evaluation = self._evaluate_answer(user_text, question)
+                decision = orch.process_answer(user_text, evaluation)
+                self._emit_orchestrated_turn(decision)
+                return True
+
             incomplete = orch.try_handle_incomplete_answer(user_text)
             if incomplete is not None:
                 self._emit_orchestrated_turn(incomplete)
                 return True
+
+            # --- Production low-latency path ---
+            # Bridge Q (Q6): wait briefly for Q1–Q5 scores, then gate after scoring Q6
+            if orch.should_gate_after_bridge():
+                self._wait_stage1_scores(orch, float(config.STAGE1_GATE_WAIT_SEC))
+                evaluation = self._evaluate_answer(user_text, question)
+                decision = orch.decide_after_bridge(user_text, evaluation)
+                self._emit_orchestrated_turn(decision)
+                return True
+
+            # Q1–Q5 and Q7–Q9: speak next immediately; score in background
+            if config.PARALLEL_SCORE_ENABLED and config.ANSWER_ACK_BEFORE_EVAL is False:
+                q_index = orch.current_index + 1
+                answer_snapshot = user_text
+                question_snapshot = question
+                decision = orch.advance_without_score(user_text)
+                if getattr(decision, "defer_close", False):
+                    # Last question — score sync then close
+                    evaluation = self._evaluate_answer(answer_snapshot, question_snapshot)
+                    decision = orch.process_answer(answer_snapshot, evaluation)
+                    self._emit_orchestrated_turn(decision)
+                    return True
+                self._emit_orchestrated_turn(decision)
+                self._score_in_background(q_index, answer_snapshot, question_snapshot)
+                return True
+
+            # Fallback sync path
+            if config.ANSWER_ACK_BEFORE_EVAL:
+                ack = orch._next_bridge()
+                bot_id = orch.bot_id
+                log_transcript(bot_id, "assistant", ack)
+                self.state.tts_queue.put(ack)
 
             evaluation = self._evaluate_answer(user_text, question)
             decision = orch.process_answer(user_text, evaluation)
@@ -1200,7 +1341,10 @@ class LLMBrain:
         hinglish = self._language_mode() == "hinglish"
 
         q_words = self._question_topic_tokens(question_text)
-        partial_lower = payload.full_partial.lower()
+        eval_text = (
+            payload.window_text or payload.recent_segment or payload.full_partial or ""
+        ).strip()
+        partial_lower = eval_text.lower()
         full_words = set(re.findall(r"\b\w{4,}\b", partial_lower))
         overlap = len(q_words & full_words)
         structure_words = (
@@ -1210,7 +1354,7 @@ class LLMBrain:
             "for instance", "example", "used", "implemented",
         )
         has_structure = any(w in partial_lower for w in structure_words)
-        word_count = len(payload.full_partial.split())
+        word_count = len(eval_text.split())
 
         if overlap >= config.PROGRESS_GATE_MIN_TOPIC_OVERLAP and has_structure and word_count >= 20:
             return {
@@ -1226,14 +1370,14 @@ class LLMBrain:
             }
 
         if (
-            payload.speech_sec >= config.PROGRESS_GATE_LONG_ANSWER_SEC
-            and word_count >= 25
-            and overlap < config.PROGRESS_GATE_MIN_TOPIC_OVERLAP
+            payload.speech_sec >= config.PROGRESS_GATE_RULE_DRAG_MIN_SEC
+            and word_count >= config.PROGRESS_GATE_RULE_DRAG_MIN_WORDS
+            and overlap == 0
         ):
             return {
                 "verdict": "DRAG",
-                "confidence": 0.78,
-                "reason": "rule: long answer with low question-topic overlap",
+                "confidence": 0.72,
+                "reason": "rule: long answer with zero question-topic overlap",
             }
 
         q_lower = question_text.lower()
@@ -1256,12 +1400,13 @@ class LLMBrain:
             return default
 
         try:
+            window = (payload.window_text or payload.recent_segment or "").strip()
             user_content = (
                 f"Interview question:\n{question_text}\n\n"
                 f"Full partial (since answer started):\n{payload.full_partial[:800]}\n\n"
-                f"Recent segment (last ~10s):\n{payload.recent_segment[:300]}\n\n"
+                f"Recent segment (check window):\n{window[:300]}\n\n"
                 f"Duration: {payload.speech_sec:.0f}s | Words: {word_count} | "
-                f"Check #{payload.check_num}"
+                f"Check #{payload.check_num} slot={payload.check_slot or '?'}"
             )
             completion = client.chat.completions.create(
                 model=GROQ_MODEL,
@@ -1388,14 +1533,17 @@ class LLMBrain:
             self.state.last_bot_speech_kind = "drag"
         else:
             self.state.last_bot_speech_kind = "clarifier"
+        orch.record_spoken_interrupt()
         log_transcript(orch.bot_id, "assistant", spoken)
         self.state.tts_queue.put(spoken)
         self.state.tts_queue.put("<END_OF_TURN>")
         logger.info(
-            "[%s] bot=%s Q%d",
+            "[%s] bot=%s Q%d interrupt=%d/%d",
             log_tag,
             orch.bot_id[:8] if orch.bot_id else "?",
             orch.current_index + 1,
+            orch.spoken_interrupt_count,
+            config.ANSWER_MAX_INTERRUPTS,
         )
 
     def _generate_focused_rephrase(
@@ -1458,8 +1606,11 @@ class LLMBrain:
         OFF_CONTEXT = unrelated rambling → skip to next question.
         """
         q_words = self._question_topic_tokens(question_text)
+        eval_text = (
+            payload.window_text or payload.recent_segment or payload.full_partial or ""
+        ).strip()
         partial_lower = payload.full_partial.lower()
-        recent_lower = (payload.recent_segment or payload.full_partial or "").lower()
+        recent_lower = eval_text.lower()
         full_words = set(re.findall(r"\b\w{4,}\b", partial_lower))
         recent_words = set(re.findall(r"\b\w{4,}\b", recent_lower))
         full_overlap = len(q_words & full_words)
@@ -1646,8 +1797,27 @@ class LLMBrain:
         self._emit_mid_answer_speech(clarifier, orch, "DEPTH CLARIFIER")
         return True
 
+    def _handle_off_topic_redirect(
+        self, payload: ProgressCheckPayload, orch, q
+    ) -> bool:
+        """Short 'come back to topic' redirect; returns True if bot spoke."""
+        if orch.topic_redirect_limit_reached():
+            return False
+        ui = get_ui_strings(self._language_mode())
+        line = getattr(ui, "topic_redirect", None) or ui.nudge
+        orch.record_spoken_interrupt()
+        logger.info(
+            "[TOPIC REDIRECT] bot=%s Q%d redirects=%d/%d",
+            orch.bot_id[:8] if orch.bot_id else "?",
+            orch.current_index + 1,
+            orch.spoken_interrupt_count,
+            config.MAX_TOPIC_REDIRECTS_PER_QUESTION,
+        )
+        self._emit_mid_answer_speech(line, orch, "TOPIC REDIRECT")
+        return True
+
     def _handle_bot_interrupt_partial(self, payload) -> None:
-        """Mid-answer depth-vs-drag progress gate (15s start, 10s interval)."""
+        """Mid-answer progress gate: background polls + scheduled interrupt slots."""
         if not isinstance(payload, ProgressCheckPayload):
             return
 
@@ -1659,6 +1829,17 @@ class LLMBrain:
             return
         if orch.phase != InterviewPhase.CORE:
             return
+
+        if payload.force_time_cap:
+            logger.info(
+                "[ANSWER CAP] bot=%s Q%d force-complete at %.0fs",
+                orch.bot_id[:8] if orch.bot_id else "?",
+                orch.current_index + 1,
+                payload.speech_sec,
+            )
+            self._force_complete_from_drag(payload.full_partial)
+            return
+
         if orch.awaiting_clarifier_reply:
             return
 
@@ -1671,9 +1852,20 @@ class LLMBrain:
         )
         if not ok:
             logger.debug(
-                "[PROGRESS GATE] skipped Q%d — %s",
+                "[PROGRESS GATE] skipped Q%d kind=%s — %s",
                 orch.current_index + 1,
+                payload.check_kind,
                 gate_reason,
+            )
+            return
+
+        is_poll = payload.check_kind == "poll"
+
+        if not is_poll and orch.spoken_interrupt_limit_reached():
+            logger.debug(
+                "[PROGRESS GATE] skipped Q%d — max spoken interrupts (%d)",
+                orch.current_index + 1,
+                config.ANSWER_MAX_INTERRUPTS,
             )
             return
 
@@ -1699,22 +1891,20 @@ class LLMBrain:
                 verdict = "DRAG"
                 confidence = max(confidence, config.BOT_INTERRUPT_GATE_MIN_CONFIDENCE)
                 reason = f"escalated: repeated UNCLEAR off-topic ({reason})"
-                logger.info(
-                    "[PROGRESS GATE] bot=%s Q%d check#%d escalated UNCLEAR→DRAG",
-                    orch.bot_id[:8] if orch.bot_id else "?",
-                    orch.current_index + 1,
-                    payload.check_num,
-                )
 
         new_strikes = orch.record_progress_check(
             payload.check_num, verdict, confidence, reason, payload.speech_sec
         )
 
         logger.info(
-            "[PROGRESS GATE] bot=%s Q%d check#%d verdict=%s confidence=%.2f reason=%r",
+            "[PROGRESS GATE] bot=%s Q%d check#%d kind=%s slot=%s poll=%s "
+            "verdict=%s confidence=%.2f reason=%r",
             orch.bot_id[:8] if orch.bot_id else "?",
             orch.current_index + 1,
             payload.check_num,
+            payload.check_kind,
+            payload.check_slot or "?",
+            payload.poll_index or "?",
             verdict,
             confidence,
             reason,
@@ -1726,49 +1916,34 @@ class LLMBrain:
 
         min_conf = config.BOT_INTERRUPT_GATE_MIN_CONFIDENCE
 
-        if verdict == "ON_TRACK" and confidence >= min_conf:
-            if config.BOT_INTERRUPT_CLARIFIER_ON_TRACK:
-                self._try_emit_on_track_clarifier(orch, q, payload)
-            return
-
-        if verdict != "DRAG" or confidence < min_conf:
-            return
-
-        drag_context = self._classify_drag_context(payload, q.question)
-        logger.info(
-            "[DRAG CONTEXT] bot=%s Q%d strikes=%d context=%s",
-            orch.bot_id[:8] if orch.bot_id else "?",
-            orch.current_index + 1,
-            new_strikes,
-            drag_context,
-        )
-
-        if drag_context == "OFF_CONTEXT":
-            self._skip_drag_to_next_question(
-                payload.full_partial,
-                orch,
-                q,
-                reason="tangent off-context from question",
-            )
-            return
-
-        # IN_CONTEXT tangent — one depth probe on what they are discussing now
-        if not orch.drag_depth_limit_reached():
-            if self._try_emit_drag_depth_probe(orch, q, payload):
+        # Production: topic poll only — silent if on-track; redirect if off-topic
+        if is_poll:
+            if verdict in ("ON_TRACK", "UNCLEAR") or confidence < min_conf:
+                logger.debug(
+                    "[TOPIC POLL] bot=%s Q%d poll=%d silent verdict=%s",
+                    orch.bot_id[:8] if orch.bot_id else "?",
+                    orch.current_index + 1,
+                    payload.poll_index,
+                    verdict,
+                )
                 return
-            logger.info(
-                "[DRAG DEPTH] bot=%s Q%d could not generate tangent probe — skipping Q",
-                orch.bot_id[:8] if orch.bot_id else "?",
-                orch.current_index + 1,
-            )
+            if verdict == "DRAG":
+                if orch.topic_redirect_limit_reached():
+                    logger.info(
+                        "[TOPIC POLL] bot=%s Q%d redirect limit reached — staying silent",
+                        orch.bot_id[:8] if orch.bot_id else "?",
+                        orch.current_index + 1,
+                    )
+                    return
+                self._handle_off_topic_redirect(payload, orch, q)
+            return
 
-        # Already probed tangent or probe failed — move on
-        self._skip_drag_to_next_question(
-            payload.full_partial,
-            orch,
-            q,
-            reason="in-context tangent already probed or still not answering main Q",
+        # Legacy interrupt slots disabled — ignore any slot payloads
+        logger.debug(
+            "[PROGRESS GATE] ignoring legacy slot check Q%d (slots disabled)",
+            orch.current_index + 1,
         )
+        return
 
     def _bot_interrupt_worker(self) -> None:
         """
@@ -1946,6 +2121,22 @@ class LLMBrain:
                         len(user_text or ""),
                         preview,
                     )
+                    continue
+
+                if user_text == config.PRESENCE_TIMEOUT_TOKEN:
+                    orch = self.state.interview_orchestrator
+                    if orch is not None:
+                        logger.info(
+                            "[PRESENCE TIMEOUT] bot=%s Q%d — skipping question",
+                            orch.bot_id[:8] if orch.bot_id else "?",
+                            orch.current_index + 1,
+                        )
+                        self._final_turn_active.set()
+                        try:
+                            decision = orch.skip_question_no_response()
+                            self._emit_orchestrated_turn(decision)
+                        finally:
+                            self._final_turn_active.clear()
                     continue
 
                 logger.info("[LLM DEQUEUE] processing %d chars", len(user_text or ""))

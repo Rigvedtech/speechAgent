@@ -1,5 +1,5 @@
 """
-Persist candidate interview feedback to disk (one file per bot_id).
+Candidate interview feedback: prefer Postgres, keep disk as fallback for legacy bots.
 """
 
 from __future__ import annotations
@@ -33,10 +33,17 @@ def _feedback_path(bot_id: str) -> Path:
 
 
 def feedback_exists(bot_id: str) -> bool:
+    try:
+        from interview_persist import candidate_feedback_exists
+
+        if candidate_feedback_exists(bot_id):
+            return True
+    except Exception as ex:
+        logger.warning("[FEEDBACK] DB exists check failed: %s", ex)
     return _feedback_path(bot_id).is_file()
 
 
-def save_feedback(bot_id: str, payload: Dict[str, Any]) -> Path:
+def save_feedback(bot_id: str, payload: Dict[str, Any]) -> Path | Dict[str, Any]:
     overall = payload.get("overall_rating")
     clarity = payload.get("clarity_rating")
     tech = payload.get("tech_issues")
@@ -68,16 +75,41 @@ def save_feedback(bot_id: str, payload: Dict[str, Any]) -> Path:
         "submitted_at": datetime.now(timezone.utc).isoformat(),
     }
 
+    db_saved = False
+    try:
+        from interview_persist import find_interview_id_by_bot, save_candidate_feedback
+
+        if find_interview_id_by_bot(bot_id):
+            save_candidate_feedback(bot_id, record)
+            db_saved = True
+            logger.info("[FEEDBACK STORE] saved to DB bot=%s", bot_id[:8])
+    except ValueError:
+        raise
+    except Exception as ex:
+        logger.warning("[FEEDBACK STORE] DB save failed bot=%s: %s", bot_id[:8], ex)
+
+    # Always keep disk copy for local tooling / legacy list merge
     path = _feedback_path(bot_id)
     with _lock:
-        if path.is_file():
+        if path.is_file() and not db_saved:
             raise ValueError("Feedback already submitted for this interview")
-        path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
-    logger.info("[FEEDBACK STORE] saved bot=%s path=%s", bot_id[:8], path)
+        if not path.is_file():
+            path.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+    if not db_saved:
+        logger.info("[FEEDBACK STORE] saved to disk bot=%s path=%s", bot_id[:8], path)
     return path
 
 
 def load_feedback(bot_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        from interview_persist import load_candidate_feedback
+
+        row = load_candidate_feedback(bot_id)
+        if row:
+            return row
+    except Exception as ex:
+        logger.warning("[FEEDBACK] DB load failed: %s", ex)
+
     path = _feedback_path(bot_id)
     if not path.is_file():
         return None

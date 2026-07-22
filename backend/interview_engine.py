@@ -34,6 +34,11 @@ DIFFICULTY_PATTERN: Tuple[str, ...] = (
     "Hard",
     "Intermediate",
     "Low",
+    "Hard",
+    "Intermediate",
+    "Low",
+    "Hard",
+    "Intermediate",
 )
 
 _DIFFICULTY_ALIASES: Dict[str, str] = {
@@ -155,7 +160,9 @@ _REPHRASE_INTENT = re.compile(
 )
 
 _INCOMPLETE_TRAILING = re.compile(
-    r"\b(and|so|because|but|like|um|uh|or|if|when|that|then|also|with|for)$",
+    r"\b(and|so|because|but|like|um|uh|or|if|when|that|then|also|with|for|"
+    r"to|the|a|an|of|in|on|at|by|from|into|about|factors?|objective|identify|"
+    r"could|would|should|will|can|my|our|their|this|these|those)$",
     re.IGNORECASE,
 )
 
@@ -194,6 +201,22 @@ _CONTINUATION_CHECKIN = re.compile(
     re.IGNORECASE,
 )
 
+# After "please continue" — candidate asks permission / confirms scope (not an answer).
+_CONTINUATION_PERMISSION = re.compile(
+    r"|".join([
+        r"\bshould\s+i\b",
+        r"\bshall\s+i\b",
+        r"\bdo\s+you\s+want\s+me\s+to\b",
+        r"\bwould\s+you\s+like\s+me\s+to\b",
+        r"\bcan\s+i\s+(just\s+)?(explain|continue|tell|describe|share|walk)\b",
+        r"\bmay\s+i\s+(just\s+)?(explain|continue|tell|describe)\b",
+        r"\byou\s+want\s+me\s+to\b",
+        r"\bkya\s+(main|mein)\s+(batau|explain|continue)\b",
+        r"\bmujhe\s+(explain|bataana)\s+chahiye\b",
+    ]),
+    re.IGNORECASE,
+)
+
 _CLARIFIER_CONFUSION = re.compile(
     r"|".join([
         r"\bsorry\b",
@@ -217,12 +240,21 @@ _INABILITY_PATTERNS = re.compile(
         r"\b(don'?t|do\s+not)\s+have\s+(an?\s+)?answer\b",
         r"\bno\s+answer\b",
         r"\bnot\s+able\s+to\s+answer\b",
-        r"\bhaven'?t\s+(used|worked)\b",
+        r"\bhaven'?t\s+(used|worked|done)\b",
+        r"\b(have|has)\s+not\s+(yet\s+)?(used|worked|done)\b",
+        r"\b(did\s+not|didn'?t)\s+(work|use|get\s+to\s+work)\b",
+        r"\bno\s+(hands[-\s]?on\s+)?experience\b",
+        r"\b(don'?t|do\s+not)\s+have\s+(any\s+)?(experience|exposure)\b",
+        r"\bnot\s+(yet\s+)?worked\s+on\b",
+        r"\bnever\s+worked\s+(on|with)\b",
+        r"\bsorry[,\s]+i\s+(don'?t|do\s+not|haven'?t|have\s+not)\b",
         r"\bnahi\s+pata\b",
         r"\bpata\s+nahi\b",
         r"\b(nahi|na)\s+yaad\b",
         r"\bmalum\s+nahi\b",
         r"\bjawab\s+nahi\b",
+        r"\bexperience\s+nahi\b",
+        r"\bkaam\s+nahi\s+kiya\b",
     ]),
     re.IGNORECASE,
 )
@@ -309,6 +341,18 @@ class TurnDecision:
     rephrase_flow: bool = False
     # After depth clarifier: score merged answer instead of "continue kijiye"
     score_clarifier_merged: bool = False
+    # Low-latency: next Q spoken; score previous answer in background
+    pending_background_score: bool = False
+    # Last planned Q answered — close after background score
+    defer_close: bool = False
+
+
+@dataclass
+class ProgressCheckSchedule:
+    """Resolved mid-answer check — scheduled slot beats background poll."""
+    kind: str  # "slot" | "poll"
+    slot: int = 0
+    poll_index: int = 0
 
 
 @dataclass
@@ -318,6 +362,11 @@ class ProgressCheckPayload:
     recent_segment: str
     speech_sec: float
     check_num: int
+    check_kind: str = "slot"  # "slot" | "poll"
+    check_slot: int = 0
+    poll_index: int = 0
+    window_text: str = ""
+    force_time_cap: bool = False
 
 
 _TOPIC_STOPWORDS = frozenset({
@@ -431,14 +480,6 @@ def detect_clarifier_confusion(text: str) -> bool:
     return bool(_CLARIFIER_CONFUSION.search(t))
 
 
-def detect_inability_answer(text: str) -> bool:
-    """Short honest 'I don't know' — complete thought, not a cut-off fragment."""
-    t = (text or "").strip()
-    if not t or len(t) > 80:
-        return False
-    return bool(_INABILITY_PATTERNS.search(t))
-
-
 def detect_turn_intent_fallback(text: str, awaiting_clarifier: bool) -> str:
     """
     Regex fallback when LLM classifier is unavailable.
@@ -495,13 +536,34 @@ def detect_short_complete_answer(text: str) -> bool:
 def detect_continuation_checkin(text: str) -> bool:
     """Social / check-in phrase after we asked the candidate to continue."""
     t = (text or "").strip()
-    if not t or len(t) > 60:
+    if not t or len(t) > 80:
         return False
     if _CONTINUATION_CHECKIN.search(t):
         return True
     if _SHORT_IMMEDIATE_TURN.search(t) and len(t.split()) <= 4:
         return True
     return False
+
+
+def detect_continuation_permission(text: str) -> bool:
+    """
+    Candidate asking permission / confirming scope after 'please continue'
+    (e.g. 'Should I just explain…?') — not a scored answer.
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 160:
+        return False
+    if detect_inability_answer(t):
+        return False
+    return bool(_CONTINUATION_PERMISSION.search(t))
+
+
+def detect_inability_answer(text: str) -> bool:
+    """Short honest 'I don't know / haven't worked on it' — complete thought."""
+    t = (text or "").strip()
+    if not t or len(t) > 120:
+        return False
+    return bool(_INABILITY_PATTERNS.search(t))
 
 
 _PRESENCE_CONFIRM = re.compile(
@@ -518,12 +580,31 @@ _PRESENCE_CONFIRM = re.compile(
 )
 
 
+def detect_bot_alive_check(text: str) -> bool:
+    """Candidate asking if the bot can hear them / is still there."""
+    t = (text or "").strip()
+    if not t or len(t) > 80:
+        return False
+    return bool(
+        re.search(
+            r"|".join([
+                r"\b(are\s+you\s+there|can\s+you\s+hear\s+me|hello\s+\w+)\b",
+                r"\b(kya\s+aap\s+(sun|wahan)|sun\s+rahe\s+ho)\b",
+            ]),
+            t,
+            re.IGNORECASE,
+        )
+    )
+
+
 def detect_presence_confirm(text: str) -> bool:
     """Candidate confirms they can hear the bot after a presence check."""
     t = (text or "").strip()
     if not t or len(t) > 80:
         return False
     if detect_continuation_checkin(t):
+        return True
+    if detect_bot_alive_check(t):
         return True
     return bool(_PRESENCE_CONFIRM.search(t))
 
@@ -546,6 +627,15 @@ def detect_incomplete_answer(text: str) -> bool:
         return True
     trimmed = t.rstrip(".,!?…")
     if _INCOMPLETE_TRAILING.search(trimmed):
+        return True
+    # Repeated last word ("Factors. Factors") — mid-thought stutter / cut
+    if len(words) >= 2:
+        a = re.sub(r"[^a-z0-9]", "", words[-1].lower())
+        b = re.sub(r"[^a-z0-9]", "", words[-2].lower())
+        if a and a == b and len(a) >= 3:
+            return True
+    # No sentence-ending punctuation and still relatively short → likely mid-answer
+    if not re.search(r"[.!?…]\s*$", t) and len(words) < max(int(config.MIN_ANSWER_WORDS) * 4, 24):
         return True
     return False
 
@@ -699,6 +789,20 @@ class InterviewOrchestrator:
     question_advanced_at: float = 0.0
     _previous_question_text: str = ""
 
+    # Turn-taking: presence vs answer-in-progress (see config ANSWER_* / PRESENCE_*)
+    awaiting_answer_start: bool = False
+    answer_in_progress: bool = False
+    answer_speech_started_at: float = 0.0
+    answer_budget_sec: float = 0.0
+    answer_timed_check_1_done: bool = False
+    answer_timed_check_2_done: bool = False
+    spoken_interrupt_count: int = 0
+    topic_poll_count: int = 0
+    _mid_answer_clarifier: bool = False
+    # Background score stash (parallel scoring while next Q is spoken)
+    _pending_score_answer: str = ""
+    _pending_score_q_index: int = 0
+
     answer_records: List[AnswerRecord] = field(default_factory=list)
     _rolling: RollingScoreTracker = field(default_factory=lambda: RollingScoreTracker(
         config.ROLLING_WINDOW
@@ -710,6 +814,8 @@ class InterviewOrchestrator:
     # not_needed | pending | ready | failed
     localization_status: str = "not_needed"
     localization_error: str = ""
+    # Postgres interview_sessions.id when persistence is enabled
+    db_interview_id: Optional[str] = None
 
     def is_localization_ready(self) -> bool:
         if self.language_mode != "hinglish":
@@ -742,6 +848,13 @@ class InterviewOrchestrator:
             self._spoken_question_cache.update(cache)
             self.localization_status = status
             self.localization_error = ""
+        if self.db_interview_id and cache:
+            try:
+                from interview_persist import update_spoken_questions
+
+                update_spoken_questions(self.db_interview_id, dict(cache))
+            except Exception as ex:
+                logger.warning("[interview] spoken cache persist failed: %s", ex)
 
     def mark_localization_failed(self, error: str) -> None:
         with self._lock:
@@ -758,18 +871,37 @@ class InterviewOrchestrator:
         cv_text: str,
         bank: List[BankQuestion],
         language_mode: LanguageMode = "english",
+        planned: Optional[List[BankQuestion]] = None,
+        db_interview_id: Optional[str] = None,
     ) -> "InterviewOrchestrator":
-        planned = QuestionSelector.select(bank, config.MAX_QUESTIONS)
+        planned_qs = planned if planned is not None else QuestionSelector.select(
+            bank, config.MAX_QUESTIONS
+        )
         orch = cls(
             bot_id=bot_id,
             candidate_name=candidate_name.strip(),
             jd_text=jd_text.strip(),
             cv_text=cv_text.strip(),
-            planned_questions=planned,
+            planned_questions=planned_qs,
             language_mode=language_mode,
+            db_interview_id=db_interview_id,
         )
         orch._log_injection()
         return orch
+
+    def _persist_answer_record(self, record: AnswerRecord) -> None:
+        if not self.db_interview_id:
+            return
+        try:
+            from interview_persist import persist_answer
+
+            persist_answer(self.db_interview_id, record)
+        except Exception as ex:
+            logger.warning(
+                "[interview] persist answer failed bot=%s: %s",
+                self.bot_id[:8] if self.bot_id else "?",
+                ex,
+            )
 
     def _ui(self):
         return get_ui_strings(self.language_mode)
@@ -1066,7 +1198,9 @@ class InterviewOrchestrator:
     def on_clarifier_reply(self, answer_text: str, clarifier_q: str = "") -> TurnDecision:
         """Short reply after bot mid-answer clarifier — not scored individually."""
         with self._lock:
+            was_mid_answer = self._mid_answer_clarifier
             self.awaiting_clarifier_reply = False
+            self._mid_answer_clarifier = False
             q = self.get_current_question()
 
             bot_q = clarifier_q or self._last_clarifier_question or self._last_clarifier_partial[:120]
@@ -1092,7 +1226,9 @@ class InterviewOrchestrator:
                 self._last_spoken_question = q.question
                 self._last_spoken_kind = "main"
 
-            if self.should_score_after_clarifier_reply(answer_text):
+            if self.should_score_after_clarifier_reply(
+                answer_text, mid_answer=was_mid_answer
+            ):
                 logger.info(
                     "[CLARIFIER REPLY] Q%d substantive — scoring merged answer (skip continue prompt)",
                     self.current_index + 1,
@@ -1106,6 +1242,8 @@ class InterviewOrchestrator:
                 )
 
             spoken = self._ui().continue_after_clarifier
+            self.answer_in_progress = True
+            self.awaiting_answer_start = False
             return TurnDecision(
                 action=TurnAction.SPEAK,
                 spoken_text=spoken,
@@ -1114,10 +1252,16 @@ class InterviewOrchestrator:
             )
 
     def mark_clarifier_asked(
-        self, partial_text: str, clarifier_q: str = "", speech_sec: float = 0.0
+        self,
+        partial_text: str,
+        clarifier_q: str = "",
+        speech_sec: float = 0.0,
+        *,
+        mid_answer: bool = True,
     ) -> None:
         with self._lock:
             self.awaiting_clarifier_reply = True
+            self._mid_answer_clarifier = mid_answer
             self.clarifier_count_this_question += 1
             self._last_clarifier_at_speech_sec = max(0.0, speech_sec)
             self._last_clarifier_partial = (partial_text or "").strip()
@@ -1182,7 +1326,7 @@ class InterviewOrchestrator:
             return False
         return (
             time.monotonic() - self.last_drag_rephrase_at
-            < config.DRAG_REPHRASE_SCORE_GRACE_SEC
+            < config.ANSWER_DRAG_GRACE_SEC
         )
 
     def has_active_answer_progress(self) -> bool:
@@ -1204,6 +1348,404 @@ class InterviewOrchestrator:
 
     def mark_main_question_playback_done(self) -> None:
         self.last_main_question_playback_at = time.monotonic()
+
+    def mark_bot_question_asked(self, kind: str) -> None:
+        """Enable presence ladder; reset answer timers only for a new main question."""
+        if kind not in ("main", "clarifier", "drag"):
+            return
+        with self._lock:
+            self.awaiting_answer_start = True
+            self.answer_in_progress = False
+            if kind == "main":
+                self.answer_speech_started_at = 0.0
+                self.answer_budget_sec = float(config.ANSWER_INITIAL_LISTEN_SEC)
+                self.answer_timed_check_1_done = False
+                self.answer_timed_check_2_done = False
+                self.spoken_interrupt_count = 0
+                self.topic_poll_count = 0
+                # Clear leftover mid-answer state so next Q cannot get stuck
+                self.progress_checks = []
+                self._answer_initial_partial = ""
+                self.awaiting_clarifier_reply = False
+                self._mid_answer_clarifier = False
+                self.drag_strikes = 0
+                self.drag_rephrase_count = 0
+                self.drag_depth_count = 0
+                self.force_completed = False
+                self.last_drag_rephrase_at = 0.0
+                self._reset_question_meta_state()
+
+    def mark_answer_speech_started(self) -> None:
+        with self._lock:
+            self.awaiting_answer_start = False
+            self.answer_in_progress = True
+            if self.answer_speech_started_at <= 0:
+                self.answer_speech_started_at = time.monotonic()
+
+    def mark_answer_turn_committed(self) -> None:
+        with self._lock:
+            self.answer_in_progress = False
+            self.awaiting_answer_start = False
+            self.answer_speech_started_at = 0.0
+
+    def should_schedule_presence(self) -> bool:
+        if not config.PRESENCE_ONLY_AFTER_QUESTION:
+            return True
+        if config.PRESENCE_SKIP_DURING_ANSWER and self.answer_in_progress:
+            return False
+        return self.awaiting_answer_start and not self.answer_in_progress
+
+    def get_answer_speech_sec(self) -> float:
+        if self.answer_speech_started_at <= 0:
+            return 0.0
+        return max(0.0, time.monotonic() - self.answer_speech_started_at)
+
+    def extend_answer_budget(self, speech_sec: float) -> None:
+        cap = float(config.ANSWER_MAX_TOTAL_SEC)
+        budget = max(self.answer_budget_sec, float(config.ANSWER_INITIAL_LISTEN_SEC))
+        while speech_sec > budget and budget < cap:
+            budget = min(budget + float(config.ANSWER_EXTEND_STEP_SEC), cap)
+        self.answer_budget_sec = budget
+
+    def answer_time_cap_reached(self, speech_sec: float) -> bool:
+        self.extend_answer_budget(speech_sec)
+        return speech_sec >= float(config.ANSWER_MAX_TOTAL_SEC)
+
+    def spoken_interrupt_limit_reached(self) -> bool:
+        """Topic redirects count as spoken interrupts (legacy slots disabled)."""
+        return self.spoken_interrupt_count >= int(config.MAX_TOPIC_REDIRECTS_PER_QUESTION)
+
+    def record_spoken_interrupt(self) -> None:
+        self.spoken_interrupt_count += 1
+
+    def sync_topic_polls_through(self, speech_sec: float) -> None:
+        """Mark background polls up to speech_sec consumed (e.g. when slot wins at 90s)."""
+        interval = float(config.ANSWER_TOPIC_POLL_INTERVAL_SEC)
+        if interval <= 0 or speech_sec <= 0:
+            return
+        self.topic_poll_count = max(
+            self.topic_poll_count, int(speech_sec // interval)
+        )
+
+    def _poll_collides_with_interrupt_slot(self, poll_at_sec: float) -> bool:
+        tolerance = float(config.ANSWER_INTERRUPT_SLOT_TOLERANCE_SEC)
+        for slot_time in (
+            float(config.ANSWER_FIRST_CHECK_SEC),
+            float(config.ANSWER_SECOND_CHECK_SEC),
+        ):
+            if abs(poll_at_sec - slot_time) <= tolerance:
+                return True
+        return False
+
+    def should_run_timed_interrupt_check(self, speech_sec: float) -> Optional[int]:
+        """Return 1 or 2 for scheduled check slots, or None."""
+        if self.spoken_interrupt_limit_reached():
+            return None
+        if (
+            speech_sec >= float(config.ANSWER_FIRST_CHECK_SEC)
+            and not self.answer_timed_check_1_done
+        ):
+            return 1
+        if (
+            speech_sec >= float(config.ANSWER_SECOND_CHECK_SEC)
+            and self.answer_timed_check_1_done
+            and not self.answer_timed_check_2_done
+        ):
+            return 2
+        return None
+
+    def should_run_topic_poll(self, speech_sec: float) -> Optional[int]:
+        """Background poll every ANSWER_TOPIC_POLL_INTERVAL_SEC; silent if on-track."""
+        interval = float(config.ANSWER_TOPIC_POLL_INTERVAL_SEC)
+        if interval <= 0 or speech_sec < interval:
+            return None
+        poll_index = int(speech_sec // interval)
+        if poll_index <= self.topic_poll_count:
+            return None
+        poll_at = poll_index * interval
+        if self._poll_collides_with_interrupt_slot(poll_at):
+            self.topic_poll_count = poll_index
+            return None
+        return poll_index
+
+    def resolve_progress_check(self, speech_sec: float) -> Optional[ProgressCheckSchedule]:
+        """Topic poll only — legacy interrupt slots disabled."""
+        poll_index = self.should_run_topic_poll(speech_sec)
+        if poll_index is not None:
+            return ProgressCheckSchedule(kind="poll", poll_index=poll_index)
+        return None
+
+    def stage1_scores_ready(self) -> bool:
+        n = int(config.STAGE1_QUESTION_COUNT)
+        scored = {
+            r.question_index
+            for r in self.answer_records
+            if 1 <= r.question_index <= n
+        }
+        return all(i in scored for i in range(1, n + 1))
+
+    def stage1_average(self) -> Optional[float]:
+        n = int(config.STAGE1_QUESTION_COUNT)
+        scores = [
+            r.score for r in self.answer_records
+            if 1 <= r.question_index <= n
+        ]
+        if len(scores) < n:
+            return None
+        return sum(scores) / len(scores)
+
+    def should_gate_after_bridge(self) -> bool:
+        """True while current question is the bridge (Q6) — gate after it is scored."""
+        return (self.current_index + 1) == int(config.STAGE1_BRIDGE_QUESTION)
+
+    def topic_redirect_limit_reached(self) -> bool:
+        return self.spoken_interrupt_count >= int(config.MAX_TOPIC_REDIRECTS_PER_QUESTION)
+
+    def advance_without_score(
+        self,
+        answer_text: str,
+        *,
+        bridge: Optional[str] = None,
+    ) -> TurnDecision:
+        """Speak next question immediately; score previous answer in background."""
+        with self._lock:
+            if self.phase == InterviewPhase.ENDED:
+                return TurnDecision(
+                    action=TurnAction.STOP,
+                    spoken_text="",
+                    should_continue=False,
+                    stopped_reason=self.stopped_reason,
+                )
+            if detect_abuse(answer_text):
+                return self._handle_abuse()
+
+            q = self.get_current_question()
+            if not q:
+                return self._complete_all()
+
+            self._pending_score_answer = (answer_text or "").strip()
+            self._pending_score_q_index = self.current_index + 1
+
+            # Peek next question before mutating index
+            if self.current_index + 1 >= len(self.planned_questions):
+                # Last question — caller scores sync and closes (do not advance yet)
+                return TurnDecision(
+                    action=TurnAction.SPEAK,
+                    spoken_text="",
+                    should_continue=True,
+                    spoken_kind="prompt",
+                    defer_close=True,
+                    pending_background_score=True,
+                )
+
+            self._reset_clarifier_state()
+            self.mark_question_advanced(q.question)
+            self.current_index += 1
+            next_q = self.get_current_question()
+            if next_q is None:
+                return self._complete_all()
+
+            spoken_q = self.get_spoken_question(next_q)
+            prefix = (bridge or "").strip() or self._next_bridge()
+            spoken = f"{prefix} {spoken_q}".strip()
+            # Custom bridge (e.g. inability ack) — speak directly in both languages
+            if bridge and (bridge or "").strip():
+                return TurnDecision(
+                    action=TurnAction.SPEAK,
+                    spoken_text=spoken,
+                    should_continue=True,
+                    spoken_kind="main",
+                    pending_background_score=True,
+                )
+            if self.language_mode == "hinglish":
+                return TurnDecision(
+                    action=TurnAction.REPHRASE,
+                    spoken_text=spoken_q,
+                    should_continue=True,
+                    spoken_kind="main",
+                    use_simple_bridge=True,
+                    rephrase_flow=True,
+                    pending_background_score=True,
+                )
+            return TurnDecision(
+                action=TurnAction.SPEAK,
+                spoken_text=spoken,
+                should_continue=True,
+                spoken_kind="main",
+                pending_background_score=True,
+            )
+
+    def apply_background_score(
+        self,
+        question_index: int,
+        answer_text: str,
+        evaluation: EvaluationResult,
+    ) -> None:
+        """Record draft score while next question is already being asked."""
+        with self._lock:
+            if any(r.question_index == question_index for r in self.answer_records):
+                return
+            if not (1 <= question_index <= len(self.planned_questions)):
+                return
+            q = self.planned_questions[question_index - 1]
+            record = AnswerRecord(
+                question_index=question_index,
+                question_id=q.id,
+                difficulty=q.normalized_difficulty,
+                source=q.source,
+                question_text=q.question,
+                answer_text=(answer_text or "").strip(),
+                score=evaluation.score,
+                confident=evaluation.confident,
+                relevant=evaluation.relevant,
+                strengths=evaluation.strengths,
+                develop=evaluation.develop,
+                fix=evaluation.fix,
+            )
+            self.answer_records.append(record)
+            self.answer_records.sort(key=lambda r: r.question_index)
+            self._rolling.push(evaluation.score)
+            avg = (
+                self.stage1_average()
+                if question_index <= config.STAGE1_QUESTION_COUNT
+                else self._rolling.average()
+            )
+            self._log_score(record, avg, True)
+            logger.info(
+                "[BG SCORE] bot=%s Q%d score=%d/10 stage1_avg=%s",
+                self.bot_id[:8] if self.bot_id else "?",
+                question_index,
+                evaluation.score,
+                f"{avg:.2f}" if avg is not None else "n/a",
+            )
+        self._persist_answer_record(record)
+
+    def decide_after_bridge(
+        self,
+        answer_text: str,
+        evaluation: EvaluationResult,
+    ) -> TurnDecision:
+        """After Q6: record score, gate on Q1–Q5 avg, then continue or wrap."""
+        with self._lock:
+            if detect_abuse(answer_text):
+                return self._handle_abuse()
+
+            q = self.get_current_question()
+            if not q:
+                return self._complete_all()
+
+            record = AnswerRecord(
+                question_index=self.current_index + 1,
+                question_id=q.id,
+                difficulty=q.normalized_difficulty,
+                source=q.source,
+                question_text=q.question,
+                answer_text=(answer_text or "").strip(),
+                score=evaluation.score,
+                confident=evaluation.confident,
+                relevant=evaluation.relevant,
+                strengths=evaluation.strengths,
+                develop=evaluation.develop,
+                fix=evaluation.fix,
+            )
+            if not any(r.question_index == record.question_index for r in self.answer_records):
+                self.answer_records.append(record)
+                self.answer_records.sort(key=lambda r: r.question_index)
+                self._persist_answer_record(record)
+
+            stage_avg = self.stage1_average()
+            if stage_avg is None:
+                scored = [
+                    r.score for r in self.answer_records
+                    if r.question_index <= config.STAGE1_QUESTION_COUNT
+                ]
+                stage_avg = (sum(scored) / len(scored)) if scored else 0.0
+                logger.warning(
+                    "[STAGE1 GATE] bot=%s incomplete Q1–Q5 scores — using partial avg=%.2f",
+                    self.bot_id[:8] if self.bot_id else "?",
+                    stage_avg,
+                )
+
+            can_continue = stage_avg >= float(config.CONTINUE_AVG_THRESHOLD)
+            self._log_score(record, stage_avg, can_continue)
+            self._reset_clarifier_state()
+
+            logger.info(
+                "[STAGE1 GATE] bot=%s after Q%d stage1_avg=%.2f threshold=%.1f continue=%s",
+                self.bot_id[:8] if self.bot_id else "?",
+                config.STAGE1_BRIDGE_QUESTION,
+                stage_avg,
+                config.CONTINUE_AVG_THRESHOLD,
+                can_continue,
+            )
+
+            if not can_continue:
+                closing = f"{self._next_bridge()} {self._ui().closing_low_average}"
+                return self._build_stop(
+                    closing,
+                    StoppedReason.LOW_ROLLING_AVERAGE,
+                    record,
+                    stage_avg,
+                )
+
+            self.mark_question_advanced(q.question)
+            self.current_index += 1
+            next_q = self.get_current_question()
+            if next_q is None:
+                return self._complete_all(record, stage_avg)
+
+            spoken_q = self.get_spoken_question(next_q)
+            spoken = f"{self._next_bridge()} {spoken_q}"
+            if self.language_mode == "hinglish":
+                return TurnDecision(
+                    action=TurnAction.REPHRASE,
+                    spoken_text=spoken_q,
+                    score_record=record,
+                    rolling_average=stage_avg,
+                    should_continue=True,
+                    spoken_kind="main",
+                    use_simple_bridge=True,
+                    rephrase_flow=True,
+                )
+            return TurnDecision(
+                action=TurnAction.SPEAK,
+                spoken_text=spoken,
+                score_record=record,
+                rolling_average=stage_avg,
+                should_continue=True,
+                spoken_kind="main",
+            )
+
+    def mark_topic_poll_done(self, poll_index: int) -> None:
+        self.topic_poll_count = max(self.topic_poll_count, poll_index)
+
+    def mark_timed_check_done(self, slot: int, speech_sec: float = 0.0) -> None:
+        if slot == 1:
+            self.answer_timed_check_1_done = True
+        elif slot == 2:
+            self.answer_timed_check_2_done = True
+        if speech_sec > 0:
+            self.sync_topic_polls_through(speech_sec)
+
+    def skip_question_no_response(self) -> TurnDecision:
+        """Presence ladder exhausted — score empty answer and advance."""
+        with self._lock:
+            q = self.get_current_question()
+            if not q:
+                return self._build_stop(
+                    self._ui().closing_completed,
+                    StoppedReason.COMPLETED,
+                )
+            evaluation = EvaluationResult(
+                score=0,
+                confident=False,
+                relevant=False,
+                strengths="",
+                develop="No audible response after multiple presence checks.",
+                fix="Ensure microphone is unmuted and you are in a quiet environment.",
+            )
+            self.mark_answer_turn_committed()
+            return self.force_complete_question("", evaluation)
 
     def mark_mid_answer_bot_playback_done(self) -> None:
         self.last_mid_answer_bot_speech_at = time.monotonic()
@@ -1254,11 +1796,17 @@ class InterviewOrchestrator:
             return True
         return False
 
-    def should_score_after_clarifier_reply(self, answer_text: str) -> bool:
-        """Skip redundant 'continue kijiye' when clarifier reply completes the answer."""
+    def should_score_after_clarifier_reply(
+        self, answer_text: str, *, mid_answer: bool = False
+    ) -> bool:
+        """Mid-answer depth probe → continue main answer; score only on explicit done."""
         t = (answer_text or "").strip()
         if not t:
             return False
+        if mid_answer or (
+            self._answer_initial_partial and self.clarifier_count_this_question > 0
+        ):
+            return detect_answer_done_phrase(t)
         if detect_answer_done_phrase(t):
             return True
         if len(t) >= config.CLARIFIER_REPLY_SCORE_MIN_CHARS:
@@ -1406,17 +1954,11 @@ class InterviewOrchestrator:
                 evaluation.score,
             )
             self._log_score(record, rolling_avg, can_continue)
+            self._persist_answer_record(record)
 
             self._reset_clarifier_state()
 
-            if not can_continue:
-                return self._build_stop(
-                    self._ui().closing_low_average,
-                    StoppedReason.LOW_ROLLING_AVERAGE,
-                    record,
-                    rolling_avg,
-                )
-
+            # Do not apply rolling gate here — stage-1 gate runs after bridge Q only
             self.mark_question_advanced(q.question)
             self.current_index += 1
             next_q = self.get_current_question()
@@ -1424,13 +1966,13 @@ class InterviewOrchestrator:
             if next_q is None:
                 return self._complete_all(record, rolling_avg)
 
-            spoken = f"Okay, thank you. Let's continue. {next_q.question}"
+            spoken = f"Okay, thank you. Let's continue. {self.get_spoken_question(next_q)}"
             if self.language_mode == "hinglish":
                 # Always use simple bridge for NEW questions — rephrase intro only for
                 # explicit user-requested rephrases of the SAME question.
                 return TurnDecision(
                     action=TurnAction.REPHRASE,
-                    spoken_text=next_q.question,
+                    spoken_text=self.get_spoken_question(next_q),
                     score_record=record,
                     rolling_average=rolling_avg,
                     should_continue=True,
@@ -1463,6 +2005,15 @@ class InterviewOrchestrator:
         self.force_completed = False
         self.last_drag_rephrase_at = 0.0
         self._reset_question_meta_state()
+        self.awaiting_answer_start = False
+        self.answer_in_progress = False
+        self.answer_speech_started_at = 0.0
+        self.answer_budget_sec = float(config.ANSWER_INITIAL_LISTEN_SEC)
+        self.answer_timed_check_1_done = False
+        self.answer_timed_check_2_done = False
+        self.spoken_interrupt_count = 0
+        self.topic_poll_count = 0
+        self._mid_answer_clarifier = False
 
     def _reset_question_meta_state(self) -> None:
         self.question_repeat_count = 0
@@ -1470,22 +2021,27 @@ class InterviewOrchestrator:
         self.answer_continuation_count = 0
 
     def try_handle_continuation_checkin(self, answer_text: str) -> Optional[TurnDecision]:
-        """Respond to hello/check-in while waiting for a continued answer — do not score."""
+        """Respond to hello/check-in/permission while waiting for a continued answer — do not score."""
         if self.answer_continuation_count <= 0:
             return None
         if self.phase != InterviewPhase.CORE:
             return None
-        if not detect_continuation_checkin(answer_text):
+        is_permission = detect_continuation_permission(answer_text)
+        is_checkin = detect_continuation_checkin(answer_text)
+        if not is_permission and not is_checkin:
             return None
+        ui = self._ui()
+        spoken = ui.permission_to_continue if is_permission else ui.please_continue_when_ready
         logger.info(
-            "[CONTINUATION CHECKIN] bot=%s Q%d text=%r",
+            "[CONTINUATION CHECKIN] bot=%s Q%d permission=%s text=%r",
             self.bot_id[:8] if self.bot_id else "?",
             self.current_index + 1,
+            is_permission,
             (answer_text or "")[:80],
         )
         return TurnDecision(
             action=TurnAction.SPEAK,
-            spoken_text=self._ui().please_continue_when_ready,
+            spoken_text=spoken,
             should_continue=True,
             spoken_kind="prompt",
         )
@@ -1574,6 +2130,7 @@ class InterviewOrchestrator:
             can_continue = self._rolling.can_continue(config.CONTINUE_AVG_THRESHOLD)
 
             self._log_score(record, rolling_avg, can_continue)
+            self._persist_answer_record(record)
             if clarifier_count:
                 logger.info(
                     "[SCORE] bot=%s Q%d scored with %d clarifier exchange(s) included",
@@ -1585,13 +2142,24 @@ class InterviewOrchestrator:
             # Reset clarifier state before advancing
             self._reset_clarifier_state()
 
-            if not can_continue:
-                return self._build_stop(
-                    self._ui().closing_low_average,
-                    StoppedReason.LOW_ROLLING_AVERAGE,
-                    record,
-                    rolling_avg,
-                )
+            # Stage-1 gate only after bridge question (Q6) — never wrap mid-Q6
+            if self.should_gate_after_bridge():
+                # Caller should use decide_after_bridge; keep sync path safe
+                stage_avg = self.stage1_average()
+                if stage_avg is None:
+                    scored = [
+                        r.score for r in self.answer_records
+                        if r.question_index <= config.STAGE1_QUESTION_COUNT
+                    ]
+                    stage_avg = (sum(scored) / len(scored)) if scored else rolling_avg or 0.0
+                if stage_avg < float(config.CONTINUE_AVG_THRESHOLD):
+                    return self._build_stop(
+                        self._ui().closing_low_average,
+                        StoppedReason.LOW_ROLLING_AVERAGE,
+                        record,
+                        stage_avg,
+                    )
+            # Q1–Q5 and Q7–Q10: do not stop on rolling avg here (parallel path / stage gate)
 
             self.mark_question_advanced(q.question)
             self.current_index += 1
@@ -1600,13 +2168,13 @@ class InterviewOrchestrator:
             if next_q is None:
                 return self._complete_all(record, rolling_avg)
 
-            spoken = f"{self._next_bridge()} {next_q.question}"
+            spoken = f"{self._next_bridge()} {self.get_spoken_question(next_q)}"
             if self.language_mode == "hinglish":
                 # Always use simple bridge for NEW questions — rephrase intro only for
                 # explicit user-requested rephrases of the SAME question.
                 return TurnDecision(
                     action=TurnAction.REPHRASE,
-                    spoken_text=next_q.question,
+                    spoken_text=self.get_spoken_question(next_q),
                     score_record=record,
                     rolling_average=rolling_avg,
                     should_continue=True,
