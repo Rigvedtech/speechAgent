@@ -53,7 +53,6 @@ export function KpiCard({
       {header}
       <div className="relative mt-3 flex items-center">
         {split.map((metric, index) => {
-          const accentColor = index === 0 ? 'success' : 'primary'
           const body = (
             <div className="flex items-baseline gap-2.5">
               <div
