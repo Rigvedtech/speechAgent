@@ -618,6 +618,9 @@ async def join_meeting(
             use_output_media=app_config.RECALL_USE_OUTPUT_MEDIA,
             output_media_url=output_media_page_url,
             enable_camera_integrity=bool(app_config.CAMERA_INTEGRITY_ENABLED),
+            include_bot_audio_in_recording=bool(
+                app_config.RECALL_INCLUDE_BOT_AUDIO_IN_RECORDING
+            ),
         )
 
         bot_data = recall_service.create_bot(config)
@@ -1402,6 +1405,9 @@ async def rejoin_bot_to_lobby(bot_id: str):
             use_output_media=app_config.RECALL_USE_OUTPUT_MEDIA,
             output_media_url=output_media_page_url,
             enable_camera_integrity=bool(app_config.CAMERA_INTEGRITY_ENABLED),
+            include_bot_audio_in_recording=bool(
+                app_config.RECALL_INCLUDE_BOT_AUDIO_IN_RECORDING
+            ),
         )
         
         # Rejoin bot (creates new bot, preserves session)

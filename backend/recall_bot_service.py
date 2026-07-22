@@ -188,6 +188,8 @@ class BotConfig:
     output_media_url: Optional[str] = None  # Public URL of /voice-agent page (e.g. https://ngrok/voice-agent)
     # Per-participant webcam PNG over the realtime websocket (camera integrity)
     enable_camera_integrity: bool = False
+    # Mix bot TTS into Recall dashboard recording (audio only; video not supported)
+    include_bot_audio_in_recording: bool = True
 
 
 class RecallBotService:
@@ -261,6 +263,12 @@ class RecallBotService:
             "bot_name": config.bot_name,
             "recording_config": {
                 "audio_mixed_raw": {},  # Real-time PCM audio for STT/VAD pipeline
+                # Include bot TTS in the saved dashboard recording (candidate + bot).
+                # Bot video in the final recording is not supported by Recall yet.
+                # https://docs.recall.ai/docs/how-to-get-separate-audio-per-participant-realtime
+                "include_bot_in_recording": {
+                    "audio": True,
+                },
                 # Enable Recall's built-in transcription.
                 # When meeting captions are available this fires is_final transcripts
                 # 200-400 ms after the speaker stops — bypassing our local Whisper.
@@ -272,6 +280,13 @@ class RecallBotService:
                 },
             }
         }
+        if not config.include_bot_audio_in_recording:
+            payload["recording_config"].pop("include_bot_in_recording", None)
+        else:
+            logger.info(
+                "[Recall] include_bot_in_recording.audio=true — "
+                "dashboard recording will contain bot TTS"
+            )
         if config.enable_camera_integrity:
             # Separate webcam streams for candidate face integrity
             # https://docs.recall.ai/docs/how-to-get-separate-videos-per-participant-realtime

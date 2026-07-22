@@ -140,6 +140,10 @@ TTS_STREAMING_ENABLED = _env_bool("TTS_STREAMING_ENABLED", False)
 
 # Recall.ai output mode (WebRTC requires media_url from API; file upload is more reliable)
 RECALL_USE_OUTPUT_MEDIA = _env_str("RECALL_USE_OUTPUT_MEDIA", "false").lower() == "true"
+# Include bot TTS audio in Recall dashboard recording (same $0.50/hr; video not supported)
+RECALL_INCLUDE_BOT_AUDIO_IN_RECORDING = _env_bool(
+    "RECALL_INCLUDE_BOT_AUDIO_IN_RECORDING", True
+)
 
 # Fallback Configuration
 STT_FALLBACK_ENABLED = _env_str("STT_FALLBACK_ENABLED", "true").lower() == "true"
