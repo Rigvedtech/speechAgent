@@ -1,0 +1,47 @@
+# Auto-deploy: on push/merge to main, SSH into the Azure VM and git pull main.
+#
+# Required GitHub Actions secrets (Settings → Secrets and variables → Actions):
+#   VM_HOST     – VM public IP (e.g. 20.244.7.67)
+#   VM_USER     – SSH user (e.g. azureuser)
+#   VM_SSH_KEY  – private key whose public half is in ~/.ssh/authorized_keys on the VM
+#
+# VM prerequisites (one-time):
+#   - repo already cloned at /home/azureuser/speechAgent
+#   - branch checked out to main
+#   - git pull origin main works without a password prompt
+#   - backend/.env exists and is gitignored (pull will not overwrite it)
+
+name: Deploy to Azure VM
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: deploy-vm-main
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Pull main on VM
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH and git pull main
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          port: 22
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd /home/azureuser/speechAgent
+            echo "Deploying in $(pwd) as $(whoami)"
+            git remote -v
+            git fetch origin
+            git checkout main
+            git pull origin main
+            echo "Deploy OK — now at:"
+            git log -1 --oneline
