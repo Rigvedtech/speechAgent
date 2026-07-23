@@ -362,6 +362,13 @@ JWT_EXPIRE_MINUTES = _env_int(
 )
 JWT_ISSUER = _env_str("JWT_ISSUER", "speechagent")
 JWT_AUDIENCE = _env_str("JWT_AUDIENCE", "speechagent-api")
+# Comma-separated browser origins only (no hardcoded defaults). Example:
+# CORS_ORIGINS=http://20.244.7.67,http://localhost:5173
+CORS_ORIGINS = [
+    o.strip()
+    for o in _env_str("CORS_ORIGINS", "").split(",")
+    if o.strip()
+]
 
 # Master key for encrypting per-org ATS API keys in organization.ats_api_key_encrypted.
 # Prefer a Fernet key (python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
