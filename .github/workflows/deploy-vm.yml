@@ -1,15 +1,30 @@
-# Auto-deploy: on push/merge to main, SSH into the Azure VM and git pull main.
+# Production deploy to Azure VM on push/merge to main.
 #
-# Required GitHub Actions secrets (Settings → Secrets and variables → Actions):
+# Flow:
+#   1. SSH into VM
+#   2. Stop backend (systemd speechagent-api)
+#   3. git fetch + checkout + pull main
+#   4. pip install backend deps
+#   5. Start backend (systemd)
+#   6. npm ci + npm run build (uses frontend/.env.production on VM)
+#   7. Copy dist → /var/www/speechagent (nginx stays running)
+#   8. Health checks
+#
+# Required GitHub Actions secrets:
 #   VM_HOST     – VM public IP (e.g. 20.244.7.67)
 #   VM_USER     – SSH user (e.g. azureuser)
-#   VM_SSH_KEY  – private key whose public half is in ~/.ssh/authorized_keys on the VM
+#   VM_SSH_KEY  – private key (full PEM including BEGIN/END lines)
 #
 # VM prerequisites (one-time):
-#   - repo already cloned at /home/azureuser/speechAgent
-#   - branch checked out to main
-#   - git pull origin main works without a password prompt
-#   - backend/.env exists and is gitignored (pull will not overwrite it)
+#   - repo at /home/azureuser/speechAgent; git pull origin main works without prompts
+#   - backend/.env present (gitignored; not overwritten by pull)
+#   - frontend/.env.production: VITE_LANDING_ONLY=false and VITE_API_BASE_URL=
+#   - systemd unit speechagent-api enabled
+#   - nginx serving /var/www/speechagent
+#   - passwordless sudo for azureuser, e.g.:
+#       azureuser ALL=(ALL) NOPASSWD: /bin/systemctl stop speechagent-api, /bin/systemctl start speechagent-api, /bin/systemctl restart speechagent-api, /bin/cp, /bin/mkdir, /bin/chown
+#
+# Dev branch middleware_layer does NOT deploy. Merge/push to main only.
 
 name: Deploy to Azure VM
 
@@ -17,6 +32,12 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Type deploy to run production deploy to the VM"
+        required: true
+        default: "deploy"
 
 concurrency:
   group: deploy-vm-main
@@ -24,10 +45,12 @@ concurrency:
 
 jobs:
   deploy:
-    name: Pull main on VM
+    name: Deploy main to VM
     runs-on: ubuntu-latest
+    # Manual runs must type "deploy" to avoid accidents
+    if: ${{ github.event_name == 'push' || github.event.inputs.confirm == 'deploy' }}
     steps:
-      - name: SSH and git pull main
+      - name: SSH stop, pull main, start API, build frontend
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VM_HOST }}
@@ -35,13 +58,54 @@ jobs:
           key: ${{ secrets.VM_SSH_KEY }}
           port: 22
           script_stop: true
+          command_timeout: 30m
           script: |
             set -euo pipefail
-            cd /home/azureuser/speechAgent
-            echo "Deploying in $(pwd) as $(whoami)"
+
+            # Production branch only — keep in sync with "on.push.branches"
+            DEPLOY_BRANCH="main"
+            REPO_DIR="/home/azureuser/speechAgent"
+            WEB_ROOT="/var/www/speechagent"
+
+            echo "==> Deploy branch: ${DEPLOY_BRANCH}"
+            echo "==> Repo: ${REPO_DIR}"
+            cd "${REPO_DIR}"
+
+            echo "==> Stop backend (speechagent-api)"
+            sudo systemctl stop speechagent-api || true
+
+            echo "==> Fetch and pull ${DEPLOY_BRANCH}"
             git remote -v
             git fetch origin
-            git checkout main
-            git pull origin main
-            echo "Deploy OK — now at:"
-            git log -1 --oneline
+            git checkout "${DEPLOY_BRANCH}"
+            git reset --hard "origin/${DEPLOY_BRANCH}"
+            git pull --ff-only origin "${DEPLOY_BRANCH}"
+            echo "Now at: $(git log -1 --oneline)"
+            echo "HEAD: $(git rev-parse HEAD)"
+
+            echo "==> Backend dependencies"
+            cd "${REPO_DIR}/backend"
+            # shellcheck disable=SC1091
+            source venv/bin/activate
+            pip install -r requirements.txt
+
+            echo "==> Start backend (speechagent-api)"
+            sudo systemctl start speechagent-api
+            sleep 3
+            sudo systemctl is-active --quiet speechagent-api
+
+            echo "==> Frontend production build"
+            cd "${REPO_DIR}/frontend"
+            npm ci
+            npm run build
+
+            echo "==> Publish static files to nginx root (nginx stays up)"
+            sudo mkdir -p "${WEB_ROOT}"
+            sudo cp -r dist/. "${WEB_ROOT}/"
+            sudo chown -R www-data:www-data "${WEB_ROOT}"
+
+            echo "==> Health checks"
+            curl -fsS --retry 5 --retry-delay 2 http://127.0.0.1:8000/health
+            curl -fsSI --retry 3 http://127.0.0.1/ | head -n 1
+
+            echo "==> Deploy OK (${DEPLOY_BRANCH} @ $(cd "${REPO_DIR}" && git rev-parse --short HEAD))"
