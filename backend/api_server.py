@@ -66,17 +66,20 @@ logger.info("Server log file: %s", _run_log)
 # Initialize FastAPI
 app = FastAPI(title="Recall.ai Bot API", version="1.0.0")
 
-_cors_origins = os.getenv(
-    "CORS_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173",
-).split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in _cors_origins if o.strip()],
+    allow_origins=app_config.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization"],
 )
+if not app_config.CORS_ORIGINS:
+    logger.warning(
+        "[CORS] CORS_ORIGINS is empty — set it in backend/.env "
+        "(e.g. http://localhost:5173 or http://YOUR_VM_IP)"
+    )
+else:
+    logger.info("[CORS] allow_origins=%s", app_config.CORS_ORIGINS)
 
 # Phase 0–1: auth + candidates + job postings (requires DATABASE_URL)
 from auth.routes import router as auth_router

@@ -20,7 +20,7 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible'
 import { cn } from '@/lib/utils'
-import { PRABHAT_CONTACT_URL } from '@/lib/marketing'
+import { GetStartedLink } from '@/lib/marketing'
 
 const STEPS = [
   {
@@ -130,10 +130,10 @@ export function LandingPage() {
             <Reveal delay={240}>
               <div className="mt-8">
                 <Button asChild size="lg" className="group h-10 px-5">
-                  <a href={PRABHAT_CONTACT_URL} target="_blank" rel="noopener noreferrer">
+                  <GetStartedLink>
                     Get started
                     <ArrowRight className="h-4 w-4 transition-transform duration-300 group-hover:translate-x-0.5" />
-                  </a>
+                  </GetStartedLink>
                 </Button>
               </div>
             </Reveal>
@@ -325,10 +325,10 @@ export function LandingPage() {
                 </p>
                 <div className="mt-8">
                   <Button asChild size="lg" className="group h-10">
-                    <a href={PRABHAT_CONTACT_URL} target="_blank" rel="noopener noreferrer">
+                    <GetStartedLink>
                       Get started
                       <ArrowRight className="h-4 w-4 transition-transform duration-300 group-hover:translate-x-0.5" />
-                    </a>
+                    </GetStartedLink>
                   </Button>
                 </div>
               </div>
