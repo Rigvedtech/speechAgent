@@ -3,12 +3,23 @@ import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { Check, Copy, Loader2, RefreshCcw } from 'lucide-react'
 import { useBotStatus } from '@/hooks/useBotStatus'
-import { cancelInterviewSetup, getHealth, leaveMeeting, rejoinBot, startInterview } from '@/lib/api'
+import {
+  cancelInterviewSetup,
+  getCodingSessionByBot,
+  getHealth,
+  leaveMeeting,
+  rejoinBot,
+  startInterview,
+  toggleCameraIntegrity,
+} from '@/lib/api'
 import { ApiError } from '@/lib/api-client'
 import { formatApiError } from '@/lib/error-messages'
 import { queryKeys } from '@/lib/query-keys'
 import { updateSessionPhase, markSessionCompleted } from '@/lib/session-store'
-import { StatusStepper } from '@/components/interview/StatusStepper'
+import {
+  StatusStepper,
+  type CodingTaskStepItem,
+} from '@/components/interview/StatusStepper'
 import { PhaseStatusDialog } from '@/components/interview/PhaseStatusDialog'
 import { QuestionPlanList } from '@/components/interview/QuestionPlanList'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -42,11 +53,101 @@ export function LiveSessionPage() {
   const [leaveOpen, setLeaveOpen] = useState(false)
   const [meetingLinkCopied, setMeetingLinkCopied] = useState(false)
   const [feedbackLinkCopied, setFeedbackLinkCopied] = useState(false)
+  const [codingLinkCopied, setCodingLinkCopied] = useState(false)
   const initialQuestions =
     (location.state as { plannedQuestions?: PlannedQuestion[] } | null)?.plannedQuestions ?? []
   const [cachedQuestions, setCachedQuestions] = useState<PlannedQuestion[]>(initialQuestions)
 
   const data = status.data
+  const codingSessionQuery = useQuery({
+    queryKey: queryKeys.codingSessionByBot(botId),
+    queryFn: () => getCodingSessionByBot(botId),
+    // Load as soon as the bot exists so recruiter can copy the candidate URI in lobby
+    enabled: Boolean(botId && data?.interview_configured),
+    retry: false,
+    refetchInterval: (query) => {
+      if (query.state.error) return false
+      const session = query.state.data
+      if (!session) return 8_000
+      if (session.submission_status === 'submitted') return false
+      const allDone = (session.assigned_tasks ?? []).every((t) => t.status === 'submitted')
+      if (allDone && (session.assigned_tasks?.length ?? 0) > 0) return false
+      // Poll more often once the voice interview has ended
+      return data?.interview_ended ? 5_000 : 15_000
+    },
+  })
+
+  const codingSession = codingSessionQuery.data
+  const codingNotEnabled =
+    codingSessionQuery.isError &&
+    codingSessionQuery.error instanceof ApiError &&
+    codingSessionQuery.error.status === 404
+
+  const codingToken =
+    codingSession?.access_token || codingSession?.demo_token || null
+  const codingLink = codingToken
+    ? `${window.location.origin}/c/${codingToken}`
+    : (codingSession?.coding_uri ?? null)
+
+  const codingTaskTitle = codingSession?.task?.title
+  const codingTaskDifficulty = codingSession?.task?.difficulty
+  const codingTimeLimit = codingSession?.time_limit_min
+  const codingEndsAt = codingSession?.ends_at ? new Date(codingSession.ends_at) : null
+  const codingTimedOut =
+    Boolean(codingEndsAt) &&
+    codingEndsAt!.getTime() < Date.now() &&
+    codingSession?.submission_status !== 'submitted'
+  const codingSubmitted = codingSession?.submission_status === 'submitted'
+  const codingAllSubmitted =
+    codingSubmitted ||
+    ((codingSession?.assigned_tasks?.length ?? 0) > 0 &&
+      (codingSession?.assigned_tasks ?? []).every((t) => t.status === 'submitted'))
+  const codingEnabled = Boolean(codingSession && !codingNotEnabled)
+  const codingRoundActive = codingEnabled && !codingAllSubmitted
+  const codingStatusLabel = codingAllSubmitted
+    ? 'Submitted'
+    : codingTimedOut
+      ? 'Timed out'
+      : 'Waiting for candidate'
+
+  const codingTaskSteps: CodingTaskStepItem[] = (() => {
+    if (!codingSession) return []
+    const tasks = codingSession.assigned_tasks
+    if (tasks && tasks.length > 0) {
+      return tasks.map((t) => {
+        let status: CodingTaskStepItem['status'] = 'pending'
+        if (t.status === 'submitted') status = 'submitted'
+        else if (t.is_current && codingTimedOut) status = 'timed_out'
+        else if (t.is_current) status = 'in_progress'
+        else if (t.status === 'draft') status = 'pending'
+        return { task_id: t.task_id, title: t.title, status }
+      })
+    }
+    // Single-task fallback when assigned_tasks is empty
+    const status: CodingTaskStepItem['status'] = codingAllSubmitted
+      ? 'submitted'
+      : codingTimedOut
+        ? 'timed_out'
+        : 'in_progress'
+    return [
+      {
+        task_id: codingSession.task?.id || 'current',
+        title: codingSession.task?.title || 'Coding task',
+        status,
+      },
+    ]
+  })()
+
+  const copyCodingUrl = async () => {
+    if (!codingLink) return
+    try {
+      await navigator.clipboard.writeText(codingLink)
+      setCodingLinkCopied(true)
+      window.setTimeout(() => setCodingLinkCopied(false), 2000)
+    } catch {
+      setError('Could not copy coding link')
+    }
+  }
 
   useEffect(() => {
     if (data?.planned_questions?.length) {
@@ -127,11 +228,28 @@ export function LiveSessionPage() {
     },
   })
 
+  const cameraToggleMutation = useMutation({
+    mutationFn: (enabled: boolean) => toggleCameraIntegrity(botId, enabled),
+    onSuccess: async () => {
+      setError(null)
+      await status.refetch()
+    },
+    onError: (err) => {
+      if (err instanceof ApiError) {
+        setError(formatApiError(err.message, err.detail))
+      } else {
+        setError('Failed to update camera vision setting')
+      }
+    },
+  })
+
   const questions = data?.planned_questions?.length
     ? data.planned_questions
     : cachedQuestions
 
   const setupNotStarted = !data?.interview_started && !data?.interview_ended
+  const canToggleCameraVision = Boolean(data?.interview_started && !data?.interview_ended)
+  const cameraVisionOn = Boolean(data?.camera_integrity_armed)
 
   // Show rejoin button only when bot is denied/failed (not when successfully in lobby)
   // Button is enabled when bot was denied or failed to join
@@ -254,8 +372,8 @@ export function LiveSessionPage() {
       )}
 
       <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[340px_1fr]">
-        <Card className="flex flex-col overflow-hidden">
-          <CardHeader>
+        <Card className="flex min-h-0 flex-col overflow-hidden">
+          <CardHeader className="shrink-0">
             <CardTitle className="text-base">
               {data?.candidate_name ?? 'Candidate'}
             </CardTitle>
@@ -268,7 +386,7 @@ export function LiveSessionPage() {
               )}
             </div>
           </CardHeader>
-          <CardContent className="space-y-4">
+          <CardContent className="min-h-0 flex-1 space-y-4 overflow-y-auto">
             <StatusStepper
               recallPhase={data?.recall_phase}
               localizationStatus={data?.localization_status}
@@ -276,6 +394,9 @@ export function LiveSessionPage() {
               interviewStarted={data?.interview_started}
               interviewEnded={data?.interview_ended}
               languageMode={data?.language_mode}
+              codingEnabled={codingEnabled}
+              codingRoundActive={codingRoundActive}
+              codingTasks={codingTaskSteps}
             />
 
             <div className="flex flex-col gap-2">
@@ -333,6 +454,16 @@ export function LiveSessionPage() {
                   Leave meeting
                 </Button>
               )}
+              <Button
+                variant="secondary"
+                onClick={() => cameraToggleMutation.mutate(!cameraVisionOn)}
+                disabled={!canToggleCameraVision || cameraToggleMutation.isPending}
+              >
+                {cameraToggleMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : null}
+                {cameraVisionOn ? 'Camera vision: ON' : 'Camera vision: OFF'}
+              </Button>
             </div>
 
             <div className="space-y-2 text-[11px] leading-snug text-muted-foreground">
@@ -390,6 +521,40 @@ export function LiveSessionPage() {
                   </div>
                 </div>
               )}
+              {codingLink ? (
+                <div>
+                  <p className="mb-1 font-medium text-foreground">Coding task URI</p>
+                  <div className="flex items-center gap-1 rounded border border-primary/30 bg-primary/5 px-2 py-1">
+                    <p className="min-w-0 flex-1 truncate font-mono text-foreground" title={codingLink}>
+                      {truncate(codingLink, 48)}
+                    </p>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
+                      title={codingLinkCopied ? 'Copied' : 'Copy coding link'}
+                      aria-label={codingLinkCopied ? 'Coding link copied' : 'Copy coding link'}
+                      onClick={copyCodingUrl}
+                    >
+                      {codingLinkCopied ? (
+                        <Check className="h-3.5 w-3.5 text-success" />
+                      ) : (
+                        <Copy className="h-3.5 w-3.5" />
+                      )}
+                    </Button>
+                  </div>
+                  <p className="mt-1 text-[10px] text-muted-foreground">
+                    Copy and send this link to the candidate for the coding round.
+                  </p>
+                </div>
+              ) : codingSessionQuery.isFetching && data?.interview_configured ? (
+                <p className="text-[10px] text-muted-foreground">Checking coding task link…</p>
+              ) : codingNotEnabled ? (
+                <p className="text-[10px] text-muted-foreground">
+                  No coding round on this interview. Enable coding when you send to lobby.
+                </p>
+              ) : null}
             </div>
           </CardContent>
         </Card>
@@ -404,6 +569,111 @@ export function LiveSessionPage() {
             languageMode={data?.language_mode}
             localizationStatus={data?.localization_status}
           />
+          {data?.interview_ended ? (
+            <Card className="mt-3 shrink-0 border-primary/30 bg-primary/5">
+              <CardHeader className="pb-2">
+                <div className="flex items-center justify-between gap-2">
+                  <CardTitle className="text-sm">Coding round</CardTitle>
+                  {codingLink ? (
+                    <Badge
+                      variant={
+                        codingSubmitted
+                          ? 'default'
+                          : codingTimedOut
+                            ? 'destructive'
+                            : 'secondary'
+                      }
+                    >
+                      {codingStatusLabel}
+                    </Badge>
+                  ) : null}
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-2 text-xs">
+                {codingSessionQuery.isLoading ? (
+                  <p className="text-muted-foreground">Loading coding task…</p>
+                ) : codingLink && codingSession ? (
+                  <>
+                    <div className="space-y-1">
+                      <p className="font-medium text-foreground">
+                        {codingTaskTitle || 'Coding task'}
+                        {codingSession.task_count && codingSession.task_count > 1
+                          ? ` (${codingSession.task_index ?? 1}/${codingSession.task_count})`
+                          : ''}
+                      </p>
+                      <p className="text-muted-foreground">
+                        {[
+                          codingTaskDifficulty
+                            ? codingTaskDifficulty.charAt(0).toUpperCase() +
+                              codingTaskDifficulty.slice(1)
+                            : null,
+                          codingTimeLimit ? `${codingTimeLimit} min` : null,
+                          codingSession.domain_name || null,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </p>
+                    </div>
+                    <p className="text-muted-foreground">
+                      {codingSubmitted
+                        ? 'Candidate submitted their solution.'
+                        : codingTimedOut
+                          ? 'Time ran out before submit. You can still share the link if needed.'
+                          : 'Share this link with the candidate, then wait for submit or timeout.'}
+                    </p>
+                    <div className="flex items-center gap-1 rounded border bg-card px-2 py-1">
+                      <p className="min-w-0 flex-1 truncate font-mono" title={codingLink}>
+                        {truncate(codingLink, 72)}
+                      </p>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 shrink-0 text-muted-foreground hover:text-foreground"
+                        title={codingLinkCopied ? 'Copied' : 'Copy coding link'}
+                        aria-label={codingLinkCopied ? 'Coding link copied' : 'Copy coding link'}
+                        onClick={copyCodingUrl}
+                      >
+                        {codingLinkCopied ? (
+                          <Check className="h-3.5 w-3.5 text-success" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                      </Button>
+                    </div>
+                    {(codingSession.assigned_tasks?.length ?? 0) > 1 ? (
+                      <ul className="space-y-1 border-t pt-2 text-muted-foreground">
+                        {codingSession.assigned_tasks!.map((t) => (
+                          <li key={t.task_id} className="flex justify-between gap-2">
+                            <span className={t.is_current ? 'text-foreground' : undefined}>
+                              {t.title}
+                            </span>
+                            <span>
+                              {t.status === 'submitted'
+                                ? 'Submitted'
+                                : t.is_current && codingTimedOut
+                                  ? 'Timed out'
+                                  : t.is_current
+                                    ? 'In progress'
+                                    : 'Pending'}
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </>
+                ) : codingNotEnabled ? (
+                  <p className="text-muted-foreground">
+                    Coding round is not enabled for this interview.
+                  </p>
+                ) : (
+                  <p className="text-muted-foreground">
+                    Could not load the coding session. Try refreshing status.
+                  </p>
+                )}
+              </CardContent>
+            </Card>
+          ) : null}
         </div>
       </div>
 

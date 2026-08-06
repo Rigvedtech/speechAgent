@@ -1,16 +1,19 @@
 """
 Local camera test for interview face / gaze / expression analysis.
 
-Warns with Edge-TTS when risk lasts longer than CAMERA_WARN_AFTER_SEC (env).
+Matches live meeting warn policy (same .env timers). Simulate turns:
+  c — candidate answer turn (warns ON)  [default]
+  a — AI asking turn (warns OFF)
 
 Usage (from backend/):
   .\\venv\\Scripts\\python.exe camera_detection_test.py
-  .\\venv\\Scripts\\python.exe camera_detection_test.py --gaze-mode production
-  .\\venv\\Scripts\\python.exe camera_detection_test.py --gaze-mode strict --no-tts
+  .\\venv\\Scripts\\python.exe camera_detection_test.py --gaze-mode interview --no-tts
 
 Controls:
   q / ESC — quit
   s       — print current frame JSON to terminal
+  a       — AI turn (looking away OK, no warn)
+  c       — candidate turn (down/side 2s warn, 8s cooldown)
 """
 
 from __future__ import annotations
@@ -79,6 +82,7 @@ _EXPR_COLOR = {
 _WARN_MESSAGES = {
     "no_face": "Please stay in front of the camera so I can see your face.",
     "looking_away": "Please face the camera and keep looking at the screen.",
+    "looking_side": "Please face the camera and keep looking at the screen.",
     "looking_down": "Please lift your head and look at the interview screen.",
     "multi_face": "Please make sure only you are visible on camera.",
 }
@@ -154,40 +158,71 @@ class RiskState:
 
 
 class IntegrityWarnMonitor:
-    """Accumulate sustained risk, then speak Edge-TTS after CAMERA_WARN_AFTER_SEC."""
+    """Accumulate sustained risk, then speak Edge-TTS after configured dwell times."""
 
     def __init__(self, speaker: Optional[EdgeTtsSpeaker]) -> None:
         self._speaker = speaker
         self._warn_after = float(app_config.CAMERA_WARN_AFTER_SEC)
+        self._warn_after_down = float(
+            getattr(app_config, "CAMERA_WARN_AFTER_DOWN_SEC", 3.0)
+        )
+        self._warn_after_side = float(
+            getattr(app_config, "CAMERA_WARN_AFTER_SIDE_SEC", 5.0)
+        )
         self._warn_after_away = float(
-            getattr(app_config, "CAMERA_WARN_AFTER_AWAY_SEC", self._warn_after * 1.75)
+            getattr(app_config, "CAMERA_WARN_AFTER_AWAY_SEC", self._warn_after_side)
         )
         self._cooldown = float(app_config.CAMERA_WARN_COOLDOWN_SEC)
+        self._cooldown_multi = float(
+            getattr(app_config, "CAMERA_WARN_COOLDOWN_MULTI_FACE_SEC", 5.0)
+        )
         self._include_side = bool(app_config.CAMERA_WARN_INCLUDE_SIDE_LOOK)
         self._on_no_face = bool(app_config.CAMERA_WARN_ON_NO_FACE)
         self._on_multi = bool(app_config.CAMERA_WARN_ON_MULTI_FACE)
         self._on_away = bool(app_config.CAMERA_WARN_ON_LOOKING_AWAY)
-        self._on_down = bool(getattr(app_config, "CAMERA_WARN_ON_LOOKING_DOWN", False))
-        self._ignore_away_while_speaking = bool(
-            getattr(app_config, "CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING", True)
-        )
+        self._on_down = bool(getattr(app_config, "CAMERA_WARN_ON_LOOKING_DOWN", True))
         self._multi_min_area_ratio = float(
             getattr(app_config, "CAMERA_WARN_MULTI_FACE_MIN_AREA_RATIO", 0.18)
         )
         self._hold_frames = max(1, int(getattr(app_config, "CAMERA_WARN_HOLD_FRAMES", 8)))
         self._enabled = bool(app_config.CAMERA_WARN_TTS_ENABLED) and speaker is not None
+        # Match live meeting: warns only on candidate answer turn (not AI asking)
+        self._candidate_turn = True
         self._risk = RiskState()
         self._pending_kind: Optional[str] = None
         self._pending_hits = 0
+        self._last_gaze_warn_at = 0.0
+        self._last_multi_warn_at = 0.0
         logger.info(
-            "Warn monitor: enabled=%s after=%.1fs away_after=%.1fs cooldown=%.1fs "
-            "side_look=%s hold_frames=%d",
+            "Warn monitor: enabled=%s down_after=%.1fs side_after=%.1fs "
+            "away_after=%.1fs gaze_cd=%.1fs multi_cd=%.1fs side_look=%s "
+            "hold_frames=%d turn=candidate (press a=AI / c=candidate)",
             self._enabled,
-            self._warn_after,
+            self._warn_after_down,
+            self._warn_after_side,
             self._warn_after_away,
             self._cooldown,
+            self._cooldown_multi,
             self._include_side,
             self._hold_frames,
+        )
+
+    @property
+    def candidate_turn(self) -> bool:
+        return self._candidate_turn
+
+    def set_candidate_turn(self, active: bool) -> None:
+        active = bool(active)
+        if self._candidate_turn == active:
+            return
+        self._candidate_turn = active
+        self._pending_kind = None
+        self._pending_hits = 0
+        self._risk = RiskState(last_warn_at=self._risk.last_warn_at)
+        logger.info(
+            "Turn=%s — integrity warns %s",
+            "candidate" if active else "ai",
+            "ON" if active else "OFF",
         )
 
     def _significant_extra_faces(self, result: FrameAnalysisResult) -> bool:
@@ -207,34 +242,50 @@ class IntegrityWarnMonitor:
             return "no_face" if self._on_no_face else None
         if self._on_multi and self._significant_extra_faces(result):
             return "multi_face"
-        if not self._on_away:
+        if not result.faces:
             return None
         primary = result.faces[0]
-        # Answering aloud often looks at the screen / gestures — don't flag away
-        if (
-            self._ignore_away_while_speaking
-            and primary.speaking == SpeakingState.SPEAKING
-        ):
-            return None
         gaze = primary.gaze
-        if gaze == GazeDirection.LOOKING_AWAY:
-            return "looking_away"
+        # Thinking / remembering — never warn
+        if gaze == GazeDirection.LOOKING_UP:
+            return None
         if self._on_down and gaze == GazeDirection.LOOKING_DOWN:
             return "looking_down"
+        if self._on_away and gaze == GazeDirection.LOOKING_AWAY:
+            return "looking_away"
         if self._include_side and gaze in (
             GazeDirection.LOOKING_LEFT,
             GazeDirection.LOOKING_RIGHT,
-            GazeDirection.LOOKING_UP,
         ):
-            return "looking_away"
+            return "looking_side"
         return None
 
     def _threshold_for(self, kind: str) -> float:
-        if kind in ("looking_away", "looking_down"):
+        if kind == "looking_down":
+            return self._warn_after_down
+        if kind == "looking_side":
+            return self._warn_after_side
+        if kind == "looking_away":
             return self._warn_after_away
+        if kind == "multi_face":
+            return float(
+                getattr(app_config, "CAMERA_WARN_AFTER_MULTI_FACE_SEC", 5.0)
+            )
         return self._warn_after
 
+    def _cooldown_ok(self, kind: str, now: float) -> bool:
+        if kind == "multi_face":
+            return (now - self._last_multi_warn_at) >= self._cooldown_multi
+        return (now - self._last_gaze_warn_at) >= self._cooldown
+
     def update(self, result: FrameAnalysisResult, now: float) -> RiskState:
+        # Same as live meeting: no warn accumulation while "AI asking"
+        if not self._candidate_turn:
+            self._pending_kind = None
+            self._pending_hits = 0
+            self._risk = RiskState(last_warn_at=self._risk.last_warn_at)
+            return self._risk
+
         raw = self._classify(result)
         if raw is None:
             self._pending_kind = None
@@ -264,7 +315,7 @@ class IntegrityWarnMonitor:
         if (
             self._enabled
             and self._risk.active_seconds >= threshold
-            and (now - self._risk.last_warn_at) >= self._cooldown
+            and self._cooldown_ok(kind, now)
             and self._speaker is not None
             and not self._speaker.busy
         ):
@@ -277,6 +328,10 @@ class IntegrityWarnMonitor:
             )
             self._speaker.speak(message)
             self._risk.last_warn_at = now
+            if kind == "multi_face":
+                self._last_multi_warn_at = now
+            else:
+                self._last_gaze_warn_at = now
 
         return self._risk
 
@@ -336,7 +391,10 @@ def _draw_face(
     speak_color = (0, 220, 100) if face.speaking == SpeakingState.SPEAKING else (160, 160, 160)
 
     label_1 = f"Face {face.face_id}: {face.gaze.value}"
-    label_2 = f"{face.expression.value}  conf={face.confidence:.2f}"
+    label_2 = (
+        f"{face.expression.value}  conf={face.confidence:.2f}  "
+        f"pitch={face.head_pitch_deg:+.0f}"
+    )
     label_3 = f"{speaking_label}  mouth={face.mouth_activity:.2f}"
     expr_color = _EXPR_COLOR.get(face.expression, (220, 220, 220))
 
@@ -374,38 +432,53 @@ def _draw_hud(
     warn_after: float,
     *,
     gaze_mode: GazeMode,
+    down_after: float = 3.0,
+    side_after: float = 5.0,
+    candidate_turn: bool = True,
 ) -> None:
     h, w = frame.shape[:2]
     overlay = frame.copy()
-    cv2.rectangle(overlay, (0, 0), (w, 78), (20, 20, 20), -1)
+    cv2.rectangle(overlay, (0, 0), (w, 96), (20, 20, 20), -1)
     cv2.addWeighted(overlay, 0.45, frame, 0.55, 0, frame)
 
+    turn_label = "candidate WARN ON" if candidate_turn else "AI asking WARN OFF"
     summary = (
-        f"Faces: {result.face_count}   FPS: {fps:.1f}   "
-        f"mode={gaze_mode.value}   warn_after={warn_after:.0f}s"
+        f"Faces: {result.face_count}  FPS: {fps:.1f}  "
+        f"mode={gaze_mode.value}  down={down_after:.0f}s side={side_after:.0f}s"
     )
     cv2.putText(
         frame,
         summary,
-        (12, 24),
+        (12, 22),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.55,
+        0.5,
         (240, 240, 240),
         2,
         cv2.LINE_AA,
     )
     cv2.putText(
         frame,
-        "q/ESC quit | s log JSON snapshot",
-        (12, 48),
+        f"turn={turn_label}  |  a=AI  c=candidate  q=quit  s=snapshot",
+        (12, 46),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.5,
-        (180, 180, 180),
+        0.48,
+        (0, 220, 120) if candidate_turn else (0, 180, 255),
         1,
         cv2.LINE_AA,
     )
 
-    if risk.kind and risk.active_seconds > 0:
+    if not candidate_turn:
+        cv2.putText(
+            frame,
+            "AI turn — looking away OK (no warn)",
+            (12, 70),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.5,
+            (180, 180, 180),
+            1,
+            cv2.LINE_AA,
+        )
+    elif risk.kind and risk.active_seconds > 0:
         remain = max(0.0, warn_after - risk.active_seconds)
         if remain > 0:
             risk_line = f"RISK {risk.kind}: {risk.active_seconds:.1f}s  (warn in {remain:.1f}s)"
@@ -420,6 +493,17 @@ def _draw_hud(
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
             color,
+            1,
+            cv2.LINE_AA,
+        )
+    else:
+        cv2.putText(
+            frame,
+            "up=never warn | chin-down or side 2s → warn (8s cooldown)",
+            (12, 70),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (180, 180, 180),
             1,
             cv2.LINE_AA,
         )
@@ -477,15 +561,19 @@ def run_camera_loop(
         )
     monitor = IntegrityWarnMonitor(speaker)
     cap = _open_camera(camera_index, width, height)
-    warn_after = float(app_config.CAMERA_WARN_AFTER_SEC)
+    down_after = float(getattr(app_config, "CAMERA_WARN_AFTER_DOWN_SEC", 3.0))
+    side_after = float(getattr(app_config, "CAMERA_WARN_AFTER_SIDE_SEC", 5.0))
 
     logger.info(
-        "Camera opened index=%s size~=%sx%s gaze_mode=%s debug=%s — press q to quit",
+        "Camera opened index=%s size~=%sx%s gaze_mode=%s debug=%s "
+        "down_after=%.0fs side_after=%.0fs — press q to quit",
         camera_index,
         int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
         int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
         gaze_mode.value,
         debug,
+        down_after,
+        side_after,
     )
 
     fps_smooth = 0.0
@@ -512,6 +600,7 @@ def run_camera_loop(
 
             result = analyzer.analyze_bgr(frame, timestamp_ms=timestamp_ms)
             risk = monitor.update(result, now)
+            warn_after = monitor._threshold_for(risk.kind) if risk.kind else down_after
 
             for face in result.faces:
                 _draw_face(frame, face, debug=debug)
@@ -522,18 +611,26 @@ def run_camera_loop(
                 risk,
                 warn_after,
                 gaze_mode=gaze_mode,
+                down_after=down_after,
+                side_after=side_after,
+                candidate_turn=monitor.candidate_turn,
             )
 
             cv2.imshow(_WINDOW, frame)
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), 27):
                 break
+            if key == ord("a"):
+                monitor.set_candidate_turn(False)
+            if key == ord("c"):
+                monitor.set_candidate_turn(True)
             if key == ord("s"):
                 payload = result.to_dict()
                 payload["risk"] = {
                     "kind": risk.kind,
                     "active_seconds": round(risk.active_seconds, 2),
                     "warn_after_sec": warn_after,
+                    "candidate_turn": monitor.candidate_turn,
                 }
                 logger.info("SNAPSHOT %s", json.dumps(payload, ensure_ascii=True))
                 print(json.dumps(payload, indent=2))

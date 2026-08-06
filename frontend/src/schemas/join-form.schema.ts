@@ -64,26 +64,24 @@ export const step1Fields = ['candidate_first_name', 'candidate_last_name', 'lang
 export const step2Fields = ['position_name'] as const
 export const step4Fields = ['meeting_url', 'bot_name'] as const
 
-export type DocumentInputMode = 'upload' | 'manual'
-
-export function isStep1Ready(
-  values: Pick<JoinFormValues, 'candidate_first_name' | 'cvText'>,
-  cvFile: File | null,
-  mode: DocumentInputMode = 'upload',
+/** Select-only: require a saved job id + stored JD text. */
+export function isJobSelectReady(
+  jobPostingId: string | null,
+  values: Pick<JoinFormValues, 'position_name' | 'jdText'>,
 ) {
-  if (values.candidate_first_name.trim().length < 2) return false
-  if (mode === 'manual') return values.cvText.trim().length >= 50
-  return cvFile !== null
+  if (!jobPostingId) return false
+  if (values.position_name.trim().length < 2) return false
+  return values.jdText.trim().length >= 100
 }
 
-export function isStep2Ready(
-  values: Pick<JoinFormValues, 'position_name' | 'jdText'>,
-  jdFile: File | null,
-  mode: DocumentInputMode = 'upload',
+/** Select-only: require a saved candidate id + stored CV text. */
+export function isCandidateSelectReady(
+  candidateId: string | null,
+  values: Pick<JoinFormValues, 'candidate_first_name' | 'cvText'>,
 ) {
-  if (values.position_name.trim().length < 2) return false
-  if (mode === 'manual') return values.jdText.trim().length >= 100
-  return jdFile !== null
+  if (!candidateId) return false
+  if (values.candidate_first_name.trim().length < 2) return false
+  return values.cvText.trim().length >= 50
 }
 
 export function isStep1bReady(values: Pick<JoinFormValues, 'cvText'>) {

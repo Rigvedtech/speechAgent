@@ -62,9 +62,10 @@ VITE_API_BASE_URL=https://your-backend.example.com
 
 Add the frontend origin to backend `CORS_ORIGINS`.
 
-### JD/CV extraction (n8n)
+### JD/CV extraction and question generation
 
-Configure `N8N_CV_URI`, `N8N_JD_URI`, and `N8N_QUESTIONS_URI` in **backend** `.env`. The UI calls `POST /api/extract-cv`, `POST /api/extract-jd`, and `POST /api/generate-questions`; the backend forwards to n8n.
+Configure `N8N_CV_URI` and `N8N_JD_URI` in **backend** `.env` only if you use webhook-based CV/JD extraction.  
+`POST /api/generate-questions` now runs locally in backend (Groq), while `POST /api/extract-cv` and `POST /api/extract-jd` use the extraction adapters.
 
 ## Routes (full app — `VITE_LANDING_ONLY` unset/false)
 

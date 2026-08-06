@@ -299,10 +299,12 @@ def _persist_jd_document(
         mark_document_ready(db, doc.id, extracted_text=text)
         job.jd_text = text
         job.jd_document_id = doc.id
+        job.pipeline_status = "ready"
         db.commit()
     elif remote.jd_text:
         job.jd_text = remote.jd_text
         job.jd_document_id = doc.id
+        job.pipeline_status = "ready"
         mark_document_ready(db, doc.id, extracted_text=remote.jd_text)
         db.commit()
     else:

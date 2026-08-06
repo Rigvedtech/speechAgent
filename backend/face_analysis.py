@@ -57,9 +57,9 @@ class GazeDirection(str, Enum):
 
 class GazeMode(str, Enum):
     """
-    production — mild eye-down = center; hard head-down = looking_down (+warn)
-    interview  — softer eyes / higher head-down threshold
-    strict     — sensitive eyes for QA (eye-down can label without hard head)
+    production — mild UI eye-down = center; stronger desk-down = looking_down
+    interview  — integrity-tuned (same policy, slightly smoother)
+    strict     — sensitive eyes for QA (eye-down can label without mild remap)
     """
 
     PRODUCTION = "production"
@@ -251,32 +251,33 @@ class _GazeProfile:
 
 _GAZE_PROFILES: Dict[GazeMode, _GazeProfile] = {
     GazeMode.PRODUCTION: _GazeProfile(
-        # Mild eye/screen look ignored; looking_down only on hard head-down
+        # Mild UI glance → center; chin-down / strong eye-down → looking_down
         eye_threshold=0.24,
         eye_margin=0.04,
         yaw_away_deg=38.0,
         pitch_away_deg=34.0,
-        blend_weight=0.50,
-        iris_weight=0.50,
+        blend_weight=0.45,
+        iris_weight=0.55,
         screen_down_as_center=True,
-        screen_down_max=0.85,
-        iris_down_start=0.60,
-        head_down_deg=16.0,
+        screen_down_max=0.42,
+        iris_down_start=0.52,
+        head_down_deg=10.0,
         smoother_window=4,
         prefer_center_on_tie=True,
     ),
     GazeMode.INTERVIEW: _GazeProfile(
-        eye_threshold=0.28,
-        eye_margin=0.06,
+        # Chin-down beats iris-up (desk/notes); mild eye-only screen glance → center
+        eye_threshold=0.26,
+        eye_margin=0.05,
         yaw_away_deg=35.0,
         pitch_away_deg=32.0,
-        blend_weight=0.55,
-        iris_weight=0.45,
+        blend_weight=0.45,
+        iris_weight=0.55,
         screen_down_as_center=True,
-        screen_down_max=0.90,
-        iris_down_start=0.62,
-        head_down_deg=18.0,
-        smoother_window=6,
+        screen_down_max=0.42,
+        iris_down_start=0.52,
+        head_down_deg=10.0,
+        smoother_window=5,
         prefer_center_on_tie=True,
     ),
     GazeMode.STRICT: _GazeProfile(
@@ -288,8 +289,8 @@ _GAZE_PROFILES: Dict[GazeMode, _GazeProfile] = {
         iris_weight=0.55,
         screen_down_as_center=False,
         screen_down_max=0.50,
-        iris_down_start=0.55,
-        head_down_deg=12.0,
+        iris_down_start=0.50,
+        head_down_deg=8.0,
         smoother_window=3,
         prefer_center_on_tie=False,
     ),
@@ -480,11 +481,14 @@ def classify_gaze(
     mode: GazeMode = GazeMode.PRODUCTION,
 ) -> GazeDirection:
     """
-    Eye-first gaze classification.
+    Eye-first gaze classification for interview integrity.
 
-    Head pose only forces looking_away on strong turns. In production/interview,
-    mild look-down (screen under webcam) maps to looking_center. Clear left/right
-    and extreme down still surface. Warn policy is configured separately.
+    Policy:
+      - looking_up: thinking / recall (warn layer ignores this)
+      - mild eye-down toward UI under webcam → looking_center (when enabled)
+      - sustained / strong down → looking_down (desk / notes risk)
+      - clear left/right → looking_left / looking_right (second-screen risk)
+      - strong head turn → looking_away
     """
     profile = _GAZE_PROFILES[mode]
     if metrics is None:
@@ -531,20 +535,56 @@ def classify_gaze(
     if yaw_abs >= profile.yaw_away_deg or pitch_abs >= profile.pitch_away_deg:
         return GazeDirection.LOOKING_AWAY
 
-    # Hard head nod down (chin toward chest) — integrity signal, not screen glance
-    hard_head_down = (
-        pitch_abs >= profile.head_down_deg
-        and metrics.fused_down >= metrics.fused_up
-        and metrics.fused_down >= 0.18
+    down = float(metrics.fused_down)
+    left = float(metrics.fused_left)
+    right = float(metrics.fused_right)
+    up = float(metrics.fused_up)
+    side_max = max(left, right)
+    mild_screen_down = float(profile.screen_down_max)
+
+    # Chin tipped toward desk/notes: trust head pitch over iris.
+    # Iris often sits "up" in the socket when the head is down but eyes
+    # still face the webcam — that used to force looking_center / looking_up.
+    clearly_looking_up = (
+        up >= profile.eye_threshold
+        and up >= down + profile.eye_margin
+        and up >= side_max
     )
-    if hard_head_down:
+    # Thinking / recall — never treat as desk-down even if head moves
+    if clearly_looking_up:
+        return GazeDirection.LOOKING_UP
+
+    if pitch_abs >= profile.head_down_deg:
+        return GazeDirection.LOOKING_DOWN
+
+    # Boost eye-down with moderate head nod so weak iris-down still counts
+    if pitch_abs >= profile.head_down_deg * 0.6:
+        pitch_boost = min(
+            0.55,
+            (pitch_abs - profile.head_down_deg * 0.6)
+            / max(6.0, profile.head_down_deg),
+        )
+        down = max(down, min(1.0, down + pitch_boost))
+
+    # Strong / dominant down beats side labels (fixes D≈0.7 labeled as looking_left)
+    if (
+        down >= profile.eye_threshold
+        and down >= up
+        and down >= side_max + max(0.04, profile.eye_margin * 0.5)
+    ):
+        if (
+            profile.screen_down_as_center
+            and down < mild_screen_down
+            and pitch_abs < profile.head_down_deg
+        ):
+            return GazeDirection.LOOKING_CENTER
         return GazeDirection.LOOKING_DOWN
 
     candidates: List[Tuple[GazeDirection, float]] = [
-        (GazeDirection.LOOKING_LEFT, metrics.fused_left),
-        (GazeDirection.LOOKING_RIGHT, metrics.fused_right),
-        (GazeDirection.LOOKING_DOWN, metrics.fused_down),
-        (GazeDirection.LOOKING_UP, metrics.fused_up),
+        (GazeDirection.LOOKING_LEFT, left),
+        (GazeDirection.LOOKING_RIGHT, right),
+        (GazeDirection.LOOKING_DOWN, down),
+        (GazeDirection.LOOKING_UP, up),
     ]
     candidates.sort(key=lambda item: item[1], reverse=True)
     best_dir, best_score = candidates[0]
@@ -553,20 +593,11 @@ def classify_gaze(
     if best_score < profile.eye_threshold or (best_score - second_score) < profile.eye_margin:
         return GazeDirection.LOOKING_CENTER
 
-    # Eye-only look-down = watching the screen under the webcam → center
+    # Mild eye-only look-down = watching screen under webcam → center
     if profile.screen_down_as_center and best_dir == GazeDirection.LOOKING_DOWN:
-        for direction, score in candidates[1:]:
-            if (
-                direction
-                in (GazeDirection.LOOKING_LEFT, GazeDirection.LOOKING_RIGHT)
-                and score >= profile.eye_threshold
-            ):
-                return direction
-        # Without hard head pitch, ignore mild/strong eye-down as screen engagement
-        if pitch_abs < profile.head_down_deg:
+        if best_score < mild_screen_down and pitch_abs < profile.head_down_deg:
             return GazeDirection.LOOKING_CENTER
-        if best_score < profile.screen_down_max:
-            return GazeDirection.LOOKING_CENTER
+        return GazeDirection.LOOKING_DOWN
 
     return best_dir
 

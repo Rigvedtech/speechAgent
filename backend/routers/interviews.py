@@ -19,6 +19,12 @@ from interview_persist import (
     list_scheduled_interviews,
 )
 from language_profiles import resolve_language_mode
+from routers.coding import (
+    InterviewCodingConfigIn,
+    InterviewCodingConfigOut,
+    build_coding_config_out,
+    upsert_interview_coding_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +51,7 @@ class ScheduleInterviewRequest(BaseModel):
     bot_name: Optional[str] = Field(None, max_length=100)
     greeting_message: Optional[str] = None
     document_extraction_id: Optional[UUID] = None
+    coding: Optional[InterviewCodingConfigIn] = None
 
     @field_validator("meeting_url", "candidate_name", "job_title", "jdText", "cvText")
     @classmethod
@@ -65,11 +72,13 @@ class ScheduledInterviewOut(BaseModel):
     created_at: datetime
     candidate_full_name: Optional[str] = None
     job_posting_title: Optional[str] = None
+    coding_enabled: bool = False
 
 
 class ScheduleInterviewResponse(BaseModel):
     success: bool = True
     interview: ScheduledInterviewOut
+    coding: Optional[InterviewCodingConfigOut] = None
     message: str = "Interview scheduled. Send to lobby when the candidate is ready."
 
 
@@ -109,6 +118,13 @@ def schedule_interview(
     )
     planned_count = cfg.questions_planned_count if cfg else len(body.questions)
 
+    coding_out: Optional[InterviewCodingConfigOut] = None
+    coding_enabled = False
+    if body.coding is not None:
+        coding_row = upsert_interview_coding_config(db, user, session.id, body.coding)
+        coding_out = build_coding_config_out(db, session, coding_row)
+        coding_enabled = coding_row.enabled
+
     return ScheduleInterviewResponse(
         interview=ScheduledInterviewOut(
             id=session.id,
@@ -121,7 +137,9 @@ def schedule_interview(
             bot_name=session.bot_name,
             questions_planned=planned_count,
             created_at=session.created_at,
-        )
+            coding_enabled=coding_enabled,
+        ),
+        coding=coding_out,
     )
 
 

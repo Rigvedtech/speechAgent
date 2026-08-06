@@ -31,6 +31,8 @@ export interface JoinMeetingRequest {
   job_posting_id?: string
   job_title?: string
   document_extraction_id?: string
+  /** Same as schedule — attach coding round when sending to lobby directly */
+  coding?: InterviewCodingConfig
 }
 
 export interface JoinMeetingResponse {
@@ -66,6 +68,14 @@ export interface StatusResponse {
   questions_scored?: number
   interview_phase?: string
   interview_ended?: boolean
+  camera_integrity_armed?: boolean
+}
+
+export interface CameraIntegrityToggleResponse {
+  success: boolean
+  bot_id: string
+  camera_integrity_armed: boolean
+  message: string
 }
 
 export interface StartInterviewResponse {
@@ -243,6 +253,7 @@ export interface Candidate {
   full_name: string
   email?: string | null
   phone?: string | null
+  current_title?: string | null
   cv_text?: string | null
   notes?: string | null
   source: string
@@ -258,6 +269,8 @@ export interface JobPosting {
   created_by: string
   job_title: string
   jd_text?: string | null
+  jd_document_id?: string | null
+  pipeline_status: 'pending' | 'processing' | 'ready' | 'failed'
   description?: string | null
   status: string
   source: string
@@ -267,13 +280,130 @@ export interface JobPosting {
   updated_at: string
 }
 
+export type UploadItemStatus = 'queued' | 'processing' | 'ready' | 'failed' | 'skipped'
+export type UploadBatchStatus = 'queued' | 'processing' | 'done' | 'failed' | 'cancelled'
+
+export interface BulkUploadItem {
+  id: string
+  original_filename?: string | null
+  file_size_bytes?: number | null
+  mime_type?: string | null
+  status: UploadItemStatus
+  document_id?: string | null
+  error_message?: string | null
+  created_at: string
+  completed_at?: string | null
+}
+
+export interface UploadBatch {
+  id: string
+  organization_id: string
+  job_posting_id?: string | null
+  batch_type: 'cv' | 'jd'
+  status: UploadBatchStatus
+  total_count: number
+  success_count: number
+  fail_count: number
+  error_message?: string | null
+  created_at: string
+  completed_at?: string | null
+  items: BulkUploadItem[]
+}
+
+export interface CvBatchUploadResponse {
+  batch_id: string
+  job_posting_id: string
+  total_files: number
+  total_queued: number
+  total_duplicate_skipped: number
+  items: Array<{
+    original_filename: string
+    document_id: string
+    batch_item_id: string
+    status: UploadItemStatus
+    is_duplicate: boolean
+    file_size_bytes: number
+    mime_type: string
+  }>
+}
+
+export interface JdUploadResponse {
+  job_posting_id: string
+  document_id: string
+  batch_id: string
+  status: UploadItemStatus
+  is_duplicate: boolean
+  original_filename: string
+  mime_type: string
+  file_size_bytes: number
+}
+
+export interface JobResume {
+  document_id: string
+  candidate_id?: string | null
+  original_filename?: string | null
+  file_size_bytes?: number | null
+  mime_type?: string | null
+  upload_status: string
+  error_message?: string | null
+  full_name?: string | null
+  email?: string | null
+  current_title?: string | null
+  cv_text?: string | null
+  created_at: string
+}
+
+export interface BatchExtractSummary {
+  batch_id: string
+  total: number
+  extracted: number
+  failed: number
+  skipped_already_done: number
+}
+
+export interface ParsedDocumentResult {
+  document_id: string
+  candidate_id?: string | null
+  linked_to_job: boolean
+  document_type: string
+  original_filename?: string | null
+  upload_status: string
+  parse_status: 'parsed' | 'no_text' | 'failed'
+  full_name?: string | null
+  email?: string | null
+  current_title?: string | null
+  skills: string[]
+  required_skills: string[]
+}
+
+export interface BatchParseSummary {
+  batch_id: string
+  total: number
+  parsed: number
+  skipped_no_text: number
+  skipped_already_parsed: number
+  failed: number
+  results: ParsedDocumentResult[]
+}
+
 export interface CreateCandidateRequest {
   full_name: string
   email?: string
   phone?: string
+  current_title?: string
   cv_text?: string
   notes?: string
   source?: 'manual' | 'upload'
+}
+
+export interface UpdateCandidateRequest {
+  full_name?: string
+  email?: string
+  phone?: string
+  current_title?: string
+  cv_text?: string
+  notes?: string
+  is_active?: boolean
 }
 
 export interface CreateJobPostingRequest {
@@ -311,6 +441,183 @@ export interface ScheduledInterview {
   created_at: string
   candidate_full_name?: string | null
   job_posting_title?: string | null
+  coding_enabled?: boolean
+}
+
+export type CodingLanguage =
+  | 'python'
+  | 'javascript'
+  | 'typescript'
+  | 'java'
+  | 'cpp'
+  | 'csharp'
+  | 'go'
+  | 'ruby'
+  | 'php'
+  | 'kotlin'
+  | 'rust'
+  | 'swift'
+
+export interface CodingExample {
+  input: string
+  output: string
+  explanation?: string | null
+}
+
+export interface CodingTaskSummary {
+  id: string
+  slug: string
+  title: string
+  difficulty: string
+  skill_tags: string[]
+  allowed_languages: string[]
+  domain_id?: string | null
+  is_org_owned?: boolean
+  estimated_time_min?: number
+}
+
+export interface CodingTaskDetail extends CodingTaskSummary {
+  statement: string
+  examples: CodingExample[]
+  constraints_text: string
+  starter_code: Record<string, string>
+  entry_function?: string | null
+}
+
+export interface CodingDomain {
+  id: string
+  slug: string
+  name: string
+  language: string
+  description: string
+  is_active: boolean
+  problem_count: number
+  max_problems: number
+  can_generate: boolean
+  is_org_owned?: boolean
+}
+
+export interface InterviewCodingConfig {
+  enabled: boolean
+  domain_id?: string | null
+  allowed_languages: CodingLanguage[]
+  default_language: CodingLanguage
+  task_ids: string[]
+  assigned_task_id?: string | null
+  time_limit_min: number
+  /** task_id -> recruiter time limit (minutes) */
+  task_time_limits?: Record<string, number>
+}
+
+export interface InterviewCodingConfigOut extends InterviewCodingConfig {
+  interview_id: string
+  coding_uri?: string | null
+  wrapup_message?: string | null
+}
+
+export interface CodingWorkspace {
+  files: Record<string, string>
+  activePath: string
+  entryPath: string
+}
+
+export interface CodingAssignedTaskProgress {
+  task_id: string
+  title: string
+  difficulty: string
+  time_limit_min: number
+  status: string
+  is_current: boolean
+}
+
+export interface CodingSession {
+  interview_id?: string | null
+  bot_id?: string | null
+  demo_token?: string | null
+  access_token?: string | null
+  enabled: boolean
+  language: string
+  allowed_languages: string[]
+  language_locked?: boolean
+  domain_id?: string | null
+  domain_name?: string | null
+  time_limit_min: number
+  started_at?: string | null
+  ends_at?: string | null
+  task: CodingTaskDetail
+  submission_status: string
+  code: string
+  workspace?: CodingWorkspace
+  coding_uri?: string | null
+  task_index?: number
+  task_count?: number
+  has_next_task?: boolean
+  assigned_tasks?: CodingAssignedTaskProgress[]
+}
+
+export interface CodingSubmitRequest {
+  language: string
+  code: string
+  status?: 'draft' | 'submitted'
+  workspace?: CodingWorkspace
+}
+
+export interface CodingSubmitResponse {
+  id: string
+  status: string
+  language: string
+  submitted_at?: string | null
+  task_id: string
+  interview_id?: string | null
+  demo_token?: string | null
+  has_next_task?: boolean
+  next_task_id?: string | null
+  task_index?: number
+  task_count?: number
+}
+
+export interface CodingRunRequest {
+  language: string
+  code: string
+  stdin?: string
+  timeout_sec?: number
+}
+
+export interface CodingRunResponse {
+  ok: boolean
+  exit_code: number
+  stdout: string
+  stderr: string
+  timed_out: boolean
+  language: string
+  error?: string | null
+}
+
+export interface CodingExampleRunResult {
+  index: number
+  input: string
+  expected: string
+  actual: string
+  stderr: string
+  exit_code: number
+  timed_out: boolean
+  passed: boolean
+  error?: string | null
+}
+
+export interface CodingComplexity {
+  time: string
+  space: string
+  note?: string
+  confidence?: string
+}
+
+export interface CodingRunExamplesResponse {
+  passed: number
+  total: number
+  all_passed: boolean
+  results: CodingExampleRunResult[]
+  complexity?: CodingComplexity | null
 }
 
 export interface ScheduleInterviewRequest {
@@ -326,11 +633,13 @@ export interface ScheduleInterviewRequest {
   bot_name?: string
   greeting_message?: string
   document_extraction_id?: string
+  coding?: InterviewCodingConfig
 }
 
 export interface ScheduleInterviewResponse {
   success: boolean
   interview: ScheduledInterview
+  coding?: InterviewCodingConfigOut | null
   message?: string
 }
 
@@ -386,6 +695,8 @@ export interface AtsRemoteCandidate {
   full_name: string
   email?: string | null
   phone?: string | null
+  status?: string | null
+  cv_filename?: string | null
   has_cv_text: boolean
   has_cv_url: boolean
   already_imported: boolean
@@ -396,6 +707,8 @@ export interface AtsRemoteJob {
   external_id: string
   job_title: string
   description?: string | null
+  company_name?: string | null
+  status?: string | null
   has_jd_text: boolean
   has_jd_url: boolean
   already_imported: boolean
@@ -407,6 +720,8 @@ export interface AtsJobDetail {
   job_title: string
   description?: string | null
   jd_text?: string | null
+  company_name?: string | null
+  status?: string | null
   has_jd_url: boolean
   already_imported: boolean
   local_job_posting_id?: string | null
@@ -418,6 +733,8 @@ export interface AtsCandidateDetail {
   email?: string | null
   phone?: string | null
   cv_text?: string | null
+  status?: string | null
+  cv_filename?: string | null
   has_cv_url: boolean
   already_imported: boolean
   local_candidate_id?: string | null

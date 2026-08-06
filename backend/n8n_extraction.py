@@ -1,5 +1,8 @@
 """
-Forward JD/CV uploads and question generation to n8n and normalize responses for the recruiter UI.
+JD/CV extraction adapters + interview question generation normalization.
+
+- CV/JD extraction still proxies webhook calls (n8n-style payloads).
+- Interview question generation now runs locally via Groq with strict JSON output.
 """
 
 from __future__ import annotations
@@ -7,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 import requests
@@ -21,10 +25,6 @@ N8N_JD_URI = os.getenv(
     "N8N_JD_URI",
     "http://localhost:5678/webhook/jd_textExtractor",
 ).strip()
-N8N_QUESTIONS_URI = os.getenv(
-    "N8N_QUESTIONS_URI",
-    "http://localhost:5678/webhook/questionGenrator",
-).strip()
 N8N_EXTRACTION_TIMEOUT_SEC = float(os.getenv("N8N_EXTRACTION_TIMEOUT_SEC", "180"))
 
 _DIFFICULTY_ALIASES = {
@@ -38,6 +38,146 @@ _DIFFICULTY_ALIASES = {
     "difficult": "Hard",
     "advanced": "Hard",
 }
+
+_QUESTION_PROMPT_TEMPLATE = """You are conducting a LIVE technical interview right now. The candidate is sitting across from you. You have already read their resume and the job description.
+
+Your goal is to assess:
+- Technical competency
+- Depth of experience
+- Practical implementation knowledge
+- Authenticity of resume claims
+- Match between candidate experience and job requirements
+
+QUESTION DISTRIBUTION
+
+Generate exactly 15 questions.
+
+Questions 1-10:
+- Based primarily on the skills, technologies, frameworks, tools, and responsibilities from the job description.
+- Include a mix of conceptual understanding and practical implementation experience.
+- Pull REAL nouns (specific tools, stack, technologies) from the JD into your questions.
+- Ask questions naturally as a real interviewer would during a technical interview.
+
+Questions 11-15:
+- Based primarily on the candidate's Resume/CV.
+- Focus on specific projects, work experience, achievements, technologies explicitly mentioned in the resume.
+- USE THE ACTUAL PROJECT NAMES, COMPANY NAMES from the resume in your questions.
+- Ask for implementation details, decisions made, challenges faced, tradeoffs, debugging approaches, and ownership.
+- These questions verify whether the candidate genuinely worked on what they claim.
+
+DIFFICULTY DISTRIBUTION
+
+Questions 1-5:
+Difficulty: Low
+- Fundamentals
+- Basic implementation experience
+- Technology familiarity
+
+Questions 6-10:
+Difficulty: Intermediate
+- Practical engineering knowledge
+- Real-world development experience
+- Design choices and tradeoffs
+
+Questions 11-15:
+Difficulty: Hard
+- Deep resume validation
+- Project implementation details
+- Technical decisions
+- Problem-solving experiences
+- Ownership and impact
+
+QUESTION STYLE RULES (for voice/TTS):
+
+- Sound like a real interviewer speaking to a person, not like ChatGPT.
+- Use natural conversational language.
+- Keep questions SHORT (2-4 sentences max) - they will be read by TTS.
+- Do NOT say: "your resume", "the job description", "our company", "this position"
+- Do NOT use stiff openers like: "Explain the concept of...", "What is the difference between...", "Describe..."
+- PREFER natural phrasing: "So...", "Tell me...", "Walk me through...", "How did you...", "I noticed..."
+- One question = one ask. No multi-part laundry lists.
+- No coding exercises.
+- No LeetCode-style problems.
+- No system design questions unless explicitly required in the JD.
+- Prioritize practical experience over theory.
+
+EXAMPLES OF GOOD QUESTIONS:
+- "So you worked with React - how do you typically handle state management?"
+- "In the HRMS project at Infosys, you built authentication - how did you decide between JWT and session-based auth?"
+- "What are React hooks and when do you use them?"
+- "Tell me about a time you had to optimize database queries."
+
+OUTPUT FORMAT
+
+Return ONLY a JSON object using this EXACT structure:
+
+{
+  "questions": [
+    {
+      "id": 1,
+      "difficulty": "Low",
+      "source": "jd",
+      "question": "Your question text here"
+    },
+    {
+      "id": 2,
+      "difficulty": "Low",
+      "source": "jd",
+      "question": "Your question text here"
+    }
+  ]
+}
+
+CRITICAL:
+- Include "id" field for each question (1 through 15)
+- Include "difficulty" field: "Low", "Intermediate", or "Hard"
+- Include "source" field: "jd" or "resume"
+- Include "question" field with the actual question text
+- Do not include explanations
+- Do not include answers
+- Do not include markdown
+- Do not include any text outside the JSON object
+
+TTS PRONUNCIATION RULES:
+
+Avoid acronyms that sound awkward when spoken. Use these alternatives:
+
+Technical Terms:
+- Instead of "VLANs" -> say "virtual LANs" or "V-L-A-Ns" (with hyphens)
+- Instead of "API" -> say "A-P-I" (with hyphens) or just "API endpoint"
+- Instead of "JWT" -> say "J-W-T tokens" or "JSON web tokens"
+- Instead of "SQL" -> say "S-Q-L" or "sequel" (choose one consistently)
+- Instead of "CRUD" -> say "create, read, update, delete operations"
+- Instead of "REST" -> say "REST-ful" or "R-E-S-T"
+- Instead of "DNS" -> say "D-N-S" or "domain name system"
+- Instead of "SSL/TLS" -> say "S-S-L" or "secure connections"
+
+TTS PRONUNCIATION RULES:
+
+Write ALL technical terms, acronyms, and technologies in LOWERCASE so TTS pronounces them correctly:
+- vlans (not VLANs)
+- api (not API)
+- jwt (not JWT)
+- mern (not MERN)
+- tcp/ip (not TCP/IP)
+- dns (not DNS)
+- react, node, docker, aws (all lowercase)
+
+NEVER use underscores (_) and (/) - use spaces instead:
+- "user id" not "user_id"
+- "api key" not "api_key"
+- tcp-ip not tcp/ip
+
+JOB DESCRIPTION:
+{jd_text}
+
+CANDIDATE RESUME:
+{cv_text}
+"""
+
+_QUESTION_ACRONYM_RE = re.compile(
+    r"\b(API|JWT|SQL|CRUD|REST|DNS|SSL|TLS|MERN|TCP/IP|TCP|VLAN|VLANs|AWS)\b"
+)
 
 
 def _timeout_sec(timeout_sec: Optional[float] = None) -> float:
@@ -55,6 +195,15 @@ def _normalize_source(raw: str) -> str:
     if "resume" in lower or "cv" in lower:
         return "resume"
     return "other"
+
+
+def _sanitize_question_for_tts(text: str) -> str:
+    out = (text or "").strip()
+    out = out.replace("_", " ")
+    out = out.replace("/", "-")
+    out = re.sub(r"\s+", " ", out).strip()
+    out = _QUESTION_ACRONYM_RE.sub(lambda m: m.group(1).lower(), out)
+    return out
 
 
 def _pick_string(obj: Dict[str, Any], keys: List[str]) -> Optional[str]:
@@ -141,10 +290,50 @@ def _parse_questions(raw: Any) -> Optional[List[Dict[str, str]]]:
                     str(item.get("difficulty") or item.get("level") or "Low")
                 ),
                 "source": _normalize_source(str(item.get("source") or item.get("origin") or "jd")),
-                "question": text,
+                "question": _sanitize_question_for_tts(text),
             }
         )
     return questions or None
+
+
+def _coerce_llm_json_object(raw: str) -> Dict[str, Any]:
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else {}
+    except json.JSONDecodeError:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                obj = json.loads(text[start : end + 1])
+                return obj if isinstance(obj, dict) else {}
+            except Exception:
+                return {}
+    return {}
+
+
+def _is_valid_generated_distribution(questions: List[Dict[str, str]]) -> bool:
+    if len(questions) != 15:
+        return False
+    for i, q in enumerate(questions, start=1):
+        if str(q.get("id")) != str(i):
+            return False
+        difficulty = q.get("difficulty")
+        source = q.get("source")
+        if i <= 5 and difficulty != "Low":
+            return False
+        if 6 <= i <= 10 and difficulty != "Intermediate":
+            return False
+        if i >= 11 and difficulty != "Hard":
+            return False
+        if i <= 10 and source != "jd":
+            return False
+        if i >= 11 and source != "resume":
+            return False
+    return True
 
 
 def _build_jd_text(structured: Dict[str, Any]) -> str:
@@ -290,20 +479,69 @@ def generate_questions(
     language_mode: Optional[str] = None,
     timeout_sec: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """POST form `jdText` + `cvText` to N8N_QUESTIONS_URI and return normalized questions."""
+    """Generate questions locally (Groq) using strict JSON prompt + TTS-safe normalization."""
     jd_text = (jd_text or "").strip()
     cv_text = (cv_text or "").strip()
     if not jd_text or not cv_text:
         raise ValueError("Both jdText and cvText are required to generate questions")
+    _ = candidate_name, language_mode
 
-    data: Dict[str, str] = {"jdText": jd_text, "cvText": cv_text}
-    if candidate_name and candidate_name.strip():
-        data["candidate_name"] = candidate_name.strip()
-    if language_mode and language_mode.strip():
-        data["language_mode"] = language_mode.strip()
+    try:
+        import config as app_config
+        from groq import Groq
+    except Exception as ex:
+        logger.error("[QUESTION-GEN] Groq import failed: %s", ex)
+        raise ValueError("Local question generation is unavailable") from ex
 
-    logger.info("[N8N] POST %s (generate questions)", N8N_QUESTIONS_URI)
-    payload = _post_n8n(N8N_QUESTIONS_URI, data=data, timeout_sec=timeout_sec)
-    parsed = parse_questions_response(payload)
-    logger.info("[N8N] parsed questions=%s", len(parsed.get("questions") or []))
-    return parsed
+    api_key = getattr(app_config, "GROQ_API_KEY", "")
+    if not api_key:
+        raise ValueError("GROQ_API_KEY is not configured")
+
+    model = getattr(app_config, "GROQ_EVALUATOR_MODEL", "llama-3.1-8b-instant")
+    # Use direct token replacement so literal JSON braces in the prompt
+    # are preserved and not parsed as str.format placeholders.
+    prompt = (
+        _QUESTION_PROMPT_TEMPLATE
+        .replace("{jd_text}", jd_text)
+        .replace("{cv_text}", cv_text)
+    )
+    client = Groq(api_key=api_key)
+    req_timeout = int(timeout_sec or 90)
+
+    last_err = "invalid question payload"
+    for attempt in range(1, 3):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Return only strict valid JSON with key 'questions'. "
+                            "No markdown. No explanation."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.35,
+                max_tokens=2400,
+                timeout=req_timeout,
+                response_format={"type": "json_object"},
+            )
+            raw = resp.choices[0].message.content or ""
+            payload = _coerce_llm_json_object(raw)
+            questions = _parse_questions(payload.get("questions")) or []
+            if _is_valid_generated_distribution(questions):
+                logger.info("[QUESTION-GEN] generated questions=%s", len(questions))
+                return {"questions": questions}
+            last_err = "shape/distribution mismatch"
+            logger.warning(
+                "[QUESTION-GEN] invalid payload attempt=%s count=%s",
+                attempt,
+                len(questions),
+            )
+        except Exception as ex:
+            last_err = str(ex)
+            logger.warning("[QUESTION-GEN] failed attempt=%s: %s", attempt, ex)
+
+    raise ValueError(f"Question generation failed: {last_err}")

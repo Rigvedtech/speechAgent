@@ -369,6 +369,9 @@ CORS_ORIGINS = [
     for o in _env_str("CORS_ORIGINS", "").split(",")
     if o.strip()
 ]
+# Public frontend origin for candidate coding links in wrap-up TTS / emails.
+# Falls back to the first CORS_ORIGINS entry when empty.
+FRONTEND_BASE_URL = _env_str("FRONTEND_BASE_URL", "")
 
 # Master key for encrypting per-org ATS API keys in organization.ats_api_key_encrypted.
 # Prefer a Fernet key (python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
@@ -378,7 +381,20 @@ ATS_SECRET_ENCRYPTION_KEY = _env_str("ATS_SECRET_ENCRYPTION_KEY", "")
 # --- Document uploads (CV/JD files on disk + documents table) ---
 # Relative paths resolve under backend/; absolute paths used as-is.
 DOCUMENT_UPLOAD_DIR = _env_str("DOCUMENT_UPLOAD_DIR", "uploads")
-DOCUMENT_MAX_BYTES = _env_int("DOCUMENT_MAX_BYTES", 15 * 1024 * 1024)  # 15 MB
+DOCUMENT_MAX_BYTES = _env_int("DOCUMENT_MAX_BYTES", 20 * 1024 * 1024)  # 20 MB
+
+# --- Bulk upload (Phase 1) ---
+# Hard cap: max files per POST /api/jobs/{id}/upload-cvs request.
+UPLOAD_MAX_FILES_PER_BATCH = _env_int("UPLOAD_MAX_FILES_PER_BATCH", 50)
+
+# --- Document OCR (scanned PDF pages, images, embedded DOCX scans) ---
+# auto = PaddleOCR when installed, otherwise Tesseract. Paddle is intentionally
+# optional because its Windows wheels are currently incompatible with NumPy 2.x.
+DOCUMENT_OCR_ENGINE = _env_str("DOCUMENT_OCR_ENGINE", "auto")
+DOCUMENT_OCR_LANGUAGES = _env_str("DOCUMENT_OCR_LANGUAGES", "eng")
+DOCUMENT_OCR_PDF_DPI = _env_int("DOCUMENT_OCR_PDF_DPI", 250)
+# Optional absolute path to tesseract.exe when it is not available on PATH.
+TESSERACT_CMD = _env_str("TESSERACT_CMD", "")
 
 # --- Camera integrity (interview + local test) ---
 # false = current interview flow (no Recall face tracking / camera presence phrases)
@@ -387,26 +403,40 @@ CAMERA_INTEGRITY_ENABLED = _env_bool("CAMERA_INTEGRITY_ENABLED", False)
 CAMERA_GAZE_MODE = _env_str("CAMERA_GAZE_MODE", "interview")
 CAMERA_GAZE_DEBUG = _env_bool("CAMERA_GAZE_DEBUG", True)
 CAMERA_WARN_TTS_ENABLED = _env_bool("CAMERA_WARN_TTS_ENABLED", True)
-CAMERA_WARN_AFTER_SEC = _env_float("CAMERA_WARN_AFTER_SEC", 5.0)
+CAMERA_WARN_AFTER_SEC = _env_float("CAMERA_WARN_AFTER_SEC", 2.0)
 # Live interview: two faces must persist this long before TTS warn
 CAMERA_WARN_AFTER_MULTI_FACE_SEC = _env_float("CAMERA_WARN_AFTER_MULTI_FACE_SEC", 5.0)
-# Off-screen (away / down) hold before warn — longer than thinking glances
-CAMERA_WARN_AFTER_AWAY_SEC = _env_float("CAMERA_WARN_AFTER_AWAY_SEC", 12.0)
-CAMERA_WARN_COOLDOWN_SEC = _env_float("CAMERA_WARN_COOLDOWN_SEC", 15.0)
+# Desk / notes / side glance — short dwell then cooldown
+CAMERA_WARN_AFTER_DOWN_SEC = _env_float("CAMERA_WARN_AFTER_DOWN_SEC", 2.0)
+# Left / right second-screen risk
+CAMERA_WARN_AFTER_SIDE_SEC = _env_float("CAMERA_WARN_AFTER_SIDE_SEC", 2.0)
+# Hard head turn (looking_away) — default matches side
+CAMERA_WARN_AFTER_AWAY_SEC = _env_float("CAMERA_WARN_AFTER_AWAY_SEC", 2.0)
+# Gaze warn cooldown (down/side/away/no_face) — multi_face bypasses this
+CAMERA_WARN_COOLDOWN_SEC = _env_float("CAMERA_WARN_COOLDOWN_SEC", 8.0)
+# Min gap between multi_face warns (still requires 5s continuous faces)
+CAMERA_WARN_COOLDOWN_MULTI_FACE_SEC = _env_float(
+    "CAMERA_WARN_COOLDOWN_MULTI_FACE_SEC", 5.0
+)
 # Live path analyzes ~2 fps — fewer consecutive hits than local 30fps test
 CAMERA_WARN_HOLD_FRAMES_LIVE = _env_int("CAMERA_WARN_HOLD_FRAMES_LIVE", 2)
 # Brief drop in multi-face / no_face before clearing the risk timer
-CAMERA_WARN_RISK_GRACE_SEC = _env_float("CAMERA_WARN_RISK_GRACE_SEC", 2.0)
-# false = ignore left/right iris for TTS (thinking glances); looking_up never warns
-CAMERA_WARN_INCLUDE_SIDE_LOOK = _env_bool("CAMERA_WARN_INCLUDE_SIDE_LOOK", False)
+CAMERA_WARN_RISK_GRACE_SEC = _env_float("CAMERA_WARN_RISK_GRACE_SEC", 1.5)
+# true = warn on sustained left/right (second screen); looking_up never warns
+CAMERA_WARN_INCLUDE_SIDE_LOOK = _env_bool("CAMERA_WARN_INCLUDE_SIDE_LOOK", True)
 # looking_down = hard head nod (desk/phone); mild screen look stays center
 CAMERA_WARN_ON_LOOKING_DOWN = _env_bool("CAMERA_WARN_ON_LOOKING_DOWN", True)
 CAMERA_WARN_ON_NO_FACE = _env_bool("CAMERA_WARN_ON_NO_FACE", True)
 CAMERA_WARN_ON_MULTI_FACE = _env_bool("CAMERA_WARN_ON_MULTI_FACE", True)
 CAMERA_WARN_ON_LOOKING_AWAY = _env_bool("CAMERA_WARN_ON_LOOKING_AWAY", True)
-# true = skip away/down warn while lips move (answering / thinking aloud)
+# true = skip away/down warn while lips move (answering / thinking aloud).
+# Prefer turn gating (AI asking vs candidate answering) — set false for production integrity.
 CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING = _env_bool(
-    "CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING", True
+    "CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING", False
+)
+# Live interviews: accumulate camera warns only on candidate answer turn
+CAMERA_WARN_ONLY_ON_CANDIDATE_TURN = _env_bool(
+    "CAMERA_WARN_ONLY_ON_CANDIDATE_TURN", True
 )
 # Extra face must be this fraction of primary area to count as multi_face
 CAMERA_WARN_MULTI_FACE_MIN_AREA_RATIO = _env_float(

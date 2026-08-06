@@ -24,6 +24,8 @@ interface EntityPickerProps {
   /** Optional right-side control (e.g. From ATS) */
   action?: ReactNode
   helperText?: string
+  /** When false, hide "Create new…" — selection-only mode. Default true. */
+  allowCreate?: boolean
 }
 
 export function EntityPicker({
@@ -37,7 +39,10 @@ export function EntityPicker({
   onClear,
   action,
   helperText = 'Choose a saved record, or create a new one below.',
+  allowCreate = true,
 }: EntityPickerProps) {
+  const selectValue = value ?? (allowCreate ? NEW_VALUE : undefined)
+
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2">
@@ -58,7 +63,7 @@ export function EntityPicker({
         </div>
       </div>
       <Select
-        value={value ?? NEW_VALUE}
+        value={selectValue}
         disabled={disabled || loading}
         onValueChange={(v) => onChange(v === NEW_VALUE ? null : v)}
       >
@@ -69,9 +74,16 @@ export function EntityPicker({
           position="popper"
           className="z-[80] max-h-64 w-[var(--radix-select-trigger-width)]"
         >
-          <SelectItem value={NEW_VALUE} className="text-muted-foreground">
-            Create new…
-          </SelectItem>
+          {allowCreate ? (
+            <SelectItem value={NEW_VALUE} className="text-muted-foreground">
+              Create new…
+            </SelectItem>
+          ) : null}
+          {options.length === 0 && !allowCreate ? (
+            <SelectItem value="__empty__" disabled className="text-muted-foreground">
+              No saved records yet
+            </SelectItem>
+          ) : null}
           {options.map((opt) => (
             <SelectItem key={opt.id} value={opt.id} className="py-2 pr-3">
               <span className="block max-w-full truncate">

@@ -165,7 +165,35 @@ class CandidateCameraTracker:
         self._risk_started_at = 0.0
         self._risk_last_hit_at = 0.0
         self._last_warn_at = 0.0
+        self._last_gaze_warn_at = 0.0
+        self._last_multi_warn_at = 0.0
         self._pending_warn_kind: Optional[str] = None
+        # True only on candidate answer turn (not while AI is asking).
+        self._candidate_turn = True
+
+    def set_candidate_turn(self, active: bool) -> None:
+        """
+        AI asking → active=False (no gaze/integrity warn accumulation).
+        Candidate answer turn → active=True (analyze + warn).
+        """
+        active = bool(active)
+        with self._lock:
+            if self._candidate_turn == active:
+                return
+            self._candidate_turn = active
+            # Reset dwell so looks during AI question don't carry into answer turn
+            self._clear_risk()
+            self._pending_warn_kind = None
+            logger.info(
+                "[CAMERA] Turn=%s — integrity warns %s",
+                "candidate" if active else "ai",
+                "ON" if active else "OFF",
+            )
+
+    @property
+    def candidate_turn(self) -> bool:
+        with self._lock:
+            return self._candidate_turn
 
     @property
     def armed(self) -> bool:
@@ -419,16 +447,34 @@ class CandidateCameraTracker:
         return False
 
     @staticmethod
-    def _is_off_screen_kind(kind: Optional[str]) -> bool:
-        return kind in ("looking_away", "looking_down")
+    def _is_down_kind(kind: Optional[str]) -> bool:
+        return kind == "looking_down"
+
+    @staticmethod
+    def _is_side_kind(kind: Optional[str]) -> bool:
+        return kind in ("looking_away", "looking_side")
+
+    @staticmethod
+    def _is_gaze_kind(kind: Optional[str]) -> bool:
+        """Down / side / away / no_face share the gaze cooldown (not multi_face)."""
+        return kind in (
+            "looking_down",
+            "looking_side",
+            "looking_away",
+            "no_face",
+        )
+
+    @staticmethod
+    def _is_multi_kind(kind: Optional[str]) -> bool:
+        return kind == "multi_face"
 
     def _classify_risk(self, result: FrameAnalysisResult) -> Optional[str]:
         """
-        Priority: multi_face > no_face > off-screen (away/down[/side]).
+        Priority: multi_face > no_face > looking_down > looking_side / looking_away.
 
-        Thinking glances: looking_up never warns. Left/right only if
-        CAMERA_WARN_INCLUDE_SIDE_LOOK. Strong looking_away / looking_down still warn
-        after CAMERA_WARN_AFTER_AWAY_SEC (unless lips moving and ignore flag is on).
+        looking_up never warns (thinking / remembering).
+        Lip motion does NOT suppress gaze risk — turn gating is done via
+        set_candidate_turn (AI asking vs candidate answering).
         """
         if self._significant_extra_faces(result):
             return "multi_face"
@@ -438,35 +484,45 @@ class CandidateCameraTracker:
             return None
         primary = result.faces[0]
         gaze = primary.gaze
-        speaking = primary.speaking == SpeakingState.SPEAKING
-        ignore_while_lips = bool(config.CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING)
 
         # Eye-up while thinking — never treat as integrity risk
         if gaze == GazeDirection.LOOKING_UP:
             return None
 
         if config.CAMERA_WARN_ON_LOOKING_DOWN and gaze == GazeDirection.LOOKING_DOWN:
-            if not (ignore_while_lips and speaking):
-                return "looking_down"
+            return "looking_down"
 
         if config.CAMERA_WARN_ON_LOOKING_AWAY and gaze == GazeDirection.LOOKING_AWAY:
-            if not (ignore_while_lips and speaking):
-                return "looking_away"
+            return "looking_away"
 
-        # Optional: mild left/right iris (off by default for live interviews)
         if config.CAMERA_WARN_INCLUDE_SIDE_LOOK and gaze in (
             GazeDirection.LOOKING_LEFT,
             GazeDirection.LOOKING_RIGHT,
         ):
-            if not (ignore_while_lips and speaking):
-                return "looking_away"
+            return "looking_side"
 
         return None
 
     def _threshold_for(self, kind: str) -> float:
         if kind == "multi_face":
             return float(config.CAMERA_WARN_AFTER_MULTI_FACE_SEC)
-        if kind in ("looking_away", "looking_down"):
+        if kind == "looking_down":
+            return float(
+                getattr(
+                    config,
+                    "CAMERA_WARN_AFTER_DOWN_SEC",
+                    config.CAMERA_WARN_AFTER_AWAY_SEC,
+                )
+            )
+        if kind == "looking_side":
+            return float(
+                getattr(
+                    config,
+                    "CAMERA_WARN_AFTER_SIDE_SEC",
+                    config.CAMERA_WARN_AFTER_SEC,
+                )
+            )
+        if kind == "looking_away":
             return float(config.CAMERA_WARN_AFTER_AWAY_SEC)
         return float(config.CAMERA_WARN_AFTER_SEC)
 
@@ -475,8 +531,10 @@ class CandidateCameraTracker:
             return False
         if a == b:
             return True
-        # left/right/away/down share one sticky off-screen timer
-        if self._is_off_screen_kind(a) and self._is_off_screen_kind(b):
+        # Side glances share one timer; down is separate (different dwell)
+        if self._is_side_kind(a) and self._is_side_kind(b):
+            return True
+        if self._is_down_kind(a) and self._is_down_kind(b):
             return True
         return False
 
@@ -487,28 +545,60 @@ class CandidateCameraTracker:
         self._risk_started_at = 0.0
         self._risk_last_hit_at = 0.0
 
+    def _cooldown_ok(self, kind: str, now: float) -> bool:
+        """
+        Gaze warns use CAMERA_WARN_COOLDOWN_SEC.
+        multi_face bypasses gaze cooldown; uses its own shorter gap instead.
+        """
+        if self._is_multi_kind(kind):
+            cool = float(
+                getattr(config, "CAMERA_WARN_COOLDOWN_MULTI_FACE_SEC", 5.0)
+            )
+            return (now - self._last_multi_warn_at) >= cool
+        cool = float(config.CAMERA_WARN_COOLDOWN_SEC)
+        return (now - self._last_gaze_warn_at) >= cool
+
     def _maybe_emit_warn(self, kind: str, now: float, held: float) -> None:
-        cooldown = float(config.CAMERA_WARN_COOLDOWN_SEC)
         threshold = self._threshold_for(kind)
         if held < threshold:
             return
-        if (now - self._last_warn_at) < cooldown:
+        if not self._cooldown_ok(kind, now):
             return
+        # Same kind already queued
         if self._pending_warn_kind == kind:
             return
+        # multi_face may override a pending gaze warn; other kinds wait
+        if self._pending_warn_kind is not None and not self._is_multi_kind(kind):
+            return
+
         self._pending_warn_kind = kind
         self._last_warn_at = now
+        if self._is_multi_kind(kind):
+            self._last_multi_warn_at = now
+        else:
+            self._last_gaze_warn_at = now
         logger.info(
-            "[CAMERA] Warn ready kind=%s held=%.1fs threshold=%.1fs id=%s",
+            "[CAMERA] Warn ready kind=%s held=%.1fs threshold=%.1fs id=%s "
+            "(gaze_cd=%.0fs multi_cd=%.0fs)",
             kind,
             held,
             threshold,
             self._locked_id,
+            float(config.CAMERA_WARN_COOLDOWN_SEC),
+            float(getattr(config, "CAMERA_WARN_COOLDOWN_MULTI_FACE_SEC", 5.0)),
         )
 
     def _update_integrity_risk(self, result: FrameAnalysisResult, now: float) -> None:
         """Accumulate sustained risk with sticky off-screen + brief grace gaps."""
         if not config.CAMERA_WARN_TTS_ENABLED:
+            self._clear_risk()
+            return
+
+        # AI asking question — looking away is OK; do not accumulate warn timers
+        if (
+            getattr(config, "CAMERA_WARN_ONLY_ON_CANDIDATE_TURN", True)
+            and not self._candidate_turn
+        ):
             self._clear_risk()
             return
 

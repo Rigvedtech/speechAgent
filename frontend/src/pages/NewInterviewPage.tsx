@@ -1,11 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useForm, FormProvider } from 'react-hook-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Download, Loader2, Sparkles } from 'lucide-react'
 import {
-  createCandidate,
-  createJobPosting,
   getAtsSettings,
   importAtsCandidate,
   importAtsJob,
@@ -17,11 +15,7 @@ import {
 import { ApiError } from '@/lib/api-client'
 import { formatApiError } from '@/lib/error-messages'
 import { queryKeys } from '@/lib/query-keys'
-import {
-  extractCvFromFile,
-  extractJdFromFile,
-  generateQuestionsFromText,
-} from '@/lib/n8n'
+import { generateQuestionsFromText } from '@/lib/n8n'
 import { upsertSession } from '@/lib/session-store'
 import {
   clearInterviewDraft,
@@ -34,16 +28,15 @@ import { isTeamsLauncherUrl, MEETING_URL_HINT } from '@/lib/meeting-url'
 import {
   checkBankCoverage,
   formatCandidateDisplayName,
-  isStep1Ready,
+  isCandidateSelectReady,
+  isJobSelectReady,
   isStep1bReady,
-  isStep2Ready,
   isStep2bReady,
   isStep3Ready,
   isStep4Ready,
   joinFormSchema,
   splitFullName,
   toApiQuestions,
-  type DocumentInputMode,
   type JoinFormValues,
 } from '@/schemas/join-form.schema'
 import type {
@@ -54,16 +47,17 @@ import type {
   JobPosting,
 } from '@/types/api'
 import {
-  asCvStructured,
-  asJdStructured,
   type CvStructured,
   type JdStructured,
 } from '@/types/extraction'
 import { JoinWizardSteps } from '@/components/interview/JoinWizardSteps'
 import { QuestionBankEditor } from '@/components/interview/QuestionBankEditor'
+import {
+  CodingRoundPanel,
+  toInterviewCodingConfig,
+  type CodingRoundState,
+} from '@/components/interview/CodingRoundPanel'
 import { FormSectionCard } from '@/components/interview/FormSectionCard'
-import { CompactFileUpload } from '@/components/interview/CompactFileUpload'
-import { InputModeToggle } from '@/components/interview/InputModeToggle'
 import { EntityPicker } from '@/components/interview/EntityPicker'
 import { AtsImportDialog } from '@/components/interview/AtsImportDialog'
 import { CvExtractionReview } from '@/components/interview/CvExtractionReview'
@@ -121,22 +115,12 @@ function resolveInitialStep(
   meta: ReturnType<typeof loadInterviewDraftMeta>,
 ): number {
   if (!savedStep || savedStep < 1 || savedStep > TOTAL_STEPS) return 1
-  // Job is first: if past job entry without JD data, reset to job step
-  if (
-    savedStep >= 2 &&
-    !meta?.jdStructured &&
-    !meta?.jdFileName &&
-    meta?.jdInputMode !== 'manual'
-  ) {
+  // Job first: need a selected job (or structured JD) before leaving step 1/2
+  if (savedStep >= 2 && !meta?.jobPostingId && !meta?.jdStructured) {
     return 1
   }
-  // Candidate is second: if past candidate entry without CV data, reset to candidate step
-  if (
-    savedStep >= 4 &&
-    !meta?.cvStructured &&
-    !meta?.cvFileName &&
-    meta?.cvInputMode !== 'manual'
-  ) {
+  // Candidate second: need a selected candidate before leaving step 3/4
+  if (savedStep >= 4 && !meta?.candidateId && !meta?.cvStructured) {
     return 3
   }
   return savedStep
@@ -149,15 +133,16 @@ export function NewInterviewPage() {
   const savedMeta = loadInterviewDraftMeta()
 
   const [step, setStep] = useState(() => resolveInitialStep(savedMeta?.wizardStep, savedMeta))
+  const [codingRound, setCodingRound] = useState<CodingRoundState>({
+    enabled: false,
+    domainId: null,
+    defaultLanguage: 'python',
+    assignedTaskId: null,
+    timeLimitMin: 30,
+    taskIds: [],
+    taskTimes: {},
+  })
   const [error, setError] = useState<string | null>(null)
-  const [jdFile, setJdFile] = useState<File | null>(null)
-  const [cvFile, setCvFile] = useState<File | null>(null)
-  const [cvInputMode, setCvInputMode] = useState<DocumentInputMode>(
-    savedMeta?.cvInputMode ?? 'upload',
-  )
-  const [jdInputMode, setJdInputMode] = useState<DocumentInputMode>(
-    savedMeta?.jdInputMode ?? 'upload',
-  )
   const [cvStructured, setCvStructured] = useState<CvStructured | null>(
     savedMeta?.cvStructured ?? null,
   )
@@ -189,10 +174,16 @@ export function NewInterviewPage() {
   } | null>(null)
   const [atsImportOpen, setAtsImportOpen] = useState(false)
   const [atsImportMode, setAtsImportMode] = useState<'candidate' | 'job'>('job')
+  const selectedJobId = jobPostingId ?? null
 
   const candidatesQuery = useQuery({
-    queryKey: queryKeys.candidates,
-    queryFn: () => listCandidates(),
+    queryKey: queryKeys.candidatesByJob(selectedJobId),
+    queryFn: () => (
+      selectedJobId
+        ? listCandidates({ jobPostingId: selectedJobId })
+        : Promise.resolve([])
+    ),
+    enabled: Boolean(selectedJobId),
   })
   const jobsQuery = useQuery({
     queryKey: queryKeys.jobPostings,
@@ -226,14 +217,12 @@ export function NewInterviewPage() {
 
   useEffect(() => {
     saveInterviewDraftMeta({
-      cvFileName: cvFile?.name ?? null,
-      jdFileName: jdFile?.name ?? null,
+      cvFileName: null,
+      jdFileName: null,
       wizardStep: step,
       cvStructured,
       jdStructured,
       questionsGenerated,
-      cvInputMode,
-      jdInputMode,
       candidateId,
       jobPostingId,
       extractionId,
@@ -243,14 +232,10 @@ export function NewInterviewPage() {
       pendingAtsCandidateParentId,
     })
   }, [
-    cvFile,
-    jdFile,
     step,
     cvStructured,
     jdStructured,
     questionsGenerated,
-    cvInputMode,
-    jdInputMode,
     candidateId,
     jobPostingId,
     extractionId,
@@ -271,20 +256,13 @@ export function NewInterviewPage() {
       setPendingAtsCandidateExternalId(null)
       setPendingAtsCandidateParentId(null)
       void queryClient.invalidateQueries({ queryKey: queryKeys.candidates })
+      if (imported.cv_text?.trim()) {
+        form.setValue('cvText', imported.cv_text, { shouldValidate: true })
+        setCvStructured({ name: imported.full_name, raw_text: imported.cv_text })
+      }
       return imported.id
     }
-    const first = form.getValues('candidate_first_name').trim()
-    const last = form.getValues('candidate_last_name').trim()
-    const fullName = formatCandidateDisplayName(first, last)
-    if (fullName.length < 2) return null
-    const created = await createCandidate({
-      full_name: fullName,
-      cv_text: form.getValues('cvText').trim() || undefined,
-      source: cvInputMode === 'upload' ? 'upload' : 'manual',
-    })
-    setCandidateId(created.id)
-    void queryClient.invalidateQueries({ queryKey: queryKeys.candidates })
-    return created.id
+    return null
   }
 
   const ensureJobPostingId = async (): Promise<string | null> => {
@@ -295,40 +273,43 @@ export function NewInterviewPage() {
       setAtsJobExternalId(imported.external_ats_id ?? pendingAtsJobExternalId)
       setPendingAtsJobExternalId(null)
       form.setValue('position_name', imported.job_title, { shouldValidate: true })
+      if (imported.jd_text?.trim()) {
+        form.setValue('jdText', imported.jd_text, { shouldValidate: true })
+        setJdStructured({ jd_summary: imported.jd_text })
+      }
       void queryClient.invalidateQueries({ queryKey: queryKeys.jobPostings })
       return imported.id
     }
-    const title = form.getValues('position_name').trim()
-    if (title.length < 2) return null
-    const jd = form.getValues('jdText').trim()
-    const created = await createJobPosting({
-      job_title: title,
-      jd_text: jd.length >= 100 ? jd : undefined,
-      source: jdInputMode === 'upload' ? 'upload' : 'manual',
-    })
-    setJobPostingId(created.id)
-    if (created.job_title !== title) {
-      form.setValue('position_name', created.job_title, { shouldValidate: true })
-    }
-    void queryClient.invalidateQueries({ queryKey: queryKeys.jobPostings })
-    return created.id
+    return null
   }
 
-  const step1Ready = isStep1Ready(values, cvFile, cvInputMode)
+  const jobSelectReady = isJobSelectReady(jobPostingId ?? pendingAtsJobExternalId, values)
+  const candidateSelectReady = isCandidateSelectReady(
+    candidateId ?? pendingAtsCandidateExternalId,
+    values,
+  )
   const step1bReady = isStep1bReady(values)
-  const step2Ready = isStep2Ready(values, jdFile, jdInputMode)
   const step2bReady = isStep2bReady(values)
   const step3Ready = isStep3Ready(values)
   const step4Ready = isStep4Ready(values.meeting_url ?? '')
 
   const proceedEnabled = useMemo(() => {
-    if (step === 1) return step2Ready
+    if (step === 1) return jobSelectReady
     if (step === 2) return step2bReady
-    if (step === 3) return step1Ready
+    if (step === 3) return candidateSelectReady
     if (step === 4) return step1bReady
     if (step === 5) return questionsGenerated ? step3Ready : true
     return step4Ready
-  }, [step, step1Ready, step1bReady, step2Ready, step2bReady, step3Ready, step4Ready, questionsGenerated])
+  }, [
+    step,
+    jobSelectReady,
+    candidateSelectReady,
+    step1bReady,
+    step2bReady,
+    step3Ready,
+    step4Ready,
+    questionsGenerated,
+  ])
 
   const questionCount = values.questions?.filter((q) => q.question.trim()).length ?? 0
 
@@ -373,8 +354,8 @@ export function NewInterviewPage() {
 
     const [cid, jid] = await Promise.all([ensureCandidateId(), ensureJobPostingId()])
     if (!cid || !jid) {
-      setError('Select or create a candidate and job before scheduling or sending to lobby.')
-      setStep(1)
+      setError('Select a saved candidate and job from the database before scheduling.')
+      setStep(!jid ? 1 : 3)
       return null
     }
     return {
@@ -432,20 +413,6 @@ export function NewInterviewPage() {
     },
   })
 
-  const extractCvMutation = useMutation({
-    mutationFn: async () => {
-      if (!cvFile) throw new Error('Upload a resume file')
-      return extractCvFromFile(cvFile)
-    },
-  })
-
-  const extractJdMutation = useMutation({
-    mutationFn: async () => {
-      if (!jdFile) throw new Error('Upload a job description file')
-      return extractJdFromFile(jdFile)
-    },
-  })
-
   const questionsMutation = useMutation({
     mutationFn: async () => {
       return generateQuestionsFromText(form.getValues('jdText'), form.getValues('cvText'), {
@@ -456,33 +423,6 @@ export function NewInterviewPage() {
     },
   })
 
-  const applyCvResult = (result: Awaited<ReturnType<typeof extractCvFromFile>>) => {
-    if (result.cvText) {
-      form.setValue('cvText', result.cvText, { shouldValidate: true })
-    }
-    if (result.extractionId) setExtractionId(result.extractionId)
-    const structured = asCvStructured(result.cvStructured) ?? {
-      name: result.candidateName,
-      raw_text: result.cvText,
-    }
-    setCvStructured(structured)
-    if (result.candidateName && !form.getValues('candidate_first_name').trim()) {
-      const { first, last } = splitFullName(result.candidateName)
-      form.setValue('candidate_first_name', first, { shouldValidate: true })
-      if (last) {
-        form.setValue('candidate_last_name', last, { shouldValidate: true })
-      }
-    }
-  }
-
-  const applyJdResult = (result: Awaited<ReturnType<typeof extractJdFromFile>>) => {
-    if (result.jdText) {
-      form.setValue('jdText', result.jdText, { shouldValidate: true })
-    }
-    if (result.extractionId) setExtractionId(result.extractionId)
-    setJdStructured(asJdStructured(result.jdStructured) ?? { jd_summary: result.jdText })
-  }
-
   const applyQuestionsResult = (
     result: Awaited<ReturnType<typeof generateQuestionsFromText>>,
   ) => {
@@ -492,7 +432,7 @@ export function NewInterviewPage() {
       setQuestionsGenerated(true)
       return true
     }
-    setError('n8n responded but no questions were found. Check the workflow output.')
+    setError('Question generation returned no questions. Try again.')
     return false
   }
 
@@ -503,12 +443,9 @@ export function NewInterviewPage() {
     const { first, last } = splitFullName(row.full_name)
     form.setValue('candidate_first_name', first, { shouldValidate: true })
     form.setValue('candidate_last_name', last, { shouldValidate: true })
-    if (row.cv_text?.trim()) {
-      form.setValue('cvText', row.cv_text, { shouldValidate: true })
-      setCvInputMode('manual')
-      setCvFile(null)
-      setCvStructured({ name: row.full_name, raw_text: row.cv_text })
-    }
+    const cv = row.cv_text?.trim() || ''
+    form.setValue('cvText', cv, { shouldValidate: true })
+    setCvStructured(cv ? { name: row.full_name, raw_text: cv } : null)
   }
 
   const applyJobRow = (row: JobPosting) => {
@@ -516,15 +453,14 @@ export function NewInterviewPage() {
     setPendingAtsJobExternalId(null)
     setAtsJobExternalId(row.external_ats_id ?? null)
     form.setValue('position_name', row.job_title, { shouldValidate: true })
-    if (row.jd_text?.trim()) {
-      form.setValue('jdText', row.jd_text, { shouldValidate: true })
-      setJdInputMode('manual')
-      setJdFile(null)
-      setJdStructured({ jd_summary: row.jd_text })
-    }
+    const jd = row.jd_text?.trim() || ''
+    form.setValue('jdText', jd, { shouldValidate: true })
+    setJdStructured(jd ? { jd_summary: jd } : null)
   }
 
   const applyAtsJobDetail = (detail: AtsJobDetail) => {
+    const nextJobId = detail.already_imported ? detail.local_job_posting_id ?? null : null
+    if (nextJobId !== jobPostingId) clearCandidateSelection()
     setAtsJobExternalId(detail.external_id)
     if (detail.already_imported && detail.local_job_posting_id) {
       setJobPostingId(detail.local_job_posting_id)
@@ -535,12 +471,8 @@ export function NewInterviewPage() {
     }
     form.setValue('position_name', detail.job_title, { shouldValidate: true })
     const jd = detail.jd_text?.trim() || detail.description?.trim() || ''
-    if (jd) {
-      form.setValue('jdText', jd, { shouldValidate: true })
-      setJdInputMode('manual')
-      setJdFile(null)
-      setJdStructured({ jd_summary: jd })
-    }
+    form.setValue('jdText', jd, { shouldValidate: true })
+    setJdStructured(jd ? { jd_summary: jd } : null)
   }
 
   const applyAtsCandidateDetail = (detail: AtsCandidateDetail) => {
@@ -557,13 +489,20 @@ export function NewInterviewPage() {
     const { first, last } = splitFullName(detail.full_name)
     form.setValue('candidate_first_name', first, { shouldValidate: true })
     form.setValue('candidate_last_name', last, { shouldValidate: true })
-    if (detail.cv_text?.trim()) {
-      form.setValue('cvText', detail.cv_text, { shouldValidate: true })
-      setCvInputMode('manual')
-      setCvFile(null)
-      setCvStructured({ name: detail.full_name, raw_text: detail.cv_text })
-    }
+    const cv = detail.cv_text?.trim() || ''
+    form.setValue('cvText', cv, { shouldValidate: true })
+    setCvStructured(cv ? { name: detail.full_name, raw_text: cv } : null)
   }
+
+  const clearCandidateSelection = useCallback(() => {
+    setCandidateId(null)
+    setPendingAtsCandidateExternalId(null)
+    setPendingAtsCandidateParentId(null)
+    form.setValue('candidate_first_name', '', { shouldValidate: true })
+    form.setValue('candidate_last_name', '', { shouldValidate: true })
+    form.setValue('cvText', '', { shouldValidate: true })
+    setCvStructured(null)
+  }, [form])
 
   const selectCandidate = (id: string | null) => {
     setCandidateId(id)
@@ -576,6 +515,8 @@ export function NewInterviewPage() {
   }
 
   const selectJob = (id: string | null) => {
+    const changed = id !== jobPostingId
+    if (changed) clearCandidateSelection()
     setJobPostingId(id)
     setPendingAtsJobExternalId(null)
     if (!id) {
@@ -587,18 +528,48 @@ export function NewInterviewPage() {
     applyJobRow(row)
   }
 
+  useEffect(() => {
+    if (!candidateId || pendingAtsCandidateExternalId) return
+    if (candidatesQuery.isLoading || candidatesQuery.isFetching) return
+    if (!candidatesQuery.data) return
+    const inFilteredList = (candidatesQuery.data ?? []).some((candidate) => candidate.id === candidateId)
+    if (!inFilteredList) {
+      clearCandidateSelection()
+    }
+  }, [
+    candidateId,
+    candidatesQuery.data,
+    candidatesQuery.isLoading,
+    candidatesQuery.isFetching,
+    pendingAtsCandidateExternalId,
+    clearCandidateSelection,
+  ])
+
   const resetQuestionsBank = () => {
     form.setValue('questions', defaultValues.questions, { shouldValidate: true })
     setQuestionsGenerated(false)
+  }
+
+  const assertCodingReady = () => {
+    if (codingRound.enabled && (!codingRound.domainId || codingRound.taskIds.length === 0)) {
+      setError('Select a coding domain and at least one task, or turn off the coding round.')
+      return false
+    }
+    return true
   }
 
   const submitJoin = async (replaceExisting = false) => {
     setError(null)
     setDuplicateDialog(null)
     try {
+      if (!assertCodingReady()) return
       const payload = await buildJoinPayload(replaceExisting)
       if (!payload) return
-      joinMutation.mutate(payload)
+      const coding = toInterviewCodingConfig(codingRound)
+      joinMutation.mutate({
+        ...payload,
+        ...(coding ? { coding } : {}),
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to prepare interview')
     }
@@ -607,8 +578,10 @@ export function NewInterviewPage() {
   const submitSchedule = async () => {
     setError(null)
     try {
+      if (!assertCodingReady()) return
       const payload = await buildJoinPayload(false)
       if (!payload) return
+      const coding = toInterviewCodingConfig(codingRound)
       scheduleMutation.mutate({
         meeting_url: payload.meeting_url,
         candidate_id: payload.candidate_id,
@@ -622,6 +595,7 @@ export function NewInterviewPage() {
         bot_name: payload.bot_name,
         greeting_message: payload.greeting_message,
         document_extraction_id: payload.document_extraction_id,
+        ...(coding ? { coding } : {}),
       })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to schedule interview')
@@ -644,34 +618,23 @@ export function NewInterviewPage() {
   const nextStep = async () => {
     setError(null)
 
-    // Step 1–2: Job first
+    // Step 1–2: Job first (select from DB only)
     if (step === 1) {
-      const ok = await form.trigger(['position_name'])
-      if (!ok || !step2Ready) return
-
-      if (jdInputMode === 'manual') {
-        const text = form.getValues('jdText').trim()
-        if (text.length < 100) {
-          setError('Paste a fuller job description (100+ characters) before continuing.')
-          return
-        }
-        setJdStructured({ jd_summary: text })
-        setStep(2)
+      if (!jobPostingId && !pendingAtsJobExternalId) {
+        setError('Select a saved job from the database (upload JDs in Bulk Upload).')
         return
       }
-
-      if (!jdFile) return
-      try {
-        const result = await extractJdMutation.mutateAsync()
-        applyJdResult(result)
-        setStep(2)
-      } catch (err) {
-        if (err instanceof ApiError) {
-          setError(formatApiError(err.message, err.detail))
-        } else {
-          setError(err instanceof Error ? err.message : 'Job description extraction failed')
-        }
+      const text = form.getValues('jdText').trim()
+      if (text.length < 100) {
+        setError(
+          'Selected job has no usable JD text yet. Process the job in Bulk Upload, then select it here.',
+        )
+        return
       }
+      const ok = await form.trigger(['position_name'])
+      if (!ok || !jobSelectReady) return
+      if (!jdStructured) setJdStructured({ jd_summary: text })
+      setStep(2)
       return
     }
 
@@ -684,17 +647,22 @@ export function NewInterviewPage() {
       return
     }
 
-    // Step 3–4: Candidate
+    // Step 3–4: Candidate (select from DB only)
     if (step === 3) {
+      if (!candidateId && !pendingAtsCandidateExternalId) {
+        setError('Select a saved candidate from the database (upload CVs in Bulk Upload).')
+        return
+      }
+      const text = form.getValues('cvText').trim()
+      if (text.length < 50) {
+        setError(
+          'Selected candidate has no usable resume text yet. Process the CV in Bulk Upload, then select it here.',
+        )
+        return
+      }
       const ok = await form.trigger(['candidate_first_name', 'candidate_last_name', 'language_mode'])
-      if (!ok || !step1Ready) return
-
-      if (cvInputMode === 'manual') {
-        const text = form.getValues('cvText').trim()
-        if (text.length < 50) {
-          setError('Paste at least a short resume (50+ characters) before continuing.')
-          return
-        }
+      if (!ok || !candidateSelectReady) return
+      if (!cvStructured) {
         setCvStructured({
           name: formatCandidateDisplayName(
             form.getValues('candidate_first_name'),
@@ -702,22 +670,8 @@ export function NewInterviewPage() {
           ),
           raw_text: text,
         })
-        setStep(4)
-        return
       }
-
-      if (!cvFile) return
-      try {
-        const result = await extractCvMutation.mutateAsync()
-        applyCvResult(result)
-        setStep(4)
-      } catch (err) {
-        if (err instanceof ApiError) {
-          setError(formatApiError(err.message, err.detail))
-        } else {
-          setError(err instanceof Error ? err.message : 'Resume extraction failed')
-        }
-      }
+      setStep(4)
       return
     }
 
@@ -732,6 +686,18 @@ export function NewInterviewPage() {
     }
 
     if (step === 5) {
+      const jdText = form.getValues('jdText').trim()
+      const cvText = form.getValues('cvText').trim()
+      if (jdText.length < 100 || cvText.length < 50) {
+        if (jdText.length < 100) {
+          setError('Job description text is missing. Select a processed JD in Job Requirements first.')
+          setStep(1)
+        } else {
+          setError('Resume text is missing. Select a processed candidate CV linked to this job.')
+          setStep(3)
+        }
+        return
+      }
       if (!questionsGenerated) {
         try {
           const result = await questionsMutation.mutateAsync()
@@ -767,32 +733,20 @@ export function NewInterviewPage() {
     }
   }
 
-  const wizardBusy =
-    extractCvMutation.isPending || extractJdMutation.isPending || questionsMutation.isPending
+  const wizardBusy = questionsMutation.isPending
 
   const proceedLabel = useMemo(() => {
-    if (step === 1 && extractJdMutation.isPending) return 'Extracting job description…'
-    if (step === 3 && extractCvMutation.isPending) return 'Extracting resume…'
     if (step === 5 && questionsMutation.isPending) return 'Generating questions…'
     if (step === TOTAL_STEPS) {
       return joinMutation.isPending ? 'Sending bot…' : 'Send to lobby'
     }
-    if (step === 1) return jdInputMode === 'manual' ? 'Continue' : 'Extract & continue'
+    if (step === 1) return 'Continue'
     if (step === 2) return 'Continue to candidate'
-    if (step === 3) return cvInputMode === 'manual' ? 'Continue' : 'Extract & continue'
+    if (step === 3) return 'Continue'
     if (step === 4) return 'Continue to questions'
     if (step === 5) return questionsGenerated ? 'Continue to join' : 'Generate questions'
     return 'Continue'
-  }, [
-    step,
-    questionsGenerated,
-    cvInputMode,
-    jdInputMode,
-    extractCvMutation.isPending,
-    extractJdMutation.isPending,
-    questionsMutation.isPending,
-    joinMutation.isPending,
-  ])
+  }, [step, questionsGenerated, questionsMutation.isPending, joinMutation.isPending])
 
   const cvReviewData = cvStructured ?? { raw_text: values.cvText }
   const jdReviewData = jdStructured ?? { jd_summary: values.jdText }
@@ -824,7 +778,7 @@ export function NewInterviewPage() {
               {step === 3 && (
                 <FormSectionCard
                   title="Candidate"
-                  description="Choose a saved candidate, import from ATS, or enter details and a resume."
+                  description="Select a candidate uploaded under the selected job (Bulk Upload)."
                 >
                   <div className="space-y-4">
                     <EntityPicker
@@ -833,18 +787,17 @@ export function NewInterviewPage() {
                       value={candidateId}
                       loading={candidatesQuery.isLoading}
                       disabled={wizardBusy}
+                      allowCreate={false}
                       options={(candidatesQuery.data ?? []).map((c) => ({
                         id: c.id,
                         label: c.full_name,
-                        hint: c.email ?? undefined,
+                        hint: c.cv_text?.trim()
+                          ? c.email ?? 'resume ready'
+                          : 'no resume text',
                       }))}
                       onChange={selectCandidate}
-                      onClear={() => {
-                        setCandidateId(null)
-                        setPendingAtsCandidateExternalId(null)
-                        setPendingAtsCandidateParentId(null)
-                      }}
-                      helperText="Selecting a saved candidate fills the fields below."
+                      onClear={clearCandidateSelection}
+                      helperText="Only candidates linked to this selected job and with extracted resume text can continue."
                       action={
                         atsConnected ? (
                           <Button
@@ -870,28 +823,18 @@ export function NewInterviewPage() {
                         <Input
                           id="candidate_first_name"
                           className="mt-1.5 select-text"
-                          placeholder="e.g. Rakesh"
+                          readOnly
                           {...form.register('candidate_first_name')}
                         />
-                        {form.formState.errors.candidate_first_name && (
-                          <p className="mt-1 text-xs text-destructive">
-                            {form.formState.errors.candidate_first_name.message}
-                          </p>
-                        )}
                       </div>
                       <div>
                         <Label htmlFor="candidate_last_name">Last name</Label>
                         <Input
                           id="candidate_last_name"
                           className="mt-1.5 select-text"
-                          placeholder="e.g. Sharma"
+                          readOnly
                           {...form.register('candidate_last_name')}
                         />
-                        {form.formState.errors.candidate_last_name && (
-                          <p className="mt-1 text-xs text-destructive">
-                            {form.formState.errors.candidate_last_name.message}
-                          </p>
-                        )}
                       </div>
                     </div>
 
@@ -926,76 +869,26 @@ export function NewInterviewPage() {
                       </RadioGroup>
                     </div>
 
-                    <div>
-                      <div className="mb-2 flex items-center justify-between gap-2">
-                        <Label>Candidate resume</Label>
+                    {values.cvText.trim() ? (
+                      <div className="rounded-lg border border-border bg-muted/20 px-3 py-2.5">
+                        <p className="text-xs font-medium text-foreground">Resume loaded from database</p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {values.cvText.trim().length.toLocaleString()} characters — review on the next step.
+                        </p>
                       </div>
-                      <InputModeToggle
-                        value={cvInputMode}
-                        disabled={wizardBusy}
-                        onChange={(mode) => {
-                          setCvInputMode(mode)
-                          setError(null)
-                          if (mode === 'manual') {
-                            setCvFile(null)
-                          }
-                        }}
-                      />
-                      <div className="mt-3">
-                        {cvInputMode === 'upload' ? (
-                          <>
-                            <CompactFileUpload
-                              label="Upload resume"
-                              file={cvFile}
-                              onFileSelect={setCvFile}
-                              disabled={wizardBusy}
-                              error={
-                                !cvFile && form.formState.isSubmitted
-                                  ? 'Resume file is required'
-                                  : undefined
-                              }
-                            />
-                            {savedMeta?.cvFileName && !cvFile ? (
-                              <p className="mt-1.5 text-xs text-muted-foreground">
-                                Previously uploaded: {savedMeta.cvFileName} — re-upload to continue
-                                after refresh.
-                              </p>
-                            ) : null}
-                          </>
-                        ) : (
-                          <div>
-                            <Textarea
-                              id="cvText_manual"
-                              className="min-h-[180px] select-text"
-                              placeholder="Paste the full resume text here…"
-                              value={values.cvText}
-                              disabled={wizardBusy}
-                              onChange={(e) =>
-                                form.setValue('cvText', e.target.value, { shouldValidate: true })
-                              }
-                            />
-                            <p className="mt-1.5 text-xs text-muted-foreground">
-                              Tip: paste the complete resume so question generation has enough
-                              context (min. 50 characters).
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                    ) : candidateId || pendingAtsCandidateExternalId ? (
+                      <p className="text-xs text-destructive">
+                        No resume text on this candidate. Process the CV in Bulk Upload first.
+                      </p>
+                    ) : null}
                   </div>
                 </FormSectionCard>
               )}
 
               {step === 4 && (
                 <FormSectionCard
-                  title={
-                    cvInputMode === 'manual' ? 'Review resume text' : 'Review extracted resume'
-                  }
-                  description={
-                    cvInputMode === 'manual'
-                      ? 'Confirm the resume text you entered. Edit anything before continuing.'
-                      : 'Structured profile from your upload. Edit the resume text at the bottom before continuing.'
-                  }
+                  title="Review resume text"
+                  description="Confirm the resume loaded from the database. Edit if needed before generating questions."
                 >
                   <CvExtractionReview
                     structured={cvReviewData}
@@ -1010,7 +903,7 @@ export function NewInterviewPage() {
               {step === 1 && (
                 <FormSectionCard
                   title="Job"
-                  description="Choose a saved role, import from ATS, or add a new job description."
+                  description="Select a job already in the database (upload JDs in Bulk Upload)."
                 >
                   <div className="space-y-4">
                     <EntityPicker
@@ -1019,18 +912,24 @@ export function NewInterviewPage() {
                       value={jobPostingId}
                       loading={jobsQuery.isLoading}
                       disabled={wizardBusy}
+                      allowCreate={false}
                       options={(jobsQuery.data ?? []).map((j) => ({
                         id: j.id,
                         label: j.job_title,
-                        hint: j.status,
+                        hint: j.jd_text?.trim()
+                          ? j.status
+                          : 'no JD text',
                       }))}
                       onChange={selectJob}
                       onClear={() => {
                         setJobPostingId(null)
                         setPendingAtsJobExternalId(null)
                         setAtsJobExternalId(null)
+                        form.setValue('jdText', '', { shouldValidate: true })
+                        form.setValue('position_name', '', { shouldValidate: true })
+                        setJdStructured(null)
                       }}
-                      helperText="Selecting a saved job fills the fields below."
+                      helperText="Only jobs with extracted JD text can continue."
                       action={
                         atsConnected ? (
                           <Button
@@ -1055,83 +954,33 @@ export function NewInterviewPage() {
                       <Input
                         id="position_name"
                         className="mt-1.5 select-text"
-                        placeholder="e.g. Application Support Engineer"
+                        readOnly
                         {...form.register('position_name')}
                       />
-                      {form.formState.errors.position_name && (
-                        <p className="mt-1 text-xs text-destructive">
-                          {form.formState.errors.position_name.message}
-                        </p>
-                      )}
                     </div>
 
-                    <div>
-                      <div className="mb-2">
-                        <Label>Job description</Label>
+                    {values.jdText.trim() ? (
+                      <div className="rounded-lg border border-border bg-muted/20 px-3 py-2.5">
+                        <p className="text-xs font-medium text-foreground">
+                          Job description loaded from database
+                        </p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {values.jdText.trim().length.toLocaleString()} characters — review on the next step.
+                        </p>
                       </div>
-                      <InputModeToggle
-                        value={jdInputMode}
-                        disabled={wizardBusy}
-                        onChange={(mode) => {
-                          setJdInputMode(mode)
-                          setError(null)
-                          if (mode === 'manual') {
-                            setJdFile(null)
-                          }
-                        }}
-                      />
-                      <div className="mt-3">
-                        {jdInputMode === 'upload' ? (
-                          <>
-                            <CompactFileUpload
-                              label="Upload job description"
-                              file={jdFile}
-                              onFileSelect={setJdFile}
-                              disabled={wizardBusy}
-                            />
-                            {savedMeta?.jdFileName && !jdFile ? (
-                              <p className="mt-1.5 text-xs text-muted-foreground">
-                                Previously uploaded: {savedMeta.jdFileName} — re-upload to extract
-                                again.
-                              </p>
-                            ) : null}
-                          </>
-                        ) : (
-                          <div>
-                            <Textarea
-                              id="jdText_manual"
-                              className="min-h-[180px] select-text"
-                              placeholder="Paste the full job description here…"
-                              value={values.jdText}
-                              disabled={wizardBusy}
-                              onChange={(e) =>
-                                form.setValue('jdText', e.target.value, { shouldValidate: true })
-                              }
-                            />
-                            <p className="mt-1.5 text-xs text-muted-foreground">
-                              Tip: include responsibilities and must-have skills (min. 100
-                              characters).
-                            </p>
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                    ) : jobPostingId || pendingAtsJobExternalId ? (
+                      <p className="text-xs text-destructive">
+                        No JD text on this job. Process the job description in Bulk Upload first.
+                      </p>
+                    ) : null}
                   </div>
                 </FormSectionCard>
               )}
 
               {step === 2 && (
                 <FormSectionCard
-                  title={
-                    jdInputMode === 'manual'
-                      ? 'Review job description text'
-                      : 'Review extracted job description'
-                  }
-                  description={
-                    jdInputMode === 'manual'
-                      ? 'Confirm the job text you entered. Edit anything before continuing.'
-                      : 'Structured role details from your upload. Edit the job text at the bottom before continuing.'
-                  }
+                  title="Review job description text"
+                  description="Confirm the JD loaded from the database. Edit if needed before continuing."
                 >
                   <JdExtractionReview
                     structured={jdReviewData}
@@ -1149,7 +998,7 @@ export function NewInterviewPage() {
                   description={
                     questionsGenerated
                       ? undefined
-                      : 'Generate a question bank from the reviewed resume and job description.'
+                      : 'Generate a question bank from the selected resume and job description.'
                   }
                   className={
                     questionsGenerated
@@ -1169,8 +1018,8 @@ export function NewInterviewPage() {
                       </span>
                       <p className="text-sm font-medium">Ready to generate questions</p>
                       <p className="mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">
-                        n8n will create ~15 questions from the resume and job description you
-                        reviewed. You can edit them before continuing.
+                        We will create ~15 questions from the selected resume and job description.
+                        You can edit them before continuing.
                       </p>
                     </div>
                   )}
@@ -1242,6 +1091,16 @@ export function NewInterviewPage() {
                         />
                       </div>
                     </div>
+                  </FormSectionCard>
+                  <FormSectionCard
+                    title="Coding round (optional)"
+                    description="Enable to assign one coding task after the voice interview wraps up."
+                  >
+                    <CodingRoundPanel
+                      value={codingRound}
+                      onChange={setCodingRound}
+                      disabled={submitBusy || wizardBusy}
+                    />
                   </FormSectionCard>
                 </div>
               )}

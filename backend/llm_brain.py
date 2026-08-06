@@ -789,6 +789,10 @@ class LLMBrain:
         orch = self.state.interview_orchestrator
         if spoken and orch and orch.language_mode == "hinglish":
             spoken = self._localize_bank_question_in_text(spoken, orch)
+        if not decision.should_continue and orch is not None:
+            coding_wrapup = self._coding_wrapup_phrase(orch)
+            if coding_wrapup:
+                spoken = f"{spoken} {coding_wrapup}".strip() if spoken else coding_wrapup
 
         if spoken and orch and orch.language_mode == "hinglish" and getattr(
             decision, "rephrase_flow", False
@@ -876,6 +880,36 @@ class LLMBrain:
                     orch.bot_id[:8] if orch.bot_id else "?",
                     decision.stopped_reason.value,
                 )
+
+    def _coding_wrapup_phrase(self, orch) -> str:
+        """Return a coding handoff line when coding round is enabled for this interview."""
+        interview_id = getattr(orch, "db_interview_id", None)
+        if not interview_id:
+            return ""
+        try:
+            from sqlalchemy import select
+
+            from db.models import InterviewCodingConfig
+            from db.session import get_session_factory, is_db_configured
+
+            if not is_db_configured():
+                return ""
+            SessionLocal = get_session_factory()
+            with SessionLocal() as db:
+                cfg = db.scalar(
+                    select(InterviewCodingConfig).where(
+                        InterviewCodingConfig.interview_id == interview_id
+                    )
+                )
+                if cfg is None or not cfg.enabled or not (cfg.task_ids or []):
+                    return ""
+            return (
+                "Great work on the interview. Now we are moving to the coding round. "
+                "Please share your screen and open the browser for the coding task."
+            )
+        except Exception as ex:
+            logger.warning("[CODING WRAPUP] could not resolve coding config: %s", ex)
+            return ""
 
     def _should_skip_junk_turn(self, user_text: str, orch) -> bool:
         """

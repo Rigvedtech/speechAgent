@@ -1,6 +1,5 @@
 import {
   splitFullName,
-  type DocumentInputMode,
   type JoinFormValues,
 } from '@/schemas/join-form.schema'
 
@@ -16,8 +15,6 @@ export interface InterviewDraftMeta {
   cvStructured?: CvStructured | null
   jdStructured?: JdStructured | null
   questionsGenerated?: boolean
-  cvInputMode?: DocumentInputMode
-  jdInputMode?: DocumentInputMode
   candidateId?: string | null
   jobPostingId?: string | null
   extractionId?: string | null
