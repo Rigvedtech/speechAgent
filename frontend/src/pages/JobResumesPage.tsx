@@ -29,6 +29,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { useAuth } from '@/hooks/useAuth'
 import { FileDropzone } from '@/components/bulk-upload/FileDropzone'
 import { Alert } from '@/components/ui/alert'
+import { FlashAlert } from '@/components/ui/flash-alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -558,10 +559,16 @@ export function JobResumesPage() {
           </div>
         </header>
 
-        {error ? <Alert className="shrink-0 border-destructive/40 text-destructive">{error}</Alert> : null}
-        {success ? (
-          <Alert className="shrink-0 border-success/30 bg-success/[0.06] text-success">{success}</Alert>
-        ) : null}
+        <FlashAlert
+          message={error}
+          onDismiss={() => setError(null)}
+          className="shrink-0 border-destructive/40 text-destructive"
+        />
+        <FlashAlert
+          message={success}
+          onDismiss={() => setSuccess(null)}
+          className="shrink-0 border-success/30 bg-success/[0.06] text-success"
+        />
         {!canWrite ? (
           <Alert className="shrink-0">Viewer accounts can inspect CVs but cannot upload documents.</Alert>
         ) : null}

@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   LayoutDashboard,
   PlusCircle,
@@ -84,6 +84,7 @@ function resolveTitle(pathname: string) {
 export function AppShell() {
   const location = useLocation()
   const navigate = useNavigate()
+  const queryClient = useQueryClient()
   const title = resolveTitle(location.pathname)
   const { theme, toggleTheme } = useTheme()
   const { user, organization, isAdmin, logout } = useAuth()
@@ -212,6 +213,7 @@ export function AppShell() {
                 type="button"
                 onClick={() => {
                   logout()
+                  queryClient.clear()
                   navigate('/login', { replace: true })
                 }}
                 className="surface-hover inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-foreground"

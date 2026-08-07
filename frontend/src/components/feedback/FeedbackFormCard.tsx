@@ -13,12 +13,13 @@ import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
-import { Alert } from '@/components/ui/alert'
+import { FlashAlert } from '@/components/ui/flash-alert'
 
 interface FeedbackFormCardProps {
   candidateName?: string
   submitting?: boolean
   submitError?: string | null
+  onDismissError?: () => void
   onSubmit: (values: FeedbackFormValues) => void | Promise<void>
 }
 
@@ -26,6 +27,7 @@ export function FeedbackFormCard({
   candidateName,
   submitting = false,
   submitError = null,
+  onDismissError,
   onSubmit,
 }: FeedbackFormCardProps) {
   const form = useForm<FeedbackFormValues>({
@@ -163,9 +165,11 @@ export function FeedbackFormCard({
             />
           </div>
 
-          {submitError ? (
-            <Alert className="border-destructive/30 bg-destructive/5 text-sm">{submitError}</Alert>
-          ) : null}
+          <FlashAlert
+            message={submitError}
+            onDismiss={() => onDismissError?.()}
+            className="border-destructive/30 bg-destructive/5 text-sm"
+          />
 
           <Button type="submit" className="w-full" disabled={submitting || !form.formState.isValid}>
             {submitting ? (

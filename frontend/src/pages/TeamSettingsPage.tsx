@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Navigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Pencil, Plus, Search, Trash2 } from 'lucide-react'
@@ -13,6 +13,7 @@ import { Input } from '@/components/ui/input'
 import { PasswordInput } from '@/components/ui/password-input'
 import { Label } from '@/components/ui/label'
 import { Alert } from '@/components/ui/alert'
+import { FlashAlert } from '@/components/ui/flash-alert'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
@@ -57,12 +58,6 @@ export function TeamSettingsPage() {
     queryFn: listUsers,
     enabled: isAdmin,
   })
-
-  useEffect(() => {
-    if (!formOk) return
-    const t = window.setTimeout(() => setFormOk(null), 2500)
-    return () => window.clearTimeout(t)
-  }, [formOk])
 
   const filteredUsers = useMemo(() => {
     const list = users.data ?? []
@@ -318,16 +313,16 @@ export function TeamSettingsPage() {
             </DialogDescription>
           </DialogHeader>
 
-          {formError && (
-            <Alert className="border-destructive/30 bg-destructive/5 text-destructive">
-              {formError}
-            </Alert>
-          )}
-          {formOk && (
-            <Alert className="border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300">
-              {formOk}
-            </Alert>
-          )}
+          <FlashAlert
+            message={formError}
+            onDismiss={() => setFormError(null)}
+            className="border-destructive/30 bg-destructive/5 text-destructive"
+          />
+          <FlashAlert
+            message={formOk}
+            onDismiss={() => setFormOk(null)}
+            className="border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
+          />
 
           <form
             className="space-y-3"

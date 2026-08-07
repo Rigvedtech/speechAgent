@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { PasswordInput } from '@/components/ui/password-input'
 import { Label } from '@/components/ui/label'
-import { Alert } from '@/components/ui/alert'
+import { FlashAlert } from '@/components/ui/flash-alert'
 import { Card, CardContent } from '@/components/ui/card'
 
 export function RegisterOrgPage() {
@@ -57,9 +57,11 @@ export function RegisterOrgPage() {
             </p>
           </div>
 
-          {error && (
-            <Alert className="border-destructive/30 bg-destructive/5 text-destructive">{error}</Alert>
-          )}
+          <FlashAlert
+            message={error}
+            onDismiss={() => setError(null)}
+            className="border-destructive/30 bg-destructive/5 text-destructive"
+          />
 
           <form
             className="space-y-4"

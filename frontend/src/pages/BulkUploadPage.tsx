@@ -21,6 +21,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { useAuth } from '@/hooks/useAuth'
 import { FileDropzone } from '@/components/bulk-upload/FileDropzone'
 import { Alert } from '@/components/ui/alert'
+import { FlashAlert } from '@/components/ui/flash-alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -208,7 +209,11 @@ export function BulkUploadPage() {
       </div>
 
       {!canWrite ? <Alert>Viewer accounts cannot create or upload documents.</Alert> : null}
-      {success ? <Alert className="border-success/30 bg-success/[0.06] text-success">{success}</Alert> : null}
+      <FlashAlert
+        message={success}
+        onDismiss={() => setSuccess(null)}
+        className="border-success/30 bg-success/[0.06] text-success"
+      />
 
       <Card>
         <CardContent className="p-0">
@@ -304,7 +309,11 @@ export function BulkUploadPage() {
             </DialogDescription>
           </DialogHeader>
 
-          {error ? <Alert className="border-destructive/40 text-destructive">{error}</Alert> : null}
+          <FlashAlert
+            message={error}
+            onDismiss={() => setError(null)}
+            className="border-destructive/40 text-destructive"
+          />
 
           <div className="space-y-4">
             <FileDropzone

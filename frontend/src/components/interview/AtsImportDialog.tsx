@@ -14,6 +14,7 @@ import { formatApiError } from '@/lib/error-messages'
 import { queryKeys } from '@/lib/query-keys'
 import type { AtsCandidateDetail, AtsJobDetail, AtsRemoteJob } from '@/types/api'
 import { Button } from '@/components/ui/button'
+import { FlashAlert } from '@/components/ui/flash-alert'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
@@ -263,11 +264,11 @@ export function AtsImportDialog({
           />
         </div>
 
-        {error ? (
-          <p className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-            {error}
-          </p>
-        ) : null}
+        <FlashAlert
+          message={error}
+          onDismiss={() => setError(null)}
+          className="border-destructive/30 bg-destructive/5 text-destructive"
+        />
 
         <div className="max-h-80 space-y-1.5 overflow-y-auto rounded-lg border border-border bg-muted/10 p-1.5">
           {loading ? (
