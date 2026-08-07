@@ -25,5 +25,18 @@
 \ir 016_views.sql
 \ir 017_candidate_feedback.sql
 \ir 018_organization_ats_api_key.sql
+\ir 019_recruitment_core_columns.sql
+\ir 020_domain_taxonomy.sql
+\ir 021_job_candidate_links.sql
+\ir 022_job_candidate_matches.sql
+\ir 023_upload_batches.sql
+\ir 024_qdrant_document_points.sql
+\ir 025_coding_round.sql
+\ir 028_coding_entry_function.sql
+\ir 026_coding_tasks_seed.sql
+\ir 027_coding_candidate_access.sql
+\ir 029_coding_domains.sql
+\ir 030_coding_languages_expand.sql
+\ir 031_coding_multi_task_times.sql
 
 \echo 'Schema applied successfully.'

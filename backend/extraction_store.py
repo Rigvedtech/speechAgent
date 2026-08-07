@@ -1,4 +1,4 @@
-"""Persist n8n extract/generate runs into document_extractions."""
+"""Persist extract/generate runs into document_extractions."""
 
 from __future__ import annotations
 

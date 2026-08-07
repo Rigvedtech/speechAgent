@@ -13,7 +13,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from auth.deps import get_current_user, get_db, require_writer
-from db.models import Candidate, User
+from db.models import Candidate, JobCandidateLink, User
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,7 @@ class CandidateCreate(BaseModel):
     full_name: str = Field(..., min_length=2, max_length=255)
     email: Optional[EmailStr] = None
     phone: Optional[str] = Field(None, max_length=50)
+    current_title: Optional[str] = Field(None, max_length=255)
     cv_text: Optional[str] = None
     notes: Optional[str] = None
     source: CandidateSource = "manual"
@@ -52,6 +53,7 @@ class CandidateUpdate(BaseModel):
     full_name: Optional[str] = Field(None, min_length=2, max_length=255)
     email: Optional[EmailStr] = None
     phone: Optional[str] = Field(None, max_length=50)
+    current_title: Optional[str] = Field(None, max_length=255)
     cv_text: Optional[str] = None
     notes: Optional[str] = None
     is_active: Optional[bool] = None
@@ -74,6 +76,7 @@ class CandidateOut(BaseModel):
     full_name: str
     email: Optional[str] = None
     phone: Optional[str] = None
+    current_title: Optional[str] = None
     cv_text: Optional[str] = None
     notes: Optional[str] = None
     source: str
@@ -102,6 +105,9 @@ def _get_org_candidate(
 def list_candidates(
     q: Optional[str] = Query(None, description="Search name or email"),
     source: Optional[CandidateSource] = None,
+    job_posting_id: Optional[UUID] = Query(
+        None, description="Filter candidates linked to this job posting"
+    ),
     mine_only: bool = Query(
         False, description="If true, only candidates created by current user"
     ),
@@ -117,6 +123,16 @@ def list_candidates(
         stmt = stmt.where(Candidate.created_by == user.id)
     if source:
         stmt = stmt.where(Candidate.source == source)
+    if job_posting_id:
+        stmt = stmt.where(
+            select(JobCandidateLink.id)
+            .where(
+                JobCandidateLink.organization_id == user.organization_id,
+                JobCandidateLink.job_posting_id == job_posting_id,
+                JobCandidateLink.candidate_id == Candidate.id,
+            )
+            .exists()
+        )
     if q and q.strip():
         term = f"%{q.strip()}%"
         stmt = stmt.where(
@@ -139,6 +155,7 @@ def create_candidate(
         full_name=body.full_name,
         email=body.email,
         phone=body.phone,
+        current_title=body.current_title,
         cv_text=body.cv_text,
         notes=body.notes,
         source=body.source,
@@ -169,10 +186,22 @@ def update_candidate(
 ):
     row = _get_org_candidate(db, user, candidate_id)
     data = body.model_dump(exclude_unset=True)
+    cv_text_changed = "cv_text" in data and data.get("cv_text") != row.cv_text
     for key, value in data.items():
         setattr(row, key, value)
     db.commit()
     db.refresh(row)
+    # CV text change invalidates prior JD↔CV scores so Get Score unlocks again
+    if cv_text_changed:
+        from routers.matches import invalidate_candidate_matches
+
+        invalidated = invalidate_candidate_matches(db, candidate_id)
+        if invalidated:
+            logger.info(
+                "[candidates] invalidated %s match score(s) after cv_text edit candidate=%s",
+                invalidated,
+                candidate_id,
+            )
     return CandidateOut.model_validate(row)
 
 

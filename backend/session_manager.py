@@ -992,6 +992,7 @@ class SessionManager:
         mapping = {
             "multi_face": "camera_multi_face",
             "looking_away": "camera_looking_away",
+            "looking_side": "camera_looking_away",
             "looking_down": "camera_looking_down",
             "no_face": "camera_no_face",
         }
@@ -1230,6 +1231,16 @@ class SessionManager:
             except Exception as ex:
                 logger.warning("[CAMERA] Lazy tracker create failed: %s", ex)
                 return
+        # AI asking → no integrity warn; candidate answer turn → warn on
+        # Must set BEFORE process_png_frame (risk accumulates inside analyze).
+        ai_turn = bool(
+            session.state.is_ai_speaking.is_set()
+            or getattr(session, "_awaiting_turn_playback", False)
+        )
+        set_turn = getattr(tracker, "set_candidate_turn", None)
+        if callable(set_turn):
+            set_turn(not ai_turn)
+
         snap = tracker.process_png_frame(
             png_bytes=png_bytes,
             participant_id=participant_id,

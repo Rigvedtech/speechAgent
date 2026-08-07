@@ -1,4 +1,4 @@
-import { request } from '@/lib/api-client'
+import { request, requestFormData } from '@/lib/api-client'
 import type { FeedbackFormValues } from '@/schemas/feedback-form.schema'
 import type { AuthSession } from '@/lib/auth-store'
 import type {
@@ -16,9 +16,12 @@ import type {
   FeedbackResponse,
   SubmitFeedbackResponse,
   Candidate,
+  CameraIntegrityToggleResponse,
   JobPosting,
   CreateCandidateRequest,
+  UpdateCandidateRequest,
   CreateJobPostingRequest,
+  UpdateJobPostingRequest,
   CreateUserRequest,
   UpdateUserRequest,
   AuthUser,
@@ -34,6 +37,26 @@ import type {
   AtsJobsPage,
   AtsJobDetail,
   AtsCandidateDetail,
+  BatchExtractSummary,
+  BatchParseSummary,
+  CvBatchUploadResponse,
+  JdUploadResponse,
+  JobResume,
+  ScoreJobMatchesResponse,
+  UploadBatch,
+  CodingTaskSummary,
+  CodingTaskDetail,
+  CodingDomain,
+  CodingSession,
+  CodingSubmitRequest,
+  CodingSubmitResponse,
+  CodingWorkspace,
+  CodingRunRequest,
+  CodingRunResponse,
+  CodingRunExamplesResponse,
+  InterviewCodingConfig,
+  InterviewCodingConfigOut,
+  CodingLanguage,
 } from '@/types/api'
 
 export function joinMeeting(body: JoinMeetingRequest) {
@@ -64,6 +87,13 @@ export function rejoinBot(botId: string) {
 
 export function cancelInterviewSetup(botId: string) {
   return request<LeaveResponse>(`/api/interviews/${botId}/cancel`, { method: 'POST' })
+}
+
+export function toggleCameraIntegrity(botId: string, enabled: boolean) {
+  return request<CameraIntegrityToggleResponse>(`/api/interviews/${botId}/camera-integrity`, {
+    method: 'POST',
+    body: JSON.stringify({ enabled }),
+  })
 }
 
 export function listSessions() {
@@ -145,8 +175,11 @@ export function deleteUser(userId: string) {
   })
 }
 
-export function listCandidates(params?: { q?: string }) {
-  const qs = params?.q ? `?q=${encodeURIComponent(params.q)}` : ''
+export function listCandidates(params?: { q?: string; jobPostingId?: string }) {
+  const query = new URLSearchParams()
+  if (params?.q) query.set('q', params.q)
+  if (params?.jobPostingId) query.set('job_posting_id', params.jobPostingId)
+  const qs = query.toString() ? `?${query.toString()}` : ''
   return request<Candidate[]>(`/api/candidates${qs}`)
 }
 
@@ -157,9 +190,20 @@ export function createCandidate(body: CreateCandidateRequest) {
   })
 }
 
+export function updateCandidate(candidateId: string, body: UpdateCandidateRequest) {
+  return request<Candidate>(`/api/candidates/${candidateId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
 export function listJobPostings(params?: { q?: string }) {
   const qs = params?.q ? `?q=${encodeURIComponent(params.q)}` : ''
   return request<JobPosting[]>(`/api/job-postings${qs}`)
+}
+
+export function getJobPosting(jobId: string) {
+  return request<JobPosting>(`/api/job-postings/${jobId}`)
 }
 
 export function createJobPosting(body: CreateJobPostingRequest) {
@@ -169,11 +213,230 @@ export function createJobPosting(body: CreateJobPostingRequest) {
   })
 }
 
+export function updateJobPosting(jobId: string, body: UpdateJobPostingRequest) {
+  return request<JobPosting>(`/api/job-postings/${jobId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export function uploadJobDescription(jobId: string, file: File) {
+  const formData = new FormData()
+  formData.append('file', file)
+  return requestFormData<JdUploadResponse>(`/api/jobs/${jobId}/upload-jd`, formData)
+}
+
+export function uploadJobResumes(jobId: string, files: File[]) {
+  const formData = new FormData()
+  files.forEach((file) => formData.append('files', file))
+  return requestFormData<CvBatchUploadResponse>(`/api/jobs/${jobId}/upload-cvs`, formData, {
+    timeoutMs: 300000,
+  })
+}
+
+export function getUploadBatch(batchId: string) {
+  return request<UploadBatch>(`/api/batches/${batchId}`)
+}
+
+export function listJobResumes(jobId: string) {
+  return request<JobResume[]>(`/api/jobs/${jobId}/resumes`)
+}
+
+/** Score unscored CVs against this JD (skips already scored unless force). */
+export function scoreJobMatches(jobId: string, body?: { force?: boolean; candidate_ids?: string[] }) {
+  return request<ScoreJobMatchesResponse>(`/api/jobs/${jobId}/score-matches`, {
+    method: 'POST',
+    body: JSON.stringify(body ?? {}),
+    timeoutMs: 10 * 60 * 1000,
+  })
+}
+
+export function extractUploadBatch(batchId: string) {
+  return request<BatchExtractSummary>(`/api/batches/${batchId}/extract`, {
+    method: 'POST',
+    timeoutMs: 10 * 60 * 1000,
+  })
+}
+
+export function parseUploadBatch(batchId: string) {
+  return request<BatchParseSummary>(`/api/batches/${batchId}/parse`, {
+    method: 'POST',
+    timeoutMs: 10 * 60 * 1000,
+  })
+}
+
 export function scheduleInterview(body: ScheduleInterviewRequest) {
   return request<ScheduleInterviewResponse>('/api/interviews/schedule', {
     method: 'POST',
     body: JSON.stringify(body),
   })
+}
+
+export function listCodingTasks(opts?: { difficulty?: string; domain_id?: string }) {
+  const params = new URLSearchParams()
+  if (opts?.difficulty) params.set('difficulty', opts.difficulty)
+  if (opts?.domain_id) params.set('domain_id', opts.domain_id)
+  const qs = params.toString() ? `?${params.toString()}` : ''
+  return request<CodingTaskSummary[]>(`/api/coding/tasks${qs}`)
+}
+
+export function listCodingDomains() {
+  return request<CodingDomain[]>('/api/coding/domains')
+}
+
+export function createCodingDomain(body: {
+  name: string
+  language: string
+  description?: string
+}) {
+  return request<CodingDomain>('/api/coding/domains', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function listDomainCodingTasks(domainId: string, opts?: { owned_only?: boolean }) {
+  const qs = opts?.owned_only ? '?owned_only=true' : ''
+  return request<CodingTaskSummary[]>(
+    `/api/coding/domains/${encodeURIComponent(domainId)}/tasks${qs}`,
+  )
+}
+
+export function generateDomainCodingTask(domainId: string) {
+  return request<CodingTaskDetail>(
+    `/api/coding/domains/${encodeURIComponent(domainId)}/tasks/generate`,
+    { method: 'POST', timeoutMs: 120_000 },
+  )
+}
+
+export function deactivateDomainCodingTask(domainId: string, taskId: string) {
+  return request<{ ok: boolean; id: string }>(
+    `/api/coding/domains/${encodeURIComponent(domainId)}/tasks/${encodeURIComponent(taskId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export function deactivateAllDomainCodingTasks(domainId: string) {
+  return request<{ ok: boolean; deleted: number }>(
+    `/api/coding/domains/${encodeURIComponent(domainId)}/tasks`,
+    { method: 'DELETE' },
+  )
+}
+
+export function getCodingTask(taskId: string) {
+  return request<CodingTaskDetail>(`/api/coding/tasks/${encodeURIComponent(taskId)}`)
+}
+
+export function putInterviewCodingConfig(interviewId: string, body: InterviewCodingConfig) {
+  return request<InterviewCodingConfigOut>(
+    `/api/coding/interviews/${encodeURIComponent(interviewId)}/config`,
+    { method: 'PUT', body: JSON.stringify(body) },
+  )
+}
+
+export function getCodingSessionByBot(botId: string) {
+  return request<CodingSession>(
+    `/api/coding/interviews/by-bot/${encodeURIComponent(botId)}/session`,
+  )
+}
+
+export function getCodingSessionByInterview(interviewId: string) {
+  return request<CodingSession>(
+    `/api/coding/interviews/${encodeURIComponent(interviewId)}/session`,
+  )
+}
+
+export function submitCodingByBot(botId: string, body: CodingSubmitRequest) {
+  return request<CodingSubmitResponse>(
+    `/api/coding/interviews/by-bot/${encodeURIComponent(botId)}/submit`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+}
+
+export function submitCodingByInterview(interviewId: string, body: CodingSubmitRequest) {
+  return request<CodingSubmitResponse>(
+    `/api/coding/interviews/${encodeURIComponent(interviewId)}/submit`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+}
+
+export function startDemoCodingSession(body?: {
+  task_id?: string
+  domain_id?: string
+  language?: CodingLanguage
+}) {
+  return request<CodingSession>('/api/coding/demo/start', {
+    method: 'POST',
+    body: JSON.stringify(body ?? {}),
+  })
+}
+
+export function getDemoCodingSession(demoToken: string) {
+  return request<CodingSession>(
+    `/api/coding/demo/${encodeURIComponent(demoToken)}`,
+  )
+}
+
+export function submitDemoCodingSession(demoToken: string, body: CodingSubmitRequest) {
+  return request<CodingSubmitResponse>(
+    `/api/coding/demo/${encodeURIComponent(demoToken)}/submit`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+}
+
+export function runCodingSnippet(body: CodingRunRequest) {
+  return request<CodingRunResponse>('/api/coding/run', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    timeoutMs: 30_000,
+  })
+}
+
+export function runCodingExamples(body: {
+  language: string
+  code: string
+  task_id: string
+  timeout_sec?: number
+  workspace?: CodingWorkspace
+}) {
+  return request<CodingRunExamplesResponse>('/api/coding/run-examples', {
+    method: 'POST',
+    body: JSON.stringify(body),
+    timeoutMs: 60_000,
+  })
+}
+
+export function getPublicCodingSession(token: string) {
+  return request<CodingSession>(`/api/coding/public/${encodeURIComponent(token)}`)
+}
+
+export function savePublicCodingSession(
+  token: string,
+  body: CodingSubmitRequest,
+) {
+  return request<CodingSubmitResponse>(
+    `/api/coding/public/${encodeURIComponent(token)}/save`,
+    { method: 'POST', body: JSON.stringify(body) },
+  )
+}
+
+export function runPublicCodingExamples(
+  token: string,
+  body: {
+    language?: string
+    code?: string
+    workspace?: CodingWorkspace
+    timeout_sec?: number
+  },
+) {
+  return request<CodingRunExamplesResponse>(
+    `/api/coding/public/${encodeURIComponent(token)}/run-examples`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+      timeoutMs: 60_000,
+    },
+  )
 }
 
 export function listScheduledInterviews() {

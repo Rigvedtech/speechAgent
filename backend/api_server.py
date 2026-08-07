@@ -48,6 +48,15 @@ from extraction_store import (
 from routers.interviews import router as interviews_router
 from routers.documents import router as documents_router
 from routers.ats import router as ats_router
+from routers.coding import (
+    InterviewCodingConfigIn,
+    router as coding_router,
+    upsert_interview_coding_config,
+)
+from routers.uploads import router as uploads_router
+from routers.extraction import router as extraction_router
+from routers.parsing import router as parsing_router
+from routers.matches import router as matches_router
 import interview_persist
 import document_store
 load_dotenv()
@@ -96,6 +105,11 @@ app.include_router(extractions_router)
 app.include_router(interviews_router)
 app.include_router(documents_router)
 app.include_router(ats_router)
+app.include_router(uploads_router)
+app.include_router(extraction_router)
+app.include_router(parsing_router)
+app.include_router(coding_router)
+app.include_router(matches_router)
 
 # Serve audio-worklet-processor.js and other static assets
 STATIC_DIR = Path(__file__).parent / "static"
@@ -193,6 +207,8 @@ class JoinMeetingRequest(BaseModel):
     job_posting_id: Optional[UUID] = None
     job_title: Optional[str] = None
     document_extraction_id: Optional[UUID] = None
+    # Same payload as schedule — persist coding round when sending to lobby directly
+    coding: Optional[InterviewCodingConfigIn] = None
 
 
 class PlannedQuestionSummary(BaseModel):
@@ -243,6 +259,18 @@ class StatusResponse(BaseModel):
     questions_scored: Optional[int] = None
     interview_phase: Optional[str] = None
     interview_ended: Optional[bool] = None
+    camera_integrity_armed: bool = False
+
+
+class CameraIntegrityToggleRequest(BaseModel):
+    enabled: bool
+
+
+class CameraIntegrityToggleResponse(BaseModel):
+    success: bool
+    bot_id: str
+    camera_integrity_armed: bool
+    message: str
 
 
 class SubmitFeedbackRequest(BaseModel):
@@ -714,6 +742,35 @@ async def join_meeting(
                         exc_info=True,
                     )
 
+                # Coding config must succeed when enabled — do not swallow errors.
+                if (
+                    request.coding is not None
+                    and db_interview_id
+                    and request.interview_id is None
+                ):
+                    try:
+                        upsert_interview_coding_config(
+                            db,
+                            user,
+                            UUID(db_interview_id),
+                            request.coding,
+                        )
+                    except HTTPException:
+                        session_manager.end_session(bot_id)
+                        raise
+                    except Exception as coding_ex:
+                        logger.error(
+                            "[interview] coding config on join failed bot=%s: %s",
+                            bot_id[:8],
+                            coding_ex,
+                            exc_info=True,
+                        )
+                        session_manager.end_session(bot_id)
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Failed to save coding round: {coding_ex}",
+                        ) from coding_ex
+
             await _attach_interview_to_session(
                 session,
                 bot_id,
@@ -1155,7 +1212,7 @@ async def generate_questions_endpoint(
     user: Optional[User] = Depends(get_optional_user),
     db: Optional[Session] = Depends(get_optional_db),
 ):
-    """Forward JD/CV to n8n; persist questions_json when authenticated."""
+    """Generate JD/CV interview questions locally; persist questions_json when authenticated."""
     logger.info(
         "[GENERATE-QUESTIONS] jd_len=%s cv_len=%s auth=%s",
         len(body.jdText),
@@ -1560,11 +1617,63 @@ async def get_bot_status(bot_id: str):
             questions_scored=questions_scored,
             interview_phase=interview_phase,
             interview_ended=interview_ended,
+            camera_integrity_armed=bool(
+                session
+                and session.state.camera_integrity_armed
+                and session.camera_tracker is not None
+            ),
         )
         
     except Exception as e:
         logger.error(f"Failed to get status: {e}")
         raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+
+
+@app.post(
+    "/api/interviews/{bot_id}/camera-integrity",
+    response_model=CameraIntegrityToggleResponse,
+)
+async def toggle_camera_integrity(bot_id: str, body: CameraIntegrityToggleRequest):
+    """Toggle camera integrity tracker while the interview session is active."""
+    session = session_manager.get_session(bot_id)
+    if not session or not session.is_active:
+        raise HTTPException(status_code=404, detail=f"Bot {bot_id} not found")
+
+    if body.enabled:
+        if not app_config.CAMERA_INTEGRITY_ENABLED:
+            raise HTTPException(
+                status_code=409,
+                detail="Camera integrity is disabled by server configuration",
+            )
+        armed = session_manager.arm_camera_integrity(session)
+        if not armed:
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to enable camera integrity for this session",
+            )
+        return CameraIntegrityToggleResponse(
+            success=True,
+            bot_id=bot_id,
+            camera_integrity_armed=True,
+            message="Camera integrity enabled",
+        )
+
+    tracker = session.camera_tracker
+    if tracker is not None:
+        try:
+            tracker.close()
+        except Exception as ex:
+            logger.warning("[CAMERA] toggle off close failed bot=%s err=%s", bot_id[:8], ex)
+    session.camera_tracker = None
+    session.state.camera_integrity_armed = False
+    session.state.camera_locked_participant_id = None
+
+    return CameraIntegrityToggleResponse(
+        success=True,
+        bot_id=bot_id,
+        camera_integrity_armed=False,
+        message="Camera integrity disabled",
+    )
 
 
 @app.get("/api/sessions")

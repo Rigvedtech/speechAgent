@@ -44,6 +44,7 @@ def _find_reuse_or_allocate_title(
     organization_id: UUID,
     desired_title: str,
     jd_text: Optional[str],
+    allow_reuse: bool = True,
 ) -> Tuple[Optional[JobPosting], str]:
     """Reuse when title root + JD text match; else allocate AI Engineer / AI Engineer 001…"""
     root = _root_title(desired_title)
@@ -63,9 +64,12 @@ def _find_reuse_or_allocate_title(
     ]
 
     target_jd = _normalize_jd(jd_text)
-    for row in siblings:
-        if _normalize_jd(row.jd_text) == target_jd:
-            return row, row.job_title
+    # Reuse only when explicitly allowed and we have meaningful JD text to compare.
+    # This avoids accidental reuse when callers create a job first and upload JD later.
+    if allow_reuse and target_jd:
+        for row in siblings:
+            if _normalize_jd(row.jd_text) == target_jd:
+                return row, row.job_title
 
     taken = {row.job_title.casefold() for row in siblings}
     if root.casefold() not in taken:
@@ -141,6 +145,8 @@ class JobPostingOut(BaseModel):
     created_by: UUID
     job_title: str
     jd_text: Optional[str] = None
+    jd_document_id: Optional[UUID] = None
+    pipeline_status: str
     description: Optional[str] = None
     status: str
     source: str
@@ -204,6 +210,7 @@ def create_job_posting(
         organization_id=user.organization_id,
         desired_title=body.job_title,
         jd_text=body.jd_text,
+        allow_reuse=(body.source != "upload"),
     )
     if existing is not None:
         response.status_code = status.HTTP_200_OK
@@ -255,10 +262,21 @@ def update_job_posting(
 ):
     row = _get_org_job(db, user, job_id)
     data = body.model_dump(exclude_unset=True)
+    jd_text_changed = "jd_text" in data and data.get("jd_text") != row.jd_text
     for key, value in data.items():
         setattr(row, key, value)
     db.commit()
     db.refresh(row)
+    if jd_text_changed:
+        from routers.matches import invalidate_job_matches
+
+        cleared = invalidate_job_matches(db, job_id)
+        if cleared:
+            logger.info(
+                "[job_postings] invalidated %s match score(s) after jd_text edit job=%s",
+                cleared,
+                job_id,
+            )
     return JobPostingOut.model_validate(row)
 
 

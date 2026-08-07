@@ -10,6 +10,9 @@ import {
   Users,
   LogOut,
   Plug,
+  Briefcase,
+  Upload,
+  Code2,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { getHealth } from '@/lib/api'
@@ -22,6 +25,8 @@ const navItems = [
   { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, end: true },
   { to: '/interviews/new', label: 'New Interview', icon: PlusCircle },
   { to: '/interviews/scheduled', label: 'Scheduled', icon: CalendarClock },
+  { to: '/jobs/bulk-upload', label: 'Job Requirements', icon: Upload },
+  { to: '/coding', label: 'Coding', icon: Code2 },
   { to: '/reports', label: 'Reports', icon: FileText },
 ]
 
@@ -29,6 +34,10 @@ const pageTitles: Record<string, string> = {
   '/dashboard': 'Overview',
   '/interviews/new': 'Schedule interview',
   '/interviews/scheduled': 'Scheduled interviews',
+  '/ats/jobs': 'External ATS',
+  '/jobs/bulk-upload': 'Job requirements',
+  '/coding': 'Coding dashboard',
+  '/coding/demo': 'Coding demo',
   '/reports': 'Reports',
   '/settings/team': 'Team',
   '/settings/ats': 'ATS',
@@ -40,6 +49,22 @@ function resolveTitle(pathname: string) {
   }
   if (pathname === '/interviews/scheduled') {
     return 'Scheduled interviews'
+  }
+  if (pathname === '/ats/jobs' || pathname.startsWith('/ats/jobs/')) {
+    return 'External ATS'
+  }
+  if (pathname === '/jobs/bulk-upload') {
+    return 'Job requirements'
+  }
+  if (/^\/jobs\/[^/]+\/resumes$/.test(pathname)) {
+    return 'CV shortlist'
+  }
+  if (pathname === '/coding' || pathname.startsWith('/coding/')) {
+    if (pathname.startsWith('/coding/demo')) return 'Coding demo'
+    return 'Coding dashboard'
+  }
+  if (pathname.includes('/coding')) {
+    return 'Coding task'
   }
   if (pathname === '/settings/team') {
     return 'Team'
@@ -80,6 +105,13 @@ export function AppShell() {
   const isReportsPage = location.pathname === '/reports'
   const isTeamPage = location.pathname === '/settings/team'
   const isAtsPage = location.pathname === '/settings/ats'
+  const isAtsBrowsePage =
+    location.pathname === '/ats/jobs' || location.pathname.startsWith('/ats/jobs/')
+  const isBulkUploadPage = location.pathname === '/jobs/bulk-upload'
+  const isJobResumesPage = /^\/jobs\/[^/]+\/resumes$/.test(location.pathname)
+  const isCodingDashboard = location.pathname === '/coding'
+  const isCodingPage =
+    location.pathname.includes('/coding') || location.pathname.startsWith('/coding/')
   const isReportDetailPage = /^\/interviews\/[^/]+\/report$/.test(location.pathname)
   const isFixedHeightPage =
     isInterviewWizard ||
@@ -88,7 +120,11 @@ export function AppShell() {
     isReportsPage ||
     isReportDetailPage ||
     isTeamPage ||
-    isAtsPage
+    isAtsPage ||
+    isAtsBrowsePage ||
+    isBulkUploadPage ||
+    isJobResumesPage ||
+    isCodingPage
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -135,6 +171,20 @@ export function AppShell() {
                 Team
               </NavLink>
               <NavLink
+                to="/ats/jobs"
+                className={({ isActive }) =>
+                  cn(
+                    'surface-hover flex items-center gap-2.5 rounded-md px-3 py-2 text-sm',
+                    isActive
+                      ? 'bg-sidebar-active font-medium text-sidebar-foreground'
+                      : 'text-sidebar-muted hover:bg-sidebar-hover hover:text-sidebar-foreground',
+                  )
+                }
+              >
+                <Briefcase className="h-4 w-4 shrink-0" strokeWidth={1.5} />
+                External ATS
+              </NavLink>
+              <NavLink
                 to="/settings/ats"
                 className={({ isActive }) =>
                   cn(
@@ -179,13 +229,28 @@ export function AppShell() {
       </aside>
 
       <div className="flex h-screen min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="no-print z-10 flex h-14 shrink-0 items-center justify-between border-b border-sidebar-border bg-sidebar px-6 backdrop-blur-sm">
-          <h1 className="truncate text-base font-semibold leading-none tracking-tight">{title}</h1>
+        <header
+          className={cn(
+            'no-print z-10 flex h-14 shrink-0 items-center justify-between gap-4 border-b border-sidebar-border bg-sidebar px-6 backdrop-blur-sm',
+            isCodingDashboard && 'min-h-14 h-auto py-2.5',
+          )}
+        >
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-base font-semibold leading-none tracking-tight">
+              {title}
+            </h1>
+            {isCodingDashboard ? (
+              <p className="mt-1 max-w-3xl text-[11px] leading-snug text-muted-foreground">
+                A domain is a language track (Python, Java, …). Create one, then add up to
+                5 DSA problems. Candidates stay locked to that language.
+              </p>
+            ) : null}
+          </div>
 
           <button
             type="button"
             onClick={toggleTheme}
-            className="surface-hover inline-flex h-8 w-8 items-center justify-center rounded-md border border-border bg-card text-foreground hover:bg-muted"
+            className="surface-hover inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-card text-foreground hover:bg-muted"
             aria-label={theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode'}
             title={theme === 'light' ? 'Dark mode' : 'Light mode'}
           >
@@ -205,7 +270,8 @@ export function AppShell() {
         >
           <div
             className={cn(
-              'mx-auto max-w-[1100px]',
+              'mx-auto w-full',
+              isJobResumesPage ? 'max-w-[1320px]' : 'max-w-[1100px]',
               isFixedHeightPage && 'flex h-full min-h-0 flex-col',
             )}
           >

@@ -31,6 +31,19 @@ router = APIRouter(prefix="/api/ats", tags=["ats"])
 AtsProviderName = Literal["demo", "custom"]
 
 
+def _raw_str(raw: Optional[dict[str, Any]], *keys: str) -> Optional[str]:
+    if not isinstance(raw, dict):
+        return None
+    for key in keys:
+        val = raw.get(key)
+        if val is None:
+            continue
+        text = str(val).strip()
+        if text:
+            return text
+    return None
+
+
 class AtsSettingsOut(BaseModel):
     provider: Optional[str] = None
     config: dict[str, Any] = Field(default_factory=dict)
@@ -65,6 +78,8 @@ class AtsRemoteCandidateOut(BaseModel):
     full_name: str
     email: Optional[str] = None
     phone: Optional[str] = None
+    status: Optional[str] = None
+    cv_filename: Optional[str] = None
     has_cv_text: bool = False
     has_cv_url: bool = False
     already_imported: bool = False
@@ -75,6 +90,8 @@ class AtsRemoteJobOut(BaseModel):
     external_id: str
     job_title: str
     description: Optional[str] = None
+    company_name: Optional[str] = None
+    status: Optional[str] = None
     has_jd_text: bool = False
     has_jd_url: bool = False
     already_imported: bool = False
@@ -86,6 +103,8 @@ class AtsJobDetailOut(BaseModel):
     job_title: str
     description: Optional[str] = None
     jd_text: Optional[str] = None
+    company_name: Optional[str] = None
+    status: Optional[str] = None
     has_jd_url: bool = False
     already_imported: bool = False
     local_job_posting_id: Optional[UUID] = None
@@ -97,6 +116,8 @@ class AtsCandidateDetailOut(BaseModel):
     email: Optional[str] = None
     phone: Optional[str] = None
     cv_text: Optional[str] = None
+    status: Optional[str] = None
+    cv_filename: Optional[str] = None
     has_cv_url: bool = False
     already_imported: bool = False
     local_candidate_id: Optional[UUID] = None
@@ -270,6 +291,8 @@ def list_remote_candidates(
             full_name=c.full_name,
             email=c.email,
             phone=c.phone,
+            status=_raw_str(c.raw, "status"),
+            cv_filename=c.cv_filename or _raw_str(c.raw, "resume_file_name"),
             has_cv_text=bool(c.cv_text),
             has_cv_url=bool(c.cv_url),
             already_imported=c.external_id in imported,
@@ -320,6 +343,8 @@ def list_remote_jobs(
             external_id=j.external_id,
             job_title=j.job_title,
             description=j.description,
+            company_name=_raw_str(j.raw, "company_name"),
+            status=_raw_str(j.raw, "status") or j.description,
             has_jd_text=bool(j.jd_text),
             has_jd_url=bool(j.jd_url),
             already_imported=j.external_id in imported,
@@ -371,6 +396,8 @@ def get_remote_job(
         job_title=remote.job_title,
         description=remote.description,
         jd_text=remote.jd_text,
+        company_name=_raw_str(remote.raw, "company_name"),
+        status=_raw_str(remote.raw, "status") or remote.description,
         has_jd_url=bool(remote.jd_url),
         already_imported=local is not None,
         local_job_posting_id=local.id if local else None,
@@ -435,6 +462,8 @@ def get_remote_candidate(
         email=remote.email,
         phone=remote.phone,
         cv_text=cv_text,
+        status=_raw_str(remote.raw, "status"),
+        cv_filename=remote.cv_filename or _raw_str(remote.raw, "resume_file_name"),
         has_cv_url=bool(remote.cv_url),
         already_imported=local is not None,
         local_candidate_id=local.id if local else None,
