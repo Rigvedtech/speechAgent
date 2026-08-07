@@ -1,7 +1,8 @@
 """
 Local camera test for interview face / gaze / expression analysis.
 
-Matches live meeting warn policy (same .env timers). Simulate turns:
+Matches live meeting warn policy (same camera_integrity_policy + .env timers).
+Simulate turns:
   c — candidate answer turn (warns ON)  [default]
   a — AI asking turn (warns OFF)
 
@@ -13,7 +14,7 @@ Controls:
   q / ESC — quit
   s       — print current frame JSON to terminal
   a       — AI turn (looking away OK, no warn)
-  c       — candidate turn (down/side 2s warn, 8s cooldown)
+  c       — candidate turn (interview dwell timers from .env)
 """
 
 from __future__ import annotations
@@ -43,6 +44,7 @@ import edge_tts
 import numpy as np
 
 import config as app_config
+from camera_integrity_policy import classify_integrity_risk, significant_extra_faces
 from face_analysis import (
     FaceAnalysisResult,
     FaceAnalyzer,
@@ -176,14 +178,6 @@ class IntegrityWarnMonitor:
         self._cooldown_multi = float(
             getattr(app_config, "CAMERA_WARN_COOLDOWN_MULTI_FACE_SEC", 5.0)
         )
-        self._include_side = bool(app_config.CAMERA_WARN_INCLUDE_SIDE_LOOK)
-        self._on_no_face = bool(app_config.CAMERA_WARN_ON_NO_FACE)
-        self._on_multi = bool(app_config.CAMERA_WARN_ON_MULTI_FACE)
-        self._on_away = bool(app_config.CAMERA_WARN_ON_LOOKING_AWAY)
-        self._on_down = bool(getattr(app_config, "CAMERA_WARN_ON_LOOKING_DOWN", True))
-        self._multi_min_area_ratio = float(
-            getattr(app_config, "CAMERA_WARN_MULTI_FACE_MIN_AREA_RATIO", 0.18)
-        )
         self._hold_frames = max(1, int(getattr(app_config, "CAMERA_WARN_HOLD_FRAMES", 8)))
         self._enabled = bool(app_config.CAMERA_WARN_TTS_ENABLED) and speaker is not None
         # Match live meeting: warns only on candidate answer turn (not AI asking)
@@ -193,17 +187,30 @@ class IntegrityWarnMonitor:
         self._pending_hits = 0
         self._last_gaze_warn_at = 0.0
         self._last_multi_warn_at = 0.0
+        side_min_yaw = float(
+            getattr(app_config, "CAMERA_WARN_SIDE_MIN_YAW_DEG", 0.0) or 0.0
+        )
+        down_min_pitch = float(
+            getattr(app_config, "CAMERA_WARN_DOWN_MIN_PITCH_DEG", 0.0) or 0.0
+        )
+        ignore_speaking = bool(
+            getattr(app_config, "CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING", False)
+        )
         logger.info(
             "Warn monitor: enabled=%s down_after=%.1fs side_after=%.1fs "
             "away_after=%.1fs gaze_cd=%.1fs multi_cd=%.1fs side_look=%s "
-            "hold_frames=%d turn=candidate (press a=AI / c=candidate)",
+            "side_min_yaw=%.0f down_min_pitch=%.0f ignore_while_speaking=%s "
+            "hold_frames=%d turn=candidate (press a=AI / c=candidate) [shared policy]",
             self._enabled,
             self._warn_after_down,
             self._warn_after_side,
             self._warn_after_away,
             self._cooldown,
             self._cooldown_multi,
-            self._include_side,
+            bool(app_config.CAMERA_WARN_INCLUDE_SIDE_LOOK),
+            side_min_yaw,
+            down_min_pitch,
+            ignore_speaking,
             self._hold_frames,
         )
 
@@ -226,39 +233,11 @@ class IntegrityWarnMonitor:
         )
 
     def _significant_extra_faces(self, result: FrameAnalysisResult) -> bool:
-        """True only if a second face is large enough vs the primary (not a tiny poster)."""
-        if len(result.faces) < 2:
-            return False
-        primary = result.faces[0]
-        p_area = max(1.0, float(primary.bbox.width * primary.bbox.height))
-        for face in result.faces[1:]:
-            area = float(face.bbox.width * face.bbox.height)
-            if area / p_area >= self._multi_min_area_ratio:
-                return True
-        return False
+        return significant_extra_faces(result)
 
     def _classify(self, result: FrameAnalysisResult) -> Optional[str]:
-        if result.face_count <= 0:
-            return "no_face" if self._on_no_face else None
-        if self._on_multi and self._significant_extra_faces(result):
-            return "multi_face"
-        if not result.faces:
-            return None
-        primary = result.faces[0]
-        gaze = primary.gaze
-        # Thinking / remembering — never warn
-        if gaze == GazeDirection.LOOKING_UP:
-            return None
-        if self._on_down and gaze == GazeDirection.LOOKING_DOWN:
-            return "looking_down"
-        if self._on_away and gaze == GazeDirection.LOOKING_AWAY:
-            return "looking_away"
-        if self._include_side and gaze in (
-            GazeDirection.LOOKING_LEFT,
-            GazeDirection.LOOKING_RIGHT,
-        ):
-            return "looking_side"
-        return None
+        """Same policy as live CandidateCameraTracker (shared module)."""
+        return classify_integrity_risk(result)
 
     def _threshold_for(self, kind: str) -> float:
         if kind == "looking_down":
@@ -497,12 +476,16 @@ def _draw_hud(
             cv2.LINE_AA,
         )
     else:
+        down_s = float(getattr(app_config, "CAMERA_WARN_AFTER_DOWN_SEC", 6.0))
+        side_s = float(getattr(app_config, "CAMERA_WARN_AFTER_SIDE_SEC", 8.0))
+        cool_s = float(app_config.CAMERA_WARN_COOLDOWN_SEC)
         cv2.putText(
             frame,
-            "up=never warn | chin-down or side 2s → warn (8s cooldown)",
+            f"head/face integrity | chin≥16° or side yaw≥20° → warn "
+            f"({down_s:.0f}/{side_s:.0f}s, cd {cool_s:.0f}s)",
             (12, 70),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
+            0.45,
             (180, 180, 180),
             1,
             cv2.LINE_AA,

@@ -25,10 +25,10 @@ from typing import Any, Dict, Optional
 import numpy as np
 
 import config
+from camera_integrity_policy import classify_integrity_risk, significant_extra_faces
 from face_analysis import (
     FaceAnalyzer,
     FrameAnalysisResult,
-    GazeDirection,
     SpeakingState,
     parse_gaze_mode,
 )
@@ -433,18 +433,7 @@ class CandidateCameraTracker:
         return False
 
     def _significant_extra_faces(self, result: FrameAnalysisResult) -> bool:
-        if len(result.faces) < 2:
-            return False
-        if not config.CAMERA_WARN_ON_MULTI_FACE:
-            return False
-        primary = result.faces[0]
-        p_area = max(1.0, float(primary.bbox.width * primary.bbox.height))
-        ratio = float(config.CAMERA_WARN_MULTI_FACE_MIN_AREA_RATIO)
-        for face in result.faces[1:]:
-            area = float(face.bbox.width * face.bbox.height)
-            if area / p_area >= ratio:
-                return True
-        return False
+        return significant_extra_faces(result)
 
     @staticmethod
     def _is_down_kind(kind: Optional[str]) -> bool:
@@ -469,54 +458,8 @@ class CandidateCameraTracker:
         return kind == "multi_face"
 
     def _classify_risk(self, result: FrameAnalysisResult) -> Optional[str]:
-        """
-        Priority: multi_face > no_face > looking_down > looking_side / looking_away.
-
-        looking_up never warns (thinking / remembering).
-        Natural answering: mild side iris glances are labeled center by interview
-        gaze mode; while visually speaking we also skip side/away/down if configured.
-        """
-        if self._significant_extra_faces(result):
-            return "multi_face"
-        if result.face_count <= 0:
-            return "no_face" if config.CAMERA_WARN_ON_NO_FACE else None
-        if not result.faces:
-            return None
-        primary = result.faces[0]
-        gaze = primary.gaze
-        speaking = primary.speaking == SpeakingState.SPEAKING
-        ignore_while_speaking = bool(
-            getattr(config, "CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING", False)
-        )
-
-        # Eye-up while thinking — never treat as integrity risk
-        if gaze == GazeDirection.LOOKING_UP:
-            return None
-
-        if config.CAMERA_WARN_ON_LOOKING_DOWN and gaze == GazeDirection.LOOKING_DOWN:
-            if ignore_while_speaking and speaking:
-                return None
-            return "looking_down"
-
-        if config.CAMERA_WARN_ON_LOOKING_AWAY and gaze == GazeDirection.LOOKING_AWAY:
-            if ignore_while_speaking and speaking:
-                return None
-            return "looking_away"
-
-        if config.CAMERA_WARN_INCLUDE_SIDE_LOOK and gaze in (
-            GazeDirection.LOOKING_LEFT,
-            GazeDirection.LOOKING_RIGHT,
-        ):
-            if ignore_while_speaking and speaking:
-                return None
-            # Eyes alone are not enough — require a real head turn toward a
-            # second screen / off-camera direction (interview-friendly).
-            min_yaw = float(getattr(config, "CAMERA_WARN_SIDE_MIN_YAW_DEG", 0.0) or 0.0)
-            if min_yaw > 0 and abs(float(primary.head_yaw_deg)) < min_yaw:
-                return None
-            return "looking_side"
-
-        return None
+        """Same policy as local camera_detection_test (shared module)."""
+        return classify_integrity_risk(result)
 
     def _threshold_for(self, kind: str) -> float:
         if kind == "multi_face":

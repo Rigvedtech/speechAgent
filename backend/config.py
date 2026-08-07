@@ -426,6 +426,8 @@ CAMERA_WARN_RISK_GRACE_SEC = _env_float("CAMERA_WARN_RISK_GRACE_SEC", 1.5)
 CAMERA_WARN_INCLUDE_SIDE_LOOK = _env_bool("CAMERA_WARN_INCLUDE_SIDE_LOOK", True)
 # Side look only if |head yaw| >= this (0 = eyes alone). Interview default ~20°.
 CAMERA_WARN_SIDE_MIN_YAW_DEG = _env_float("CAMERA_WARN_SIDE_MIN_YAW_DEG", 20.0)
+# looking_down warn only if |head pitch| >= this (eyes/iris alone do not warn).
+CAMERA_WARN_DOWN_MIN_PITCH_DEG = _env_float("CAMERA_WARN_DOWN_MIN_PITCH_DEG", 16.0)
 # looking_down = hard head nod (desk/phone); mild screen look stays center
 CAMERA_WARN_ON_LOOKING_DOWN = _env_bool("CAMERA_WARN_ON_LOOKING_DOWN", True)
 CAMERA_WARN_ON_NO_FACE = _env_bool("CAMERA_WARN_ON_NO_FACE", True)

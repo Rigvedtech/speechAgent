@@ -1,15 +1,14 @@
-"""
-Reusable face analysis for interview integrity checks.
+"""Reusable face analysis for interview integrity checks.
 
 Uses MediaPipe Face Landmarker (landmarks + blendshapes + transform matrix):
 - Multi-face detection
-- Eye-first gaze: center | left | right | down | up | away
-- Modes: production (default) | interview (soft screen look) | strict (QA)
+- Gaze: center | left | right | down | up | away
+- Modes: production | interview (head/face-first, iris weight ~0) | strict
 - Interview expressions: neutral | smiling | focused | distracted | confused
 - Speaking: speaking | not_speaking (visual lip/jaw motion; not audio VAD)
 
-Designed so local OpenCV tests and future Recall frame pipelines share one API.
-Labels stay honest; integrity warn policy is configured separately.
+Interview mode trusts head pose for desk/side risk; iris landmarks stay available
+for debug HUD but do not drive integrity labels.
 """
 
 from __future__ import annotations
@@ -58,7 +57,7 @@ class GazeDirection(str, Enum):
 class GazeMode(str, Enum):
     """
     production — mild UI eye-down = center; stronger desk-down = looking_down
-    interview  — integrity-tuned (same policy, slightly smoother)
+    interview  — head/face-first (iris weight 0); desk/side need head pose
     strict     — sensitive eyes for QA (eye-down can label without mild remap)
     """
 
@@ -248,6 +247,10 @@ class _GazeProfile:
     # Mild left/right eye glance → center (interview: natural speaking glances)
     mild_side_as_center: bool
     mild_side_max: float
+    # Interview: ignore eye/iris for down/side unless head also moved
+    eye_gaze_requires_head: bool
+    # When eye_gaze_requires_head: min |yaw| before left/right eye labels stick
+    side_yaw_min_deg: float
     smoother_window: int
     prefer_center_on_tie: bool
 
@@ -267,25 +270,29 @@ _GAZE_PROFILES: Dict[GazeMode, _GazeProfile] = {
         head_down_deg=10.0,
         mild_side_as_center=False,
         mild_side_max=0.40,
+        eye_gaze_requires_head=False,
+        side_yaw_min_deg=0.0,
         smoother_window=4,
         prefer_center_on_tie=True,
     ),
     GazeMode.INTERVIEW: _GazeProfile(
-        # Natural answering: small iris/side glances stay center; only clear
-        # second-screen or desk-down should leave looking_center.
-        eye_threshold=0.38,
-        eye_margin=0.08,
-        yaw_away_deg=42.0,
-        pitch_away_deg=36.0,
-        blend_weight=0.65,
-        iris_weight=0.35,
+        # Head/face-first integrity: iris weight ~0; desk/side from head pose.
+        # Eyes alone never mark looking_down / looking_side during interviews.
+        eye_threshold=0.45,
+        eye_margin=0.10,
+        yaw_away_deg=45.0,
+        pitch_away_deg=40.0,
+        blend_weight=1.0,
+        iris_weight=0.0,
         screen_down_as_center=True,
-        screen_down_max=0.48,
-        iris_down_start=0.58,
-        head_down_deg=14.0,
+        screen_down_max=0.75,
+        iris_down_start=0.72,
+        head_down_deg=18.0,
         mild_side_as_center=True,
-        mild_side_max=0.48,
-        smoother_window=7,
+        mild_side_max=0.65,
+        eye_gaze_requires_head=True,
+        side_yaw_min_deg=16.0,
+        smoother_window=8,
         prefer_center_on_tie=True,
     ),
     GazeMode.STRICT: _GazeProfile(
@@ -301,6 +308,8 @@ _GAZE_PROFILES: Dict[GazeMode, _GazeProfile] = {
         head_down_deg=8.0,
         mild_side_as_center=False,
         mild_side_max=0.35,
+        eye_gaze_requires_head=False,
+        side_yaw_min_deg=0.0,
         smoother_window=3,
         prefer_center_on_tie=False,
     ),
@@ -499,6 +508,7 @@ def classify_gaze(
       - sustained / strong down → looking_down (desk / notes risk)
       - clear left/right → looking_left / looking_right (second-screen risk)
       - strong head turn → looking_away
+      - interview mode (eye_gaze_requires_head): down/side from head pose, not iris
     """
     profile = _GAZE_PROFILES[mode]
     if metrics is None:
@@ -524,7 +534,10 @@ def classify_gaze(
             bw = profile.blend_weight
             iw = profile.iris_weight
             denom = bw + iw
-            bw, iw = bw / denom, iw / denom
+            if denom <= 1e-9:
+                bw, iw = 1.0, 0.0
+            else:
+                bw, iw = bw / denom, iw / denom
             metrics = GazeMetrics(
                 look_left=look_left,
                 look_right=look_right,
@@ -553,8 +566,6 @@ def classify_gaze(
     mild_screen_down = float(profile.screen_down_max)
 
     # Chin tipped toward desk/notes: trust head pitch over iris.
-    # Iris often sits "up" in the socket when the head is down but eyes
-    # still face the webcam — that used to force looking_center / looking_up.
     clearly_looking_up = (
         up >= profile.eye_threshold
         and up >= down + profile.eye_margin
@@ -564,8 +575,19 @@ def classify_gaze(
     if clearly_looking_up:
         return GazeDirection.LOOKING_UP
 
+    # Clear chin-down (desk / notes) — primary signal in interview mode
     if pitch_abs >= profile.head_down_deg:
         return GazeDirection.LOOKING_DOWN
+
+    # Interview / head-first: eyes alone cannot label down or side
+    if profile.eye_gaze_requires_head:
+        side_yaw_need = float(profile.side_yaw_min_deg)
+        if yaw_abs >= max(side_yaw_need, 1.0) and side_max >= profile.eye_threshold:
+            if left >= right and left >= up:
+                return GazeDirection.LOOKING_LEFT
+            if right > left and right >= up:
+                return GazeDirection.LOOKING_RIGHT
+        return GazeDirection.LOOKING_CENTER
 
     # Boost eye-down with moderate head nod so weak iris-down still counts
     if pitch_abs >= profile.head_down_deg * 0.6:
@@ -609,7 +631,7 @@ def classify_gaze(
             return GazeDirection.LOOKING_CENTER
         return GazeDirection.LOOKING_DOWN
 
-    # Mild left/right iris glance while facing camera → center (interview)
+    # Mild left/right iris glance while facing camera → center
     if (
         profile.mild_side_as_center
         and best_dir in (GazeDirection.LOOKING_LEFT, GazeDirection.LOOKING_RIGHT)
