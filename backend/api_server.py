@@ -56,6 +56,7 @@ from routers.coding import (
 from routers.uploads import router as uploads_router
 from routers.extraction import router as extraction_router
 from routers.parsing import router as parsing_router
+from routers.matches import router as matches_router
 import interview_persist
 import document_store
 load_dotenv()
@@ -108,6 +109,7 @@ app.include_router(uploads_router)
 app.include_router(extraction_router)
 app.include_router(parsing_router)
 app.include_router(coding_router)
+app.include_router(matches_router)
 
 # Serve audio-worklet-processor.js and other static assets
 STATIC_DIR = Path(__file__).parent / "static"

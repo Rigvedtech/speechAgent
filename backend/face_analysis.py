@@ -245,6 +245,9 @@ class _GazeProfile:
     iris_down_start: float
     # Hard chin-down head pitch (deg) required to label looking_down
     head_down_deg: float
+    # Mild left/right eye glance → center (interview: natural speaking glances)
+    mild_side_as_center: bool
+    mild_side_max: float
     smoother_window: int
     prefer_center_on_tie: bool
 
@@ -262,22 +265,27 @@ _GAZE_PROFILES: Dict[GazeMode, _GazeProfile] = {
         screen_down_max=0.42,
         iris_down_start=0.52,
         head_down_deg=10.0,
+        mild_side_as_center=False,
+        mild_side_max=0.40,
         smoother_window=4,
         prefer_center_on_tie=True,
     ),
     GazeMode.INTERVIEW: _GazeProfile(
-        # Chin-down beats iris-up (desk/notes); mild eye-only screen glance → center
-        eye_threshold=0.26,
-        eye_margin=0.05,
-        yaw_away_deg=35.0,
-        pitch_away_deg=32.0,
-        blend_weight=0.45,
-        iris_weight=0.55,
+        # Natural answering: small iris/side glances stay center; only clear
+        # second-screen or desk-down should leave looking_center.
+        eye_threshold=0.38,
+        eye_margin=0.08,
+        yaw_away_deg=42.0,
+        pitch_away_deg=36.0,
+        blend_weight=0.65,
+        iris_weight=0.35,
         screen_down_as_center=True,
-        screen_down_max=0.42,
-        iris_down_start=0.52,
-        head_down_deg=10.0,
-        smoother_window=5,
+        screen_down_max=0.48,
+        iris_down_start=0.58,
+        head_down_deg=14.0,
+        mild_side_as_center=True,
+        mild_side_max=0.48,
+        smoother_window=7,
         prefer_center_on_tie=True,
     ),
     GazeMode.STRICT: _GazeProfile(
@@ -291,6 +299,8 @@ _GAZE_PROFILES: Dict[GazeMode, _GazeProfile] = {
         screen_down_max=0.50,
         iris_down_start=0.50,
         head_down_deg=8.0,
+        mild_side_as_center=False,
+        mild_side_max=0.35,
         smoother_window=3,
         prefer_center_on_tie=False,
     ),
@@ -598,6 +608,15 @@ def classify_gaze(
         if best_score < mild_screen_down and pitch_abs < profile.head_down_deg:
             return GazeDirection.LOOKING_CENTER
         return GazeDirection.LOOKING_DOWN
+
+    # Mild left/right iris glance while facing camera → center (interview)
+    if (
+        profile.mild_side_as_center
+        and best_dir in (GazeDirection.LOOKING_LEFT, GazeDirection.LOOKING_RIGHT)
+        and best_score < float(profile.mild_side_max)
+        and yaw_abs < max(18.0, profile.yaw_away_deg * 0.45)
+    ):
+        return GazeDirection.LOOKING_CENTER
 
     return best_dir
 

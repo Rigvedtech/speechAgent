@@ -351,6 +351,58 @@ export interface JobResume {
   current_title?: string | null
   cv_text?: string | null
   created_at: string
+  /** Null / missing = unscored for this job */
+  match_score?: number | null
+  match_rank?: number | null
+  match_scored_at?: string | null
+  match_summary?: string | null
+  match_reasons?: {
+    summary?: string
+    strengths?: string[]
+    gaps?: string[]
+    matched_skills?: string[]
+    missing_skills?: string[]
+  } | null
+  match_breakdown?: {
+    scale?: string
+    skills_match?: number | string
+    experience_fit?: number | string
+    skill_usage?: number | string
+    domain_alignment?: number | string
+    overall_llm?: number | string
+    final?: number | string
+    final_100?: number | string
+    matched_skills?: string[]
+    missing_skills?: string[]
+    llm_source?: string
+    weights?: Record<string, number>
+    [key: string]: unknown
+  } | null
+}
+
+export interface JobMatchResult {
+  candidate_id: string
+  document_id?: string | null
+  score: number
+  rank?: number | null
+  score_breakdown?: Record<string, unknown> | null
+  reasons_json?: JobResume['match_reasons']
+  domain_overlap: string[]
+  model_version?: string | null
+  scored_at: string
+}
+
+export interface ScoreJobMatchesResponse {
+  job_posting_id: string
+  total_candidates: number
+  scored: number
+  skipped_already_scored: number
+  skipped_unchanged?: number
+  skipped_no_profile: number
+  skipped_no_text: number
+  failed: number
+  unscored_remaining: number
+  results: JobMatchResult[]
 }
 
 export interface BatchExtractSummary {
@@ -412,6 +464,14 @@ export interface CreateJobPostingRequest {
   description?: string
   status?: 'draft' | 'open' | 'closed' | 'filled'
   source?: 'manual' | 'upload'
+}
+
+export interface UpdateJobPostingRequest {
+  job_title?: string
+  jd_text?: string
+  description?: string
+  status?: 'draft' | 'open' | 'closed' | 'filled'
+  is_active?: boolean
 }
 
 export interface CreateUserRequest {

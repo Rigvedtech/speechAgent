@@ -473,8 +473,8 @@ class CandidateCameraTracker:
         Priority: multi_face > no_face > looking_down > looking_side / looking_away.
 
         looking_up never warns (thinking / remembering).
-        Lip motion does NOT suppress gaze risk — turn gating is done via
-        set_candidate_turn (AI asking vs candidate answering).
+        Natural answering: mild side iris glances are labeled center by interview
+        gaze mode; while visually speaking we also skip side/away/down if configured.
         """
         if self._significant_extra_faces(result):
             return "multi_face"
@@ -484,21 +484,36 @@ class CandidateCameraTracker:
             return None
         primary = result.faces[0]
         gaze = primary.gaze
+        speaking = primary.speaking == SpeakingState.SPEAKING
+        ignore_while_speaking = bool(
+            getattr(config, "CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING", False)
+        )
 
         # Eye-up while thinking — never treat as integrity risk
         if gaze == GazeDirection.LOOKING_UP:
             return None
 
         if config.CAMERA_WARN_ON_LOOKING_DOWN and gaze == GazeDirection.LOOKING_DOWN:
+            if ignore_while_speaking and speaking:
+                return None
             return "looking_down"
 
         if config.CAMERA_WARN_ON_LOOKING_AWAY and gaze == GazeDirection.LOOKING_AWAY:
+            if ignore_while_speaking and speaking:
+                return None
             return "looking_away"
 
         if config.CAMERA_WARN_INCLUDE_SIDE_LOOK and gaze in (
             GazeDirection.LOOKING_LEFT,
             GazeDirection.LOOKING_RIGHT,
         ):
+            if ignore_while_speaking and speaking:
+                return None
+            # Eyes alone are not enough — require a real head turn toward a
+            # second screen / off-camera direction (interview-friendly).
+            min_yaw = float(getattr(config, "CAMERA_WARN_SIDE_MIN_YAW_DEG", 0.0) or 0.0)
+            if min_yaw > 0 and abs(float(primary.head_yaw_deg)) < min_yaw:
+                return None
             return "looking_side"
 
         return None

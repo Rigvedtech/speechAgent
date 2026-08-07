@@ -154,9 +154,11 @@ Critical JSON rules:
 - Escape quotes inside strings
 
 Critical correctness rules:
+- REQUIRED: non-empty reference_solution key (Python). Omitting it makes the JSON invalid.
 - reference_solution's parameter names/keys MUST match the example input JSON keys exactly
 - Examples must be correct for the statement — recompute them yourself before writing them
 - Never write a reference_solution that just returns its input unchanged
+- starter_code is {label}; reference_solution is ALWAYS Python — never omit it for non-Python domains
 
 No markdown.
 """
@@ -171,10 +173,13 @@ No markdown.
                         "content": (
                             "You generate one clear DSA interview problem as STRICT valid JSON. "
                             "Never repeat an existing title. Never use Python triple-quoted strings. "
-                            "Put code in JSON strings with \\n escapes. reference_solution must be "
-                            "def solution(data): reading fields via data['key'] using the exact same "
-                            "keys as the example input JSON objects — never a different function name, "
-                            "never separate positional params, never an identity/no-op return. "
+                            "Put code in JSON strings with \\n escapes. "
+                            "You MUST always include a non-empty reference_solution string key — "
+                            "never omit it. reference_solution must be Python "
+                            "`def solution(data):` (or a Python def matching entry_function) "
+                            "reading fields via data['key'] using the exact same keys as the "
+                            "example input JSON objects — never JS/Java/C++, never separate "
+                            "positional params, never an identity/no-op return. "
                             "Include exactly 2 correct examples."
                         ),
                     },
@@ -202,6 +207,16 @@ No markdown.
 
         if not data:
             continue
+
+        # Model often omits reference_solution on non-Python domains — fill it.
+        if not _reference_text(data):
+            filled = _fill_missing_reference_solution(client, model, data)
+            if filled:
+                data["reference_solution"] = filled
+                logger.info(
+                    "[coding_gen] filled missing reference_solution attempt=%s",
+                    attempt,
+                )
 
         normalized, reason = _normalize_problem(data, language=lang)
         if not normalized:
@@ -250,6 +265,80 @@ No markdown.
 def _is_rate_limited(message: str) -> bool:
     text = (message or "").lower()
     return "429" in text or "too many requests" in text or "rate_limit" in text
+
+
+def _reference_text(data: dict[str, Any]) -> str:
+    return str(
+        data.get("reference_solution")
+        or data.get("solution")
+        or data.get("python_solution")
+        or ""
+    ).strip()
+
+
+def _fill_missing_reference_solution(
+    client: Any,
+    model: str,
+    draft: dict[str, Any],
+) -> Optional[str]:
+    """Ask Groq for only the missing Python reference when the draft omitted it."""
+    title = str(draft.get("title") or "").strip()
+    statement = str(draft.get("statement") or draft.get("description") or "").strip()
+    entry = str(
+        draft.get("entry_function") or draft.get("function_name") or "solution"
+    ).strip() or "solution"
+    examples = draft.get("examples") or draft.get("sample_cases") or []
+    if not title or not statement or not examples:
+        return None
+
+    try:
+        examples_json = json.dumps(examples[:2], ensure_ascii=False)[:1200]
+    except Exception:
+        examples_json = str(examples)[:1200]
+
+    prompt = f"""The problem draft below is missing reference_solution.
+Return STRICT JSON with exactly one key: reference_solution (Python 3 string).
+
+Rules:
+- Must define `def solution(data):` OR `def {entry}(...):` in Python
+- Read example input fields via data["key"] using the SAME keys as the example input objects
+- Correct for the examples; never return the input unchanged
+- Use \\n escapes; no markdown; no triple quotes
+
+title: {title}
+entry_function: {entry}
+statement:
+{statement[:900]}
+
+examples:
+{examples_json}
+"""
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You only write a Python reference_solution for an existing DSA "
+                        "problem draft. Return JSON {\"reference_solution\": \"...\"}."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            max_tokens=900,
+            timeout=45,
+            response_format={"type": "json_object"},
+        )
+        raw = resp.choices[0].message.content or ""
+        parsed = _loads_problem_json(raw)
+        code = _reference_text(parsed)
+        if code and re.search(r"^\s*def\s+\w+\s*\(", code, flags=re.M):
+            return code
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[coding_gen] fill reference_solution failed: %s", exc)
+    return None
 
 
 def _loads_problem_json(raw: str) -> dict[str, Any]:

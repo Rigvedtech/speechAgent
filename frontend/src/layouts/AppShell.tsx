@@ -56,6 +56,9 @@ function resolveTitle(pathname: string) {
   if (pathname === '/jobs/bulk-upload') {
     return 'Job requirements'
   }
+  if (/^\/jobs\/[^/]+\/resumes$/.test(pathname)) {
+    return 'CV shortlist'
+  }
   if (pathname === '/coding' || pathname.startsWith('/coding/')) {
     if (pathname.startsWith('/coding/demo')) return 'Coding demo'
     return 'Coding dashboard'
@@ -105,6 +108,7 @@ export function AppShell() {
   const isAtsBrowsePage =
     location.pathname === '/ats/jobs' || location.pathname.startsWith('/ats/jobs/')
   const isBulkUploadPage = location.pathname === '/jobs/bulk-upload'
+  const isJobResumesPage = /^\/jobs\/[^/]+\/resumes$/.test(location.pathname)
   const isCodingDashboard = location.pathname === '/coding'
   const isCodingPage =
     location.pathname.includes('/coding') || location.pathname.startsWith('/coding/')
@@ -119,6 +123,7 @@ export function AppShell() {
     isAtsPage ||
     isAtsBrowsePage ||
     isBulkUploadPage ||
+    isJobResumesPage ||
     isCodingPage
 
   return (
@@ -265,7 +270,8 @@ export function AppShell() {
         >
           <div
             className={cn(
-              'mx-auto max-w-[1100px]',
+              'mx-auto w-full',
+              isJobResumesPage ? 'max-w-[1320px]' : 'max-w-[1100px]',
               isFixedHeightPage && 'flex h-full min-h-0 flex-col',
             )}
           >

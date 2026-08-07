@@ -27,7 +27,15 @@ from sqlalchemy.orm import Session
 
 import config as app_config
 from auth.deps import get_current_user, get_db, require_writer
-from db.models import Candidate, Document, JobPosting, UploadBatch, UploadBatchItem, User
+from db.models import (
+    Candidate,
+    Document,
+    JobCandidateMatch,
+    JobPosting,
+    UploadBatch,
+    UploadBatchItem,
+    User,
+)
 from document_store import uploads_root
 
 logger = logging.getLogger(__name__)
@@ -346,6 +354,43 @@ class JobResumeOut(BaseModel):
     current_title: Optional[str] = None
     cv_text: Optional[str] = None
     created_at: datetime
+    # JD ↔ CV match (null = unscored for this job)
+    match_score: Optional[float] = None
+    match_rank: Optional[int] = None
+    match_scored_at: Optional[datetime] = None
+    match_summary: Optional[str] = None
+    match_reasons: Optional[dict[str, object]] = None
+    match_breakdown: Optional[dict[str, object]] = None
+
+
+def _plain_breakdown(raw: object) -> Optional[dict[str, object]]:
+    """Coerce JSONB score_breakdown into JSON-safe floats for the UI."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict[str, object] = {}
+    for key, value in raw.items():
+        k = str(key)
+        if isinstance(value, bool):
+            out[k] = value
+        elif isinstance(value, (int, float)):
+            out[k] = float(value)
+        elif isinstance(value, str):
+            try:
+                out[k] = float(value)
+            except ValueError:
+                out[k] = value
+        elif isinstance(value, list):
+            out[k] = [str(x) for x in value]
+        elif isinstance(value, dict):
+            nested = _plain_breakdown(value)
+            out[k] = nested if nested is not None else value
+        else:
+            # Decimal / other numerics
+            try:
+                out[k] = float(value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                out[k] = value
+    return out or None
 
 
 # ---------------------------------------------------------------------------
@@ -729,23 +774,68 @@ def list_job_resumes(
         .order_by(Document.created_at.desc())
     ).all()
 
-    return [
-        JobResumeOut(
-            document_id=document.id,
-            candidate_id=document.candidate_id,
-            original_filename=document.original_filename,
-            file_size_bytes=document.file_size_bytes,
-            mime_type=document.mime_type,
-            upload_status=document.upload_status,
-            error_message=document.error_message,
-            full_name=candidate.full_name if candidate else None,
-            email=candidate.email if candidate else None,
-            current_title=candidate.current_title if candidate else None,
-            cv_text=candidate.cv_text if candidate else None,
-            created_at=document.created_at,
+    matches = {
+        m.candidate_id: m
+        for m in db.scalars(
+            select(JobCandidateMatch).where(
+                JobCandidateMatch.organization_id == user.organization_id,
+                JobCandidateMatch.job_posting_id == job_id,
+            )
+        ).all()
+    }
+
+    def _score_on_ten(raw: object) -> Optional[float]:
+        """Normalize stored score to 1–10 (legacy rows may still be 0–100)."""
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        if value > 10:
+            value = value / 10.0
+        return round(max(1.0, min(10.0, value)), 1)
+
+    out: list[JobResumeOut] = []
+    for document, candidate in rows:
+        match = matches.get(candidate.id) if candidate else None
+        reasons = match.reasons_json if match and isinstance(match.reasons_json, dict) else None
+        # Same text source the scorer uses (candidate.cv_text, else document extract)
+        candidate_cv = (candidate.cv_text or "").strip() if candidate else ""
+        doc_cv = (document.extracted_text or "").strip()
+        effective_cv = candidate_cv if len(candidate_cv) >= 40 else doc_cv
+        out.append(
+            JobResumeOut(
+                document_id=document.id,
+                candidate_id=document.candidate_id,
+                original_filename=document.original_filename,
+                file_size_bytes=document.file_size_bytes,
+                mime_type=document.mime_type,
+                upload_status=document.upload_status,
+                error_message=document.error_message,
+                full_name=candidate.full_name if candidate else None,
+                email=candidate.email if candidate else None,
+                current_title=candidate.current_title if candidate else None,
+                cv_text=effective_cv or None,
+                created_at=document.created_at,
+                match_score=_score_on_ten(match.score) if match else None,
+                match_rank=match.rank if match else None,
+                match_scored_at=match.scored_at if match else None,
+                match_summary=(reasons or {}).get("summary") if reasons else None,
+                match_reasons=reasons,
+                match_breakdown=_plain_breakdown(
+                    match.score_breakdown if match else None
+                ),
+            )
         )
-        for document, candidate in rows
-    ]
+    # Scored first (highest), then unscored — keeps shortlist readable
+    out.sort(
+        key=lambda r: (
+            0 if r.match_score is None else 1,
+            r.match_score if r.match_score is not None else -1,
+            r.created_at,
+        ),
+        reverse=True,
+    )
+    return out
 
 
 @router.get(

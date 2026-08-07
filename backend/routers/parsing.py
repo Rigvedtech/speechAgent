@@ -195,9 +195,22 @@ def _run_parse(doc: Document, db: Session, actor: User) -> ParsedCVOut:
                     jp_meta["parsed_jd"] = parsed_dict
                     jp.structured_json = jp_meta
                     jp.domain_tags = parsed.domain_tags
+                    jd_changed = False
                     if len(text.strip()) >= 100:
-                        jp.jd_text = text.strip()
+                        new_jd = text.strip()
+                        jd_changed = (jp.jd_text or "").strip() != new_jd
+                        jp.jd_text = new_jd
                     jp.pipeline_status = "ready"
+                    if jd_changed:
+                        from routers.matches import invalidate_job_matches
+
+                        cleared = invalidate_job_matches(db, jp.id)
+                        if cleared:
+                            logger.info(
+                                "[parsing] invalidated %s match score(s) after JD reparse job=%s",
+                                cleared,
+                                jp.id,
+                            )
 
         else:  # "cv" or unknown
             parsed_cv: ParsedCV = parse_cv(text)

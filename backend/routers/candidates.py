@@ -186,10 +186,22 @@ def update_candidate(
 ):
     row = _get_org_candidate(db, user, candidate_id)
     data = body.model_dump(exclude_unset=True)
+    cv_text_changed = "cv_text" in data and data.get("cv_text") != row.cv_text
     for key, value in data.items():
         setattr(row, key, value)
     db.commit()
     db.refresh(row)
+    # CV text change invalidates prior JD↔CV scores so Get Score unlocks again
+    if cv_text_changed:
+        from routers.matches import invalidate_candidate_matches
+
+        invalidated = invalidate_candidate_matches(db, candidate_id)
+        if invalidated:
+            logger.info(
+                "[candidates] invalidated %s match score(s) after cv_text edit candidate=%s",
+                invalidated,
+                candidate_id,
+            )
     return CandidateOut.model_validate(row)
 
 

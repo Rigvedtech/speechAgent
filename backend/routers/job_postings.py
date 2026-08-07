@@ -262,10 +262,21 @@ def update_job_posting(
 ):
     row = _get_org_job(db, user, job_id)
     data = body.model_dump(exclude_unset=True)
+    jd_text_changed = "jd_text" in data and data.get("jd_text") != row.jd_text
     for key, value in data.items():
         setattr(row, key, value)
     db.commit()
     db.refresh(row)
+    if jd_text_changed:
+        from routers.matches import invalidate_job_matches
+
+        cleared = invalidate_job_matches(db, job_id)
+        if cleared:
+            logger.info(
+                "[job_postings] invalidated %s match score(s) after jd_text edit job=%s",
+                cleared,
+                job_id,
+            )
     return JobPostingOut.model_validate(row)
 
 

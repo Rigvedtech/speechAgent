@@ -403,36 +403,37 @@ CAMERA_INTEGRITY_ENABLED = _env_bool("CAMERA_INTEGRITY_ENABLED", False)
 CAMERA_GAZE_MODE = _env_str("CAMERA_GAZE_MODE", "interview")
 CAMERA_GAZE_DEBUG = _env_bool("CAMERA_GAZE_DEBUG", True)
 CAMERA_WARN_TTS_ENABLED = _env_bool("CAMERA_WARN_TTS_ENABLED", True)
-CAMERA_WARN_AFTER_SEC = _env_float("CAMERA_WARN_AFTER_SEC", 2.0)
+CAMERA_WARN_AFTER_SEC = _env_float("CAMERA_WARN_AFTER_SEC", 6.0)
 # Live interview: two faces must persist this long before TTS warn
 CAMERA_WARN_AFTER_MULTI_FACE_SEC = _env_float("CAMERA_WARN_AFTER_MULTI_FACE_SEC", 5.0)
-# Desk / notes / side glance — short dwell then cooldown
-CAMERA_WARN_AFTER_DOWN_SEC = _env_float("CAMERA_WARN_AFTER_DOWN_SEC", 2.0)
-# Left / right second-screen risk
-CAMERA_WARN_AFTER_SIDE_SEC = _env_float("CAMERA_WARN_AFTER_SIDE_SEC", 2.0)
-# Hard head turn (looking_away) — default matches side
-CAMERA_WARN_AFTER_AWAY_SEC = _env_float("CAMERA_WARN_AFTER_AWAY_SEC", 2.0)
+# Desk / notes — longer dwell so brief UI glances do not warn
+CAMERA_WARN_AFTER_DOWN_SEC = _env_float("CAMERA_WARN_AFTER_DOWN_SEC", 6.0)
+# Left / right second-screen risk (needs head yaw when SIDE_MIN_YAW set)
+CAMERA_WARN_AFTER_SIDE_SEC = _env_float("CAMERA_WARN_AFTER_SIDE_SEC", 8.0)
+# Hard head turn (looking_away)
+CAMERA_WARN_AFTER_AWAY_SEC = _env_float("CAMERA_WARN_AFTER_AWAY_SEC", 5.0)
 # Gaze warn cooldown (down/side/away/no_face) — multi_face bypasses this
-CAMERA_WARN_COOLDOWN_SEC = _env_float("CAMERA_WARN_COOLDOWN_SEC", 8.0)
+CAMERA_WARN_COOLDOWN_SEC = _env_float("CAMERA_WARN_COOLDOWN_SEC", 12.0)
 # Min gap between multi_face warns (still requires 5s continuous faces)
 CAMERA_WARN_COOLDOWN_MULTI_FACE_SEC = _env_float(
     "CAMERA_WARN_COOLDOWN_MULTI_FACE_SEC", 5.0
 )
 # Live path analyzes ~2 fps — fewer consecutive hits than local 30fps test
-CAMERA_WARN_HOLD_FRAMES_LIVE = _env_int("CAMERA_WARN_HOLD_FRAMES_LIVE", 2)
+CAMERA_WARN_HOLD_FRAMES_LIVE = _env_int("CAMERA_WARN_HOLD_FRAMES_LIVE", 3)
 # Brief drop in multi-face / no_face before clearing the risk timer
 CAMERA_WARN_RISK_GRACE_SEC = _env_float("CAMERA_WARN_RISK_GRACE_SEC", 1.5)
 # true = warn on sustained left/right (second screen); looking_up never warns
 CAMERA_WARN_INCLUDE_SIDE_LOOK = _env_bool("CAMERA_WARN_INCLUDE_SIDE_LOOK", True)
+# Side look only if |head yaw| >= this (0 = eyes alone). Interview default ~20°.
+CAMERA_WARN_SIDE_MIN_YAW_DEG = _env_float("CAMERA_WARN_SIDE_MIN_YAW_DEG", 20.0)
 # looking_down = hard head nod (desk/phone); mild screen look stays center
 CAMERA_WARN_ON_LOOKING_DOWN = _env_bool("CAMERA_WARN_ON_LOOKING_DOWN", True)
 CAMERA_WARN_ON_NO_FACE = _env_bool("CAMERA_WARN_ON_NO_FACE", True)
 CAMERA_WARN_ON_MULTI_FACE = _env_bool("CAMERA_WARN_ON_MULTI_FACE", True)
 CAMERA_WARN_ON_LOOKING_AWAY = _env_bool("CAMERA_WARN_ON_LOOKING_AWAY", True)
-# true = skip away/down warn while lips move (answering / thinking aloud).
-# Prefer turn gating (AI asking vs candidate answering) — set false for production integrity.
+# true = skip away/down/side warn while lips move (natural answering glances)
 CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING = _env_bool(
-    "CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING", False
+    "CAMERA_WARN_IGNORE_AWAY_WHILE_SPEAKING", True
 )
 # Live interviews: accumulate camera warns only on candidate answer turn
 CAMERA_WARN_ONLY_ON_CANDIDATE_TURN = _env_bool(

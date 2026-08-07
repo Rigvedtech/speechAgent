@@ -21,6 +21,7 @@ import type {
   CreateCandidateRequest,
   UpdateCandidateRequest,
   CreateJobPostingRequest,
+  UpdateJobPostingRequest,
   CreateUserRequest,
   UpdateUserRequest,
   AuthUser,
@@ -41,6 +42,7 @@ import type {
   CvBatchUploadResponse,
   JdUploadResponse,
   JobResume,
+  ScoreJobMatchesResponse,
   UploadBatch,
   CodingTaskSummary,
   CodingTaskDetail,
@@ -211,6 +213,13 @@ export function createJobPosting(body: CreateJobPostingRequest) {
   })
 }
 
+export function updateJobPosting(jobId: string, body: UpdateJobPostingRequest) {
+  return request<JobPosting>(`/api/job-postings/${jobId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
 export function uploadJobDescription(jobId: string, file: File) {
   const formData = new FormData()
   formData.append('file', file)
@@ -231,6 +240,15 @@ export function getUploadBatch(batchId: string) {
 
 export function listJobResumes(jobId: string) {
   return request<JobResume[]>(`/api/jobs/${jobId}/resumes`)
+}
+
+/** Score unscored CVs against this JD (skips already scored unless force). */
+export function scoreJobMatches(jobId: string, body?: { force?: boolean; candidate_ids?: string[] }) {
+  return request<ScoreJobMatchesResponse>(`/api/jobs/${jobId}/score-matches`, {
+    method: 'POST',
+    body: JSON.stringify(body ?? {}),
+    timeoutMs: 10 * 60 * 1000,
+  })
 }
 
 export function extractUploadBatch(batchId: string) {
