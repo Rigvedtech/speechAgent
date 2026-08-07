@@ -17,6 +17,7 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { MeetingPlatformIcon } from '@/components/meeting/MeetingPlatformIcon'
+import { FlashAlert } from '@/components/ui/flash-alert'
 import { truncate } from '@/lib/utils'
 
 export function ScheduledInterviewsPage() {
@@ -124,11 +125,11 @@ export function ScheduledInterviewsPage() {
             />
           </div>
 
-          {error && (
-            <p className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
-              {error}
-            </p>
-          )}
+          <FlashAlert
+            message={error}
+            onDismiss={() => setError(null)}
+            className="border-destructive/30 bg-destructive/5 text-destructive"
+          />
         </CardHeader>
 
         <CardContent className="min-h-0 flex-1 overflow-auto pt-0">

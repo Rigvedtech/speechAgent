@@ -21,6 +21,7 @@ import { ApiError } from '@/lib/api-client'
 import { formatApiError } from '@/lib/error-messages'
 import { queryKeys } from '@/lib/query-keys'
 import { Alert } from '@/components/ui/alert'
+import { FlashAlert } from '@/components/ui/flash-alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -191,11 +192,11 @@ export function CodingDashboardPage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3">
-      {error ? (
-        <Alert className="shrink-0 border-destructive/30 bg-destructive/5 text-destructive">
-          {error}
-        </Alert>
-      ) : null}
+      <FlashAlert
+        message={error}
+        onDismiss={() => setError(null)}
+        className="shrink-0 border-destructive/30 bg-destructive/5 text-destructive"
+      />
 
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-4 md:grid-cols-[280px_minmax(0,1fr)]">
         {/* Domains column */}

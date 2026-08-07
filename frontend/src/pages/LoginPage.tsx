@@ -10,8 +10,9 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { PasswordInput } from '@/components/ui/password-input'
 import { Label } from '@/components/ui/label'
-import { Alert } from '@/components/ui/alert'
+import { FlashAlert } from '@/components/ui/flash-alert'
 import { Card, CardContent } from '@/components/ui/card'
+import { clearInterviewDraft } from '@/lib/draft-store'
 
 export function LoginPage() {
   const navigate = useNavigate()
@@ -23,13 +24,16 @@ export function LoginPage() {
 
   const from =
     (location.state as { from?: string } | null)?.from &&
-    (location.state as { from: string }).from !== '/login'
+    (location.state as { from: string }).from !== '/login' &&
+    !(location.state as { from: string }).from.startsWith('/interviews/new')
       ? (location.state as { from: string }).from
       : '/dashboard'
 
   const mutation = useMutation({
     mutationFn: () => login({ email: email.trim(), password }),
     onSuccess: (data) => {
+      // Fresh session: never resume another user's in-progress schedule wizard.
+      clearInterviewDraft()
       setSession(data)
       navigate(from, { replace: true })
     },
@@ -56,9 +60,11 @@ export function LoginPage() {
             </p>
           </div>
 
-          {error && (
-            <Alert className="border-destructive/30 bg-destructive/5 text-destructive">{error}</Alert>
-          )}
+          <FlashAlert
+            message={error}
+            onDismiss={() => setError(null)}
+            className="border-destructive/30 bg-destructive/5 text-destructive"
+          />
 
           <form
             className="space-y-4"

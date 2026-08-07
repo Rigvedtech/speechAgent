@@ -29,6 +29,7 @@ import { ApiError } from '@/lib/api-client'
 import { formatApiError } from '@/lib/error-messages'
 import { queryKeys } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
+import { FlashAlert } from '@/components/ui/flash-alert'
 import {
   codingLanguageMeta,
   defaultEntryForLanguage,
@@ -494,12 +495,11 @@ export function CandidateCodingPage() {
         </div>
       </header>
 
-      {error && (
-        <div className="flex shrink-0 items-start gap-2 border-b border-rose-500/20 bg-rose-500/10 px-4 py-2 text-xs text-rose-300">
-          <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
+      <FlashAlert
+        message={error}
+        onDismiss={() => setError(null)}
+        className="shrink-0 rounded-none border-x-0 border-t-0 border-rose-500/20 bg-rose-500/10 px-4 py-2 text-xs text-rose-300"
+      />
 
       <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_420px]">
         {/* Editor column */}

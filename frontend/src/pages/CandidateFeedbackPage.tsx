@@ -77,6 +77,7 @@ export function CandidateFeedbackPage() {
             : 'Could not submit feedback. Please try again.'
           : null
       }
+      onDismissError={() => submitMutation.reset()}
       onSubmit={(values) => submitMutation.mutate(values)}
     />
   )

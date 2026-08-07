@@ -17,6 +17,7 @@ import { formatApiError } from '@/lib/error-messages'
 import { queryKeys } from '@/lib/query-keys'
 import { CodeEditor } from '@/components/coding/CodeEditor'
 import { Alert } from '@/components/ui/alert'
+import { FlashAlert } from '@/components/ui/flash-alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -168,11 +169,11 @@ export function CodingPage() {
               Test Monaco and submit without scheduling a full interview. This creates a disposable
               demo session with one seeded task.
             </p>
-            {error && (
-              <Alert className="border-destructive/30 bg-destructive/5 text-destructive">
-                {error}
-              </Alert>
-            )}
+            <FlashAlert
+              message={error}
+              onDismiss={() => setError(null)}
+              className="border-destructive/30 bg-destructive/5 text-destructive"
+            />
             <Button
               onClick={() => startDemoMutation.mutate()}
               disabled={startDemoMutation.isPending}
@@ -274,11 +275,11 @@ export function CodingPage() {
         </div>
       </div>
 
-      {error && (
-        <Alert className="shrink-0 border-destructive/30 bg-destructive/5 text-xs text-destructive">
-          {error}
-        </Alert>
-      )}
+      <FlashAlert
+        message={error}
+        onDismiss={() => setError(null)}
+        className="shrink-0 border-destructive/30 bg-destructive/5 text-xs text-destructive"
+      />
 
       {submittedOk && (
         <Alert className="shrink-0 border-success/30 bg-success/5 text-xs">

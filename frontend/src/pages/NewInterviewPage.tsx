@@ -69,6 +69,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Alert } from '@/components/ui/alert'
+import { FlashAlert } from '@/components/ui/flash-alert'
 import {
   Dialog,
   DialogContent,
@@ -759,11 +760,11 @@ export function NewInterviewPage() {
 
       <Card className="flex min-h-0 flex-1 flex-col overflow-hidden border-border shadow-sm">
         <CardContent className="flex min-h-0 flex-1 flex-col p-4 sm:p-5">
-          {error && (
-            <Alert className="mb-4 shrink-0 border-destructive/30 bg-destructive/5 text-destructive">
-              {error}
-            </Alert>
-          )}
+          <FlashAlert
+            message={error}
+            onDismiss={() => setError(null)}
+            className="mb-4 shrink-0 border-destructive/30 bg-destructive/5 text-destructive"
+          />
 
           <FormProvider {...form}>
             <form onSubmit={onSubmit} className="flex min-h-0 flex-1 flex-col">

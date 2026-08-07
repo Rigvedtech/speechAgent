@@ -26,6 +26,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Alert } from '@/components/ui/alert'
+import { FlashAlert } from '@/components/ui/flash-alert'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
   Dialog,
@@ -338,11 +339,11 @@ export function LiveSessionPage() {
               <Link to="/dashboard">Dashboard</Link>
             </Button>
           </div>
-          {error && (
-            <Alert className="border-destructive/30 bg-destructive/5 text-destructive">
-              {error}
-            </Alert>
-          )}
+          <FlashAlert
+            message={error}
+            onDismiss={() => setError(null)}
+            className="border-destructive/30 bg-destructive/5 text-destructive"
+          />
         </CardContent>
       </Card>
     )
@@ -356,11 +357,11 @@ export function LiveSessionPage() {
         lobbyTimeoutMin={lobbyTimeoutMin}
       />
 
-      {error && (
-        <Alert className="shrink-0 border-destructive/30 bg-destructive/5 py-2.5 text-xs leading-snug text-destructive">
-          {error}
-        </Alert>
-      )}
+      <FlashAlert
+        message={error}
+        onDismiss={() => setError(null)}
+        className="shrink-0 border-destructive/30 bg-destructive/5 py-2.5 text-xs leading-snug text-destructive"
+      />
 
       {data?.interview_ended && (
         <Alert className="shrink-0 border-success/30 bg-success/5 text-xs leading-snug">

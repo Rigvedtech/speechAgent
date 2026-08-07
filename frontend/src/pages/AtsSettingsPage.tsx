@@ -15,7 +15,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Alert } from '@/components/ui/alert'
+import { FlashAlert } from '@/components/ui/flash-alert'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
@@ -346,16 +346,16 @@ export function AtsSettingsPage() {
         </CardHeader>
 
         <CardContent className="min-h-0 flex-1 space-y-5 overflow-auto">
-          {error && (
-            <Alert className="border-destructive/30 bg-destructive/5 text-destructive">
-              {error}
-            </Alert>
-          )}
-          {success && (
-            <Alert className="border-success/30 bg-success/5 text-foreground">
-              {success}
-            </Alert>
-          )}
+          <FlashAlert
+            message={error}
+            onDismiss={() => setError(null)}
+            className="border-destructive/30 bg-destructive/5 text-destructive"
+          />
+          <FlashAlert
+            message={success}
+            onDismiss={() => setSuccess(null)}
+            className="border-success/30 bg-success/5 text-foreground"
+          />
 
           {settings.isLoading ? (
             <div className="space-y-2">
