@@ -8,10 +8,13 @@ const BASE_STEPS = [
   { key: 'localizing', label: 'Localizing' },
   { key: 'ready', label: 'Ready' },
   { key: 'live', label: 'Live' },
-  { key: 'ended', label: 'Ended' },
+  { key: 'ended', label: 'Voice interview done' },
 ] as const
 
-export type StepKey = (typeof BASE_STEPS)[number]['key'] | 'coding'
+export type StepKey =
+  | (typeof BASE_STEPS)[number]['key']
+  | 'coding'
+  | 'interview_done'
 
 export type CodingTaskStepStatus = 'pending' | 'in_progress' | 'submitted' | 'timed_out'
 
@@ -29,10 +32,16 @@ function resolveActiveStep(props: {
   interviewEnded?: boolean
   languageMode?: string
   codingEnabled?: boolean
+  codingRoundActive?: boolean
+  /** False while coding session lookup has not settled (avoid false “interview done”). */
+  codingStatusKnown?: boolean
 }): StepKey {
-  // After voice interview ends, advance to Coding when that round exists.
-  if (props.interviewEnded && props.codingEnabled) return 'coding'
-  if (props.interviewEnded) return 'ended'
+  if (props.interviewEnded) {
+    // Still resolving whether a coding round exists — stay on voice-done.
+    if (props.codingStatusKnown === false) return 'ended'
+    if (props.codingEnabled && props.codingRoundActive) return 'coding'
+    return 'interview_done'
+  }
   if (props.interviewStarted) return 'live'
   if (props.readyToStart) return 'ready'
   if (
@@ -67,26 +76,45 @@ interface StatusStepperProps {
   interviewStarted?: boolean
   interviewEnded?: boolean
   languageMode?: string
-  /** Show Coding step after Ended when true */
+  /** Show Coding step after voice interview ends when true */
   codingEnabled?: boolean
   /**
-   * When true, Coding is still in progress (waiting / timed out but not fully submitted).
+   * When true, coding is still in progress.
    * When false with codingEnabled, Coding step shows as complete.
    */
   codingRoundActive?: boolean
+  /**
+   * Whether we know if a coding round exists.
+   * Pass false while the coding-session lookup is still in flight.
+   */
+  codingStatusKnown?: boolean
   codingTasks?: CodingTaskStepItem[]
 }
 
 export function StatusStepper(props: StatusStepperProps) {
-  const showCoding = Boolean(props.codingEnabled && props.interviewEnded)
+  const codingKnown = props.codingStatusKnown !== false
+  const showCoding = Boolean(props.codingEnabled && props.interviewEnded && codingKnown)
   const codingComplete = showCoding && props.codingRoundActive === false
+  const showInterviewDone = Boolean(props.interviewEnded && codingKnown)
   const active = resolveActiveStep(props)
 
   const steps: { key: StepKey; label: string }[] = [
     ...BASE_STEPS.filter(
       (step) => !(step.key === 'localizing' && props.languageMode !== 'hinglish'),
     ),
-    ...(showCoding ? [{ key: 'coding' as const, label: 'Coding' }] : []),
+    ...(showCoding
+      ? [
+          {
+            key: 'coding' as const,
+            label: codingComplete
+              ? 'Coding round done'
+              : 'Coding round in progress',
+          },
+        ]
+      : []),
+    ...(showInterviewDone
+      ? [{ key: 'interview_done' as const, label: 'Interview done' }]
+      : []),
   ]
 
   const activeIndex = steps.findIndex((s) => s.key === active)
@@ -97,12 +125,16 @@ export function StatusStepper(props: StatusStepperProps) {
       {steps.map((step, index) => {
         const done =
           step.key === 'coding'
-            ? codingComplete
-            : activeIndex >= 0 && index < activeIndex
+            ? codingComplete || active === 'interview_done'
+            : step.key === 'interview_done'
+              ? active === 'interview_done'
+              : activeIndex >= 0 && index < activeIndex
         const current =
           step.key === 'coding'
-            ? active === 'coding' && !codingComplete
-            : index === activeIndex
+            ? active === 'coding'
+            : step.key === 'interview_done'
+              ? active === 'interview_done'
+              : index === activeIndex
         const displayNumber = index + 1
 
         return (
@@ -111,7 +143,7 @@ export function StatusStepper(props: StatusStepperProps) {
               className={cn(
                 'flex items-center gap-2 rounded-md px-2 py-1.5 text-sm',
                 current && 'bg-[#f0fdf4] dark:bg-[#166534] font-medium text-foreground',
-                done && 'text-muted-foreground',
+                done && !current && 'text-muted-foreground',
                 !done && !current && 'text-muted-foreground',
               )}
             >
@@ -119,7 +151,7 @@ export function StatusStepper(props: StatusStepperProps) {
                 className={cn(
                   'flex h-5 w-5 shrink-0 items-center justify-center rounded-full border text-xs',
                   done && 'border-primary bg-primary text-primary-foreground',
-                  current && 'border-primary',
+                  current && !done && 'border-primary',
                 )}
               >
                 {done ? <Check className="h-3 w-3" /> : displayNumber}
