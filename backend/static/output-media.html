@@ -211,7 +211,10 @@ const BOT_NAME        = decodeURIComponent(params.get('name') || 'Prabhat');
    - Encoding  : Int16 PCM (little-endian)
    - Sample rate: 24000 Hz (bulbul:v3 default)
    - Channels  : 1 (mono) */
+/* Server PCM rate (Sarvam bulbul:v3). AudioContext may negotiate a different
+   rate on some Chromium builds — we resample before the worklet if needed. */
 const SAMPLE_RATE = 24000;
+const PRIME_MS = 180;
 
 /* WebSocket endpoint — server resolves page_session_id → bot_id */
 const WS_PATH = `/ws/audio-stream/${PAGE_SESSION_ID}`;
@@ -244,7 +247,9 @@ const MAX_RETRY = 5;
 let isSpeaking  = false;
 let turnEnded   = false;
 let playbackDoneTimer = null;
-const PLAYBACK_DONE_DEBOUNCE_MS = 300;
+/* Slightly above worklet prime so a brief re-prime after a gap does not
+   fire playback_done mid-utterance. */
+const PLAYBACK_DONE_DEBOUNCE_MS = 450;
 
 function schedulePlaybackDone() {
   if (!isSpeaking || !turnEnded) return;
@@ -300,6 +305,23 @@ function drawViz() {
 }
 drawViz();
 
+/* Linear resample Int16 PCM when AudioContext rate ≠ server rate. */
+function resampleInt16Pcm(srcBuf, fromRate, toRate) {
+  if (fromRate === toRate || !srcBuf || srcBuf.byteLength < 2) return srcBuf;
+  const src = new Int16Array(srcBuf);
+  const ratio = fromRate / toRate;
+  const outLen = Math.max(1, Math.floor(src.length / ratio));
+  const out = new Int16Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const srcPos = i * ratio;
+    const i0 = Math.floor(srcPos);
+    const i1 = Math.min(i0 + 1, src.length - 1);
+    const frac = srcPos - i0;
+    out[i] = (src[i0] * (1 - frac) + src[i1] * frac) | 0;
+  }
+  return out.buffer;
+}
+
 /* ─── AudioContext + AudioWorklet setup ──────── */
 async function initAudio() {
   audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: 'interactive' });
@@ -309,12 +331,21 @@ async function initAudio() {
     await audioCtx.resume().catch(() => {});
   }
 
+  if (audioCtx.sampleRate !== SAMPLE_RATE) {
+    console.warn(
+      `[voice-agent] AudioContext rate ${audioCtx.sampleRate} Hz ≠ server ${SAMPLE_RATE} Hz — resampling PCM`
+    );
+  } else {
+    console.info(`[voice-agent] AudioContext @ ${audioCtx.sampleRate} Hz`);
+  }
+
   // AudioWorklet for gapless, low-latency PCM playback
   await audioCtx.audioWorklet.addModule('/static/audio-worklet-processor.js');
   workletNode = new AudioWorkletNode(audioCtx, 'pcm-player-processor', {
     numberOfInputs:  0,
     numberOfOutputs: 1,
     outputChannelCount: [1],
+    processorOptions: { primeMs: PRIME_MS },
   });
 
   // Monitor buffer level from worklet
@@ -398,11 +429,15 @@ async function connect() {
       return;
     }
 
-    // Binary frame → raw Int16 PCM
+    // Binary frame → raw Int16 PCM (resample if AudioContext rate differs)
     if (event.data instanceof ArrayBuffer && event.data.byteLength > 0) {
       cancelPlaybackDoneTimer();
       setStatus('speaking', 'Speaking…');
-      workletNode.port.postMessage(event.data, [event.data]);   // zero-copy transfer
+      let pcm = event.data;
+      if (audioCtx && audioCtx.sampleRate !== SAMPLE_RATE) {
+        pcm = resampleInt16Pcm(event.data, SAMPLE_RATE, audioCtx.sampleRate);
+      }
+      workletNode.port.postMessage(pcm, [pcm]);   // zero-copy transfer
     }
   };
 
