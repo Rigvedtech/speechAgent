@@ -98,9 +98,10 @@ export function CodingRoundPanel({ value, onChange, disabled }: CodingRoundPanel
     staleTime: 60_000,
   })
 
+  // Same bank as Coding dashboard: org-owned domain problems only (no global seeds).
   const tasksQuery = useQuery({
-    queryKey: queryKeys.codingDomainTasks(value.domainId ?? ''),
-    queryFn: () => listDomainCodingTasks(value.domainId!),
+    queryKey: queryKeys.codingDomainTasks(value.domainId ?? '', true),
+    queryFn: () => listDomainCodingTasks(value.domainId!, { owned_only: true }),
     enabled: Boolean(value.enabled && value.domainId),
     staleTime: 30_000,
   })
@@ -289,7 +290,8 @@ export function CodingRoundPanel({ value, onChange, disabled }: CodingRoundPanel
               <div>
                 <Label>Assign problems from this domain</Label>
                 <p className="text-[11px] text-muted-foreground">
-                  Select one or more tasks. Time defaults to the AI estimate — change it if needed.
+                  Problems from your Coding dashboard for this domain. Time defaults to the AI
+                  estimate — change it if needed.
                 </p>
               </div>
               {value.taskIds.length > 0 && (

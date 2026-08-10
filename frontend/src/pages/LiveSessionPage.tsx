@@ -73,6 +73,8 @@ export function LiveSessionPage() {
       if (session.submission_status === 'submitted') return false
       const allDone = (session.assigned_tasks ?? []).every((t) => t.status === 'submitted')
       if (allDone && (session.assigned_tasks?.length ?? 0) > 0) return false
+      const endsAt = session.ends_at ? new Date(session.ends_at).getTime() : 0
+      if (endsAt > 0 && endsAt < Date.now()) return false
       // Poll more often once the voice interview has ended
       return data?.interview_ended ? 5_000 : 15_000
     },
@@ -103,13 +105,25 @@ export function LiveSessionPage() {
     codingSubmitted ||
     ((codingSession?.assigned_tasks?.length ?? 0) > 0 &&
       (codingSession?.assigned_tasks ?? []).every((t) => t.status === 'submitted'))
+  // Settled only after 404 (no coding) or a session payload — never while first load is in flight.
+  const codingStatusKnown =
+    codingNotEnabled ||
+    Boolean(codingSession) ||
+    (codingSessionQuery.isError && !codingSessionQuery.isFetching)
   const codingEnabled = Boolean(codingSession && !codingNotEnabled)
-  const codingRoundActive = codingEnabled && !codingAllSubmitted
+  // Timeout ends the round so the live page can reach "Interview done" (does not hang forever).
+  const codingRoundComplete = codingAllSubmitted || codingTimedOut
+  const codingRoundActive = codingEnabled && !codingRoundComplete
   const codingStatusLabel = codingAllSubmitted
     ? 'Submitted'
     : codingTimedOut
       ? 'Timed out'
-      : 'Waiting for candidate'
+      : 'Coding round in progress'
+  const interviewFullyComplete = Boolean(
+    data?.interview_ended &&
+      codingStatusKnown &&
+      (!codingEnabled || codingRoundComplete),
+  )
 
   const codingTaskSteps: CodingTaskStepItem[] = (() => {
     if (!codingSession) return []
@@ -167,6 +181,15 @@ export function LiveSessionPage() {
       markSessionCompleted(botId)
     }
   }, [botId, data?.interview_ended])
+
+  // Voice (+ coding when enabled) finished → brief "Interview done", then open the report.
+  useEffect(() => {
+    if (!interviewFullyComplete || !botId) return
+    const timer = window.setTimeout(() => {
+      navigate(`/interviews/${botId}/report`, { replace: true })
+    }, 1800)
+    return () => window.clearTimeout(timer)
+  }, [interviewFullyComplete, botId, navigate])
 
   const startMutation = useMutation({
     mutationFn: () => startInterview(botId, {}),
@@ -363,12 +386,25 @@ export function LiveSessionPage() {
         className="shrink-0 border-destructive/30 bg-destructive/5 py-2.5 text-xs leading-snug text-destructive"
       />
 
-      {data?.interview_ended && (
+      {data?.interview_ended && interviewFullyComplete && (
         <Alert className="shrink-0 border-success/30 bg-success/5 text-xs leading-snug">
-          Interview ended.{' '}
-          <Button asChild variant="link" className="h-auto p-0 text-xs">
-            <Link to={`/interviews/${botId}/report`}>View report</Link>
+          Interview done. Opening report…
+          <Button asChild variant="link" className="ml-2 h-auto p-0 text-xs">
+            <Link to={`/interviews/${botId}/report`}>Open now</Link>
           </Button>
+        </Alert>
+      )}
+      {data?.interview_ended && !interviewFullyComplete && codingRoundActive && (
+        <Alert className="shrink-0 border-primary/30 bg-primary/5 text-xs leading-snug">
+          Voice interview done. Coding round in progress.
+          {codingLink ? (
+            <span className="text-muted-foreground"> Share the coding link with the candidate.</span>
+          ) : null}
+        </Alert>
+      )}
+      {data?.interview_ended && !interviewFullyComplete && !codingRoundActive && !codingStatusKnown && (
+        <Alert className="shrink-0 border-success/30 bg-success/5 text-xs leading-snug">
+          Voice interview done. Checking coding round…
         </Alert>
       )}
 
@@ -382,8 +418,14 @@ export function LiveSessionPage() {
               {data?.language_mode && (
                 <Badge variant="secondary">{data.language_mode}</Badge>
               )}
-              {data?.interview_started && (
+              {data?.interview_started && !data?.interview_ended && (
                 <Badge variant="success">Live</Badge>
+              )}
+              {data?.interview_ended && codingRoundActive && (
+                <Badge variant="secondary">Coding in progress</Badge>
+              )}
+              {interviewFullyComplete && (
+                <Badge variant="success">Interview done</Badge>
               )}
             </div>
           </CardHeader>
@@ -397,6 +439,7 @@ export function LiveSessionPage() {
               languageMode={data?.language_mode}
               codingEnabled={codingEnabled}
               codingRoundActive={codingRoundActive}
+              codingStatusKnown={codingStatusKnown}
               codingTasks={codingTaskSteps}
             />
 
@@ -617,10 +660,10 @@ export function LiveSessionPage() {
                     </div>
                     <p className="text-muted-foreground">
                       {codingSubmitted
-                        ? 'Candidate submitted their solution.'
+                        ? 'Candidate submitted their solution. Interview done — opening report…'
                         : codingTimedOut
-                          ? 'Time ran out before submit. You can still share the link if needed.'
-                          : 'Share this link with the candidate, then wait for submit or timeout.'}
+                          ? 'Coding round timed out. Interview done — opening report…'
+                          : 'Coding round in progress. Share this link with the candidate, then wait for submit or timeout.'}
                     </p>
                     <div className="flex items-center gap-1 rounded border bg-card px-2 py-1">
                       <p className="min-w-0 flex-1 truncate font-mono" title={codingLink}>

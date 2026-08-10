@@ -72,7 +72,7 @@ export function CodingDashboardPage() {
   }, [domains, selectedId])
 
   const tasksQuery = useQuery({
-    queryKey: queryKeys.codingDomainTasks(selected?.id ?? ''),
+    queryKey: queryKeys.codingDomainTasks(selected?.id ?? '', true),
     queryFn: () => listDomainCodingTasks(selected!.id, { owned_only: true }),
     enabled: Boolean(selected?.id),
   })

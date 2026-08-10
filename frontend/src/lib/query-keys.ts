@@ -15,7 +15,8 @@ export const queryKeys = {
   uploadBatch: (batchId: string) => ['uploadBatch', batchId] as const,
   codingTasks: ['codingTasks'] as const,
   codingDomains: ['codingDomains'] as const,
-  codingDomainTasks: (domainId: string) => ['codingDomainTasks', domainId] as const,
+  codingDomainTasks: (domainId: string, ownedOnly = true) =>
+    ['codingDomainTasks', domainId, ownedOnly ? 'owned' : 'all'] as const,
   codingSessionByBot: (botId: string) => ['codingSession', 'bot', botId] as const,
   codingSessionByInterview: (interviewId: string) =>
     ['codingSession', 'interview', interviewId] as const,
