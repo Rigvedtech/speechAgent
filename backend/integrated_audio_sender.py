@@ -151,8 +151,34 @@ class IntegratedAudioSender:
         more stream data arrives. Keeping a short tail unsent avoids word-end
         clicks while still allowing early playback (~2s TTFB).
         """
-        # 40 ms of Int16 mono at TTS rate
-        return max(int(self._tts_sample_rate * 0.04 * 2), 1920)
+        # 60 ms of Int16 mono at TTS rate (slightly safer than 40 ms)
+        return max(int(self._tts_sample_rate * 0.06 * 2) & ~1, 2880)
+
+    def _pcm_ws_chunk_bytes(self) -> int:
+        """Frame-aligned WebSocket PCM chunk: 100 ms Int16 mono (even byte count)."""
+        return max(int(self._tts_sample_rate * 0.1 * 2) & ~1, 4800)
+
+    def _send_pcm_to_webpage(self, pcm: bytes, *, announce: bool = True) -> int:
+        """
+        Push Int16 PCM to the Output Media page in frame-aligned chunks.
+        Returns bytes sent. Optionally emits start_speaking before the first chunk.
+        """
+        if not pcm or not self.webpage_broadcaster:
+            return 0
+        if announce and self.webpage_ctrl_sender:
+            self.webpage_ctrl_sender({"type": "start_speaking"})
+        chunk = self._pcm_ws_chunk_bytes()
+        sent = 0
+        for i in range(0, len(pcm), chunk):
+            piece = pcm[i : i + chunk]
+            # Drop a trailing odd byte if somehow present (Int16 alignment).
+            if len(piece) & 1:
+                piece = piece[:-1]
+            if not piece:
+                continue
+            self.webpage_broadcaster(piece)
+            sent += len(piece)
+        return sent
 
     @staticmethod
     def _mp3_to_pcm_int16(mp3_bytes: bytes, target_rate: int = 24000) -> bytes:
@@ -324,21 +350,16 @@ class IntegratedAudioSender:
         # Route audio to the correct output path
         if self.use_webpage and self.webpage_broadcaster:
             # Output Media webpage: convert MP3 → PCM and stream over WebSocket
-            if self.webpage_ctrl_sender:
-                self.webpage_ctrl_sender({"type": "start_speaking"})
             pcm = self._decode_mp3_to_pcm(audio_mp3)
             if not pcm:
                 logger.error("Sarvam TTS: MP3→PCM conversion returned empty bytes")
                 return False
-            # Send in 4096-byte chunks so the worklet can start playing immediately
-            chunk_size = 4096
-            for i in range(0, len(pcm), chunk_size):
-                self.webpage_broadcaster(pcm[i : i + chunk_size])
+            sent = self._send_pcm_to_webpage(pcm, announce=True)
             logger.info(
-                f"✓ Streamed {len(pcm)} PCM bytes ({len(audio_mp3)} MP3 bytes) "
+                f"✓ Streamed {sent} PCM bytes ({len(audio_mp3)} MP3 bytes) "
                 f"via WebSocket to Output Media page (Sarvam TTS)"
             )
-            return True
+            return sent > 0
 
         elif self.use_webrtc and self.webrtc_manager:
             success = await self.webrtc_manager.stream_audio_from_mp3(audio_mp3, state)
@@ -358,18 +379,25 @@ class IntegratedAudioSender:
     
     async def _send_via_sarvam_streaming(self, bot_id: str, text: str, state=None) -> bool:
         """
-        Stream Sarvam TTS to the Output Media webpage with low TTFB (~2s)
-        and clean word endings.
+        Stream Sarvam TTS → Output Media with low TTFB and gapless playback.
 
-        Strategy (keeps streaming latency, fixes click/break artifacts):
-          - Keep the full MP3 byte stream in memory for the utterance.
-          - Re-decode the growing buffer with ffmpeg/pydub.
-          - Broadcast only *new* PCM since the last emit.
-          - Hold back a short PCM tail on early flushes (bit-reservoir guard)
-            so frame edges are not cut mid-word.
-          - On stream end, flush the remaining PCM with no guard.
+        Production strategy (avoids the old stutter):
+          Re-decoding the *entire* growing MP3 with ffmpeg every ~1.5 KB made
+          decode time exceed newly added audio as the buffer grew → PCM underruns
+          and jerky speech.
 
-        Never clears the MP3 buffer mid-stream (old clear() caused word-end breaks).
+          Instead:
+            1. Accumulate the full MP3 stream in memory (never clear mid-utterance).
+            2. Decode on a worker thread (do not block the TTS loop on ffmpeg).
+            3. First decode only after ~0.5 s of MP3 (~TTFB), then re-decode at
+               ~1.0 s MP3 steps so each decode covers far more audio than it costs.
+            4. Emit only *new* PCM; hold a short tail on non-final flushes
+               (MP3 bit-reservoir).
+            5. Final decode flushes the remainder with no guard.
+            6. WebSocket chunks are 100 ms frame-aligned Int16.
+
+        start_speaking is sent only with the first PCM (avoids premature
+        playback_done while the worklet buffer is still empty).
         """
         import re
 
@@ -385,68 +413,63 @@ class IntegratedAudioSender:
             logger.error("Failed to connect Sarvam TTS for streaming")
             return False
 
-        # DO NOT send start_speaking here — the browser AudioWorklet's buffer is
-        # empty at this point.  If we set isSpeaking=true before any PCM arrives,
-        # the worklet immediately drains (nothing to play) and fires a premature
-        # playback_done, unblocking STT 3-4 s too early.
-        # We send start_speaking only when the first PCM chunk is about to stream.
-
-        # First decode once we have ~256 ms of MP3 @ 128 kbps — keeps TTFB ~2s.
-        DECODE_THRESHOLD = 4096
-        # After first audio, re-decode when this many new MP3 bytes arrive.
-        DECODE_STEP = 1536
-        # Discard decoded PCM that is suspiciously short (ffmpeg decoded garbage).
-        # 50 ms at 24 kHz / 16-bit = 2400 bytes.
-        MIN_PCM_OUTPUT = max(int(self._tts_sample_rate * 0.05 * 2), 2400)
-        PCM_CHUNK = 4096
+        # ~0.5 s / ~1.0 s of audio at ~128 kbps CBR (Sarvam MP3).
+        # Steps must stay large: decode cost grows with buffer size; tiny steps
+        # made ffmpeg slower than realtime and starved the browser ring buffer.
+        FIRST_DECODE_BYTES = 8192
+        DECODE_STEP_BYTES = 16384
+        MIN_PCM_OUTPUT = max(int(self._tts_sample_rate * 0.05 * 2) & ~1, 2400)
         TAIL_GUARD = self._streaming_pcm_tail_guard_bytes()
 
         mp3_buffer = bytearray()
-        pcm_emitted = 0  # bytes of PCM already sent to the browser
+        pcm_emitted = 0
         total_pcm = 0
         start_speaking_sent = False
         last_decode_at_len = 0
+        decode_count = 0
 
         def _broadcast_pcm(pcm: bytes) -> None:
-            """Send PCM to browser, emitting start_speaking on the very first call."""
             nonlocal start_speaking_sent, total_pcm
             if not pcm:
                 return
-            if not start_speaking_sent:
-                if self.webpage_ctrl_sender:
-                    self.webpage_ctrl_sender({"type": "start_speaking"})
+            sent = self._send_pcm_to_webpage(pcm, announce=not start_speaking_sent)
+            if sent:
                 start_speaking_sent = True
-            total_pcm += len(pcm)
-            for i in range(0, len(pcm), PCM_CHUNK):
-                self.webpage_broadcaster(pcm[i : i + PCM_CHUNK])
+                total_pcm += sent
 
-        def _emit_stable_pcm(*, final: bool) -> None:
-            """Decode full MP3-so-far; send only new stable PCM (or all on final)."""
-            nonlocal pcm_emitted, last_decode_at_len
+        async def _emit_stable_pcm(*, final: bool) -> None:
+            """Decode full MP3-so-far off-thread; send only new stable PCM."""
+            nonlocal pcm_emitted, last_decode_at_len, decode_count
             if not mp3_buffer:
                 return
+            snapshot = bytes(mp3_buffer)
+            last_decode_at_len = len(snapshot)
             if final:
-                pcm = self._decode_mp3_to_pcm(bytes(mp3_buffer))
+                pcm = await asyncio.to_thread(self._decode_mp3_to_pcm, snapshot)
             else:
-                pcm = self._try_decode_mp3(bytes(mp3_buffer))
-            last_decode_at_len = len(mp3_buffer)
+                pcm = await asyncio.to_thread(self._try_decode_mp3, snapshot)
+            decode_count += 1
             if not pcm:
                 return
             if not final and len(pcm) < MIN_PCM_OUTPUT:
                 return
+            # Int16 alignment
+            if len(pcm) & 1:
+                pcm = pcm[:-1]
             if final:
                 stable_end = len(pcm)
             else:
-                # Hold tail that may revise when more MP3 frames arrive
                 stable_end = max(pcm_emitted, len(pcm) - TAIL_GUARD)
+                stable_end &= ~1
             if stable_end > pcm_emitted:
                 _broadcast_pcm(pcm[pcm_emitted:stable_end])
                 logger.debug(
-                    "[TTS Streaming] emit +%d PCM (emitted=%d total_dec=%d final=%s)",
+                    "[TTS Streaming] emit +%d PCM (emitted=%d total_dec=%d final=%s n=%d)",
                     stable_end - pcm_emitted,
                     stable_end,
                     len(pcm),
                     final,
+                    decode_count,
                 )
                 pcm_emitted = stable_end
 
@@ -459,18 +482,14 @@ class IntegratedAudioSender:
                     continue
                 mp3_buffer.extend(mp3_chunk)
 
-                # First audio: wait for DECODE_THRESHOLD so ffmpeg can sync frames.
-                # Later: decode every DECODE_STEP bytes to keep the ring buffer fed
-                # without clearing / re-cutting the MP3 stream.
                 if pcm_emitted == 0:
-                    if len(mp3_buffer) >= DECODE_THRESHOLD:
-                        _emit_stable_pcm(final=False)
-                elif len(mp3_buffer) - last_decode_at_len >= DECODE_STEP:
-                    _emit_stable_pcm(final=False)
+                    if len(mp3_buffer) >= FIRST_DECODE_BYTES:
+                        await _emit_stable_pcm(final=False)
+                elif len(mp3_buffer) - last_decode_at_len >= DECODE_STEP_BYTES:
+                    await _emit_stable_pcm(final=False)
 
-            # Final flush — no tail guard; send every remaining sample.
             if mp3_buffer and not (state and state.interrupt_flag.is_set()):
-                _emit_stable_pcm(final=True)
+                await _emit_stable_pcm(final=True)
 
         except Exception as e:
             logger.error(f"Sarvam TTS streaming error: {e}", exc_info=True)
@@ -478,7 +497,7 @@ class IntegratedAudioSender:
         if total_pcm > 0:
             logger.info(
                 f"✓ Streamed {total_pcm} PCM bytes via WebSocket to Output Media page "
-                f"(Sarvam TTS streaming, frame-safe)"
+                f"(Sarvam TTS streaming, {decode_count} decode(s), paced)"
             )
             return True
 
@@ -540,19 +559,15 @@ class IntegratedAudioSender:
             
             # Route to correct output path
             if self.use_webpage and self.webpage_broadcaster:
-                if self.webpage_ctrl_sender:
-                    self.webpage_ctrl_sender({"type": "start_speaking"})
                 pcm = self._decode_mp3_to_pcm(mp3_data)
                 if not pcm:
                     logger.error("Edge-TTS: MP3→PCM conversion returned empty bytes")
                     return False
-                chunk_size = 4096
-                for i in range(0, len(pcm), chunk_size):
-                    self.webpage_broadcaster(pcm[i : i + chunk_size])
+                sent = self._send_pcm_to_webpage(pcm, announce=True)
                 logger.info(
-                    f"✓ Streamed {len(pcm)} PCM bytes via WebSocket to Output Media page (Edge-TTS)"
+                    f"✓ Streamed {sent} PCM bytes via WebSocket to Output Media page (Edge-TTS)"
                 )
-                return True
+                return sent > 0
 
             elif self.use_webrtc and self.webrtc_manager:
                 success = await self.webrtc_manager.stream_audio_from_mp3(mp3_data, state)

@@ -135,7 +135,8 @@ SARVAM_TTS_SAMPLE_RATE = _env_int("SARVAM_TTS_SAMPLE_RATE", 24000)  # bulbul:v3 
 SARVAM_TTS_PACE = _env_float("SARVAM_TTS_PACE", 0.9)  # 0.5 to 2.0, higher = faster
 SARVAM_TTS_TEMPERATURE = _env_float("SARVAM_TTS_TEMPERATURE", 0.35)  # lower = cleaner voice
 SARVAM_TTS_ENABLED = _env_str("SARVAM_TTS_ENABLED", "true").lower() == "true"
-# Partial MP3 streaming decode causes hiss/clicks — batch decode is cleaner.
+# Webpage-PCM streaming: large MP3 decode steps + client jitter gate (see integrated_audio_sender).
+# Set false to force single batch decode per utterance (slightly higher TTFB, still smooth).
 TTS_STREAMING_ENABLED = _env_bool("TTS_STREAMING_ENABLED", False)
 
 # Recall.ai output mode (WebRTC requires media_url from API; file upload is more reliable)

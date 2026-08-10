@@ -10,17 +10,23 @@
  * We decode to Float32, push into a ring buffer, and drain 128 samples per
  * process() call (the AudioWorklet render quantum).
  *
+ * Jitter gate (prime):
+ *   Do not start draining until ~180 ms of audio is buffered. This absorbs
+ *   bursty WebSocket delivery and brief server decode stalls so playback
+ *   does not underrun into silence (the main source of "jerky" speech).
+ *
  * Ring buffer capacity: BUFFER_FRAMES * 128 samples.
  * At 24kHz mono:  4800 frames × 128 = 614,400 samples = 25.6 seconds.
  * Sized to hold the ENTIRE TTS audio burst even for long LLM responses.
  * Memory cost: 4800 × 128 × 4 bytes (Float32) ≈ 2.5 MB — safe for browser.
  *
- * Underrun  → silence padding (no crackle).
+ * Underrun  → silence padding (no crackle); re-prime after underrun.
  * Overrun   → NEWEST data dropped (preserve beginning of speech, not end).
  */
 
 const BUFFER_FRAMES = 4800;        // 25.6 s @ 24kHz — covers even long LLM responses
 const RENDER_QUANTUM = 128;        // AudioWorklet fixed quantum
+const DEFAULT_PRIME_MS = 180;
 
 class PCMPlayerProcessor extends AudioWorkletProcessor {
     constructor(options) {
@@ -33,6 +39,15 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
         this._readHead  = 0;
         this._count     = 0;        // filled samples
 
+        const opts = (options && options.processorOptions) || {};
+        const primeMs = typeof opts.primeMs === 'number' ? opts.primeMs : DEFAULT_PRIME_MS;
+        // sampleRate is the AudioContext rate (AudioWorklet global)
+        this._primeSamples = Math.max(
+            RENDER_QUANTUM,
+            Math.floor((sampleRate * primeMs) / 1000)
+        );
+        this._primed = false;
+
         // Receive Int16 PCM chunks from the main thread
         this.port.onmessage = (e) => {
             if (e.data instanceof ArrayBuffer) {
@@ -41,6 +56,7 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
                 this._writeHead = 0;
                 this._readHead  = 0;
                 this._count     = 0;
+                this._primed    = false;
             }
         };
     }
@@ -51,7 +67,6 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
             if (this._count >= this._bufferSize) {
                 // Overrun: drop NEWEST sample (keep existing audio intact so
                 // speech plays from the beginning, not from the end).
-                // With BUFFER_FRAMES=1200 this should never trigger for normal TTS.
                 continue;
             }
 
@@ -63,6 +78,20 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
 
     process(_inputs, outputs) {
         const channel = outputs[0][0];   // first output, first channel
+
+        // Jitter gate: hold silence until ~primeMs of audio is buffered.
+        // Re-armed only when the ring buffer fully drains (true underrun / end
+        // of utterance) or on flush — not on every start_speaking, so queued
+        // sentence appends stay seamless.
+        if (!this._primed) {
+            if (this._count >= this._primeSamples) {
+                this._primed = true;
+            } else {
+                channel.fill(0);
+                return true;
+            }
+        }
+
         const hadSamples = this._count > 0;
 
         for (let i = 0; i < channel.length; i++) {
@@ -75,11 +104,9 @@ class PCMPlayerProcessor extends AudioWorkletProcessor {
             }
         }
 
-        // Immediate notification the moment the last sample plays out.
-        // This fires within one 128-sample render quantum (~5 ms at 24 kHz)
-        // of the buffer reaching zero — far more accurate than the 2-second
-        // periodic report below.
+        // Buffer empty → re-arm gate for the next burst (absorbs decode stalls).
         if (hadSamples && this._count === 0) {
+            this._primed = false;
             this.port.postMessage({
                 type: 'bufferLevel',
                 count: 0,
