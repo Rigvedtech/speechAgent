@@ -47,6 +47,9 @@ import type {
   CodingTaskSummary,
   CodingTaskDetail,
   CodingDomain,
+  CodingBankStatus,
+  CodingBankGenerateResult,
+  CodingBankSeedResult,
   CodingSession,
   CodingSubmitRequest,
   CodingSubmitResponse,
@@ -57,6 +60,10 @@ import type {
   InterviewCodingConfig,
   InterviewCodingConfigOut,
   CodingLanguage,
+  CodingProctorEventInput,
+  CodingProctorFrameResult,
+  CodingProctorStartResult,
+  CodingProctorSummary,
 } from '@/types/api'
 
 export function joinMeeting(body: JoinMeetingRequest) {
@@ -309,6 +316,58 @@ export function generateDomainCodingTask(domainId: string) {
   )
 }
 
+export function listCodingBank() {
+  return request<CodingTaskSummary[]>('/api/coding/bank')
+}
+
+export function getCodingBankStatus() {
+  return request<CodingBankStatus>('/api/coding/bank/status')
+}
+
+export function seedCodingBank() {
+  return request<CodingBankSeedResult>('/api/coding/bank/seed', {
+    method: 'POST',
+    timeoutMs: 120_000,
+  })
+}
+
+export function generateCodingBankBatch() {
+  return request<CodingBankGenerateResult>('/api/coding/bank/generate', {
+    method: 'POST',
+    // Up to 10 Groq generations
+    timeoutMs: 600_000,
+  })
+}
+
+export function deactivateBankCodingTask(taskId: string) {
+  return request<{ ok: boolean; id: string }>(
+    `/api/coding/bank/tasks/${encodeURIComponent(taskId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export function deactivateAllBankCodingTasks() {
+  return request<{ ok: boolean; deleted: number }>('/api/coding/bank/tasks', {
+    method: 'DELETE',
+  })
+}
+
+export function previewCodingAssign(body: {
+  language: string
+  count: number
+  job_posting_id?: string | null
+  candidate_id?: string | null
+}) {
+  return request<{
+    tasks: CodingTaskSummary[]
+    language: string
+    count: number
+  }>('/api/coding/bank/preview-assign', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
 export function deactivateDomainCodingTask(domainId: string, taskId: string) {
   return request<{ ok: boolean; id: string }>(
     `/api/coding/domains/${encodeURIComponent(domainId)}/tasks/${encodeURIComponent(taskId)}`,
@@ -410,6 +469,16 @@ export function getPublicCodingSession(token: string) {
   return request<CodingSession>(`/api/coding/public/${encodeURIComponent(token)}`)
 }
 
+export function switchPublicCodingTask(token: string, taskId: string) {
+  return request<CodingSession>(
+    `/api/coding/public/${encodeURIComponent(token)}/switch-task`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ task_id: taskId }),
+    },
+  )
+}
+
 export function savePublicCodingSession(
   token: string,
   body: CodingSubmitRequest,
@@ -435,6 +504,40 @@ export function runPublicCodingExamples(
       method: 'POST',
       body: JSON.stringify(body),
       timeoutMs: 60_000,
+    },
+  )
+}
+
+export function startPublicCodingSession(token: string) {
+  return request<CodingProctorStartResult>(
+    `/api/coding/public/${encodeURIComponent(token)}/start`,
+    { method: 'POST', body: '{}' },
+  )
+}
+
+export function postPublicProctorEvents(
+  token: string,
+  events: CodingProctorEventInput[],
+) {
+  return request<{ accepted: number; summary: CodingProctorSummary }>(
+    `/api/coding/public/${encodeURIComponent(token)}/proctor/events`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ events }),
+    },
+  )
+}
+
+export function postPublicProctorFrame(token: string, image_b64: string) {
+  return request<CodingProctorFrameResult>(
+    `/api/coding/public/${encodeURIComponent(token)}/proctor/frame`,
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        image_b64,
+        client_ts: new Date().toISOString(),
+      }),
+      timeoutMs: 30_000,
     },
   )
 }

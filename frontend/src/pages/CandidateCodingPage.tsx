@@ -24,12 +24,22 @@ import {
   getPublicCodingSession,
   runPublicCodingExamples,
   savePublicCodingSession,
+  switchPublicCodingTask,
 } from '@/lib/api'
 import { ApiError } from '@/lib/api-client'
 import { formatApiError } from '@/lib/error-messages'
 import { queryKeys } from '@/lib/query-keys'
 import { cn } from '@/lib/utils'
 import { FlashAlert } from '@/components/ui/flash-alert'
+import { ProctorGate } from '@/components/coding/ProctorGate'
+import { ProctorHud } from '@/components/coding/ProctorHud'
+import { ProctorLockOverlay } from '@/components/coding/ProctorLockOverlay'
+import { ProctorWarningDialog } from '@/components/coding/ProctorWarningDialog'
+import { ProctorFullscreenGate } from '@/components/coding/ProctorFullscreenGate'
+import { CodingProctorEngine } from '@/lib/proctoring/engine'
+import { unlockProctorAudio } from '@/lib/proctoring/audio'
+import type { ProctorLiveState } from '@/lib/proctoring/types'
+import { PROCTOR_MAX_WARNINGS } from '@/lib/proctoring/types'
 import {
   codingLanguageMeta,
   defaultEntryForLanguage,
@@ -37,6 +47,7 @@ import {
 } from '@/lib/coding-languages'
 import type {
   CodingLanguage,
+  CodingProctorSummary,
   CodingRunExamplesResponse,
   CodingWorkspace,
 } from '@/types/api'
@@ -81,11 +92,23 @@ export function CandidateCodingPage() {
   const [timeLocked, setTimeLocked] = useState(false)
   const [resultsHeight, setResultsHeight] = useState(RESULTS_DEFAULT)
   const [draggingResults, setDraggingResults] = useState(false)
+  const [proctorState, setProctorState] = useState<ProctorLiveState | null>(null)
+  const [proctorSummary, setProctorSummary] = useState<CodingProctorSummary | null>(null)
+  const [proctorStarting, setProctorStarting] = useState(false)
+  const [proctorAlert, setProctorAlert] = useState<string | null>(null)
   const autoLockedRef = useRef(false)
   const workspaceRef = useRef(workspace)
   const languageRef = useRef(language)
   const editorColRef = useRef<HTMLElement | null>(null)
   const dragRef = useRef<{ startY: number; startH: number } | null>(null)
+  const videoRef = useRef<HTMLVideoElement | null>(null)
+  const canvasRef = useRef<HTMLCanvasElement | null>(null)
+  const displayVideoRef = useRef<HTMLVideoElement | null>(null)
+  const proctorEngineRef = useRef<CodingProctorEngine | null>(null)
+  const proctorBootKeyRef = useRef<string | null>(null)
+  const proctorAttemptsRef = useRef(PROCTOR_MAX_WARNINGS)
+  const proctorFsExitRef = useRef(0)
+  const proctorForceEndRef = useRef(false)
 
   useEffect(() => {
     workspaceRef.current = workspace
@@ -143,6 +166,12 @@ export function CandidateCodingPage() {
     onSuccess: async (res) => {
       setError(null)
       void queryClient.invalidateQueries({ queryKey: queryKeys.codingPublic(token) })
+      // Proctor force-end: never advance to the next task — round is over
+      if (proctorForceEndRef.current && res.status === 'submitted') {
+        setSubmittedOk(true)
+        setTimeLocked(true)
+        return
+      }
       if (res.status === 'submitted' && res.has_next_task) {
         // Advance to next problem — session refetch loads new task + timer
         setSubmittedOk(false)
@@ -177,18 +206,56 @@ export function CandidateCodingPage() {
     },
   })
 
+  const switchTaskMutation = useMutation({
+    mutationFn: async (taskId: string) => {
+      const session = sessionQuery.data
+      if (
+        session &&
+        session.submission_status !== 'submitted' &&
+        !proctorForceEndRef.current &&
+        !timeLocked
+      ) {
+        const ws = workspaceRef.current
+        const lang = languageRef.current
+        try {
+          await savePublicCodingSession(token, {
+            language: lang,
+            code: ws.files[ws.entryPath] ?? ws.files[ws.activePath] ?? '',
+            status: 'draft',
+            workspace: ws,
+          })
+        } catch {
+          // Still attempt switch — draft save is best-effort
+        }
+      }
+      return switchPublicCodingTask(token, taskId)
+    },
+    onSuccess: (session) => {
+      setError(null)
+      setRunResult(null)
+      queryClient.setQueryData(queryKeys.codingPublic(token), session)
+    },
+    onError: (err) => {
+      setError(
+        err instanceof ApiError
+          ? formatApiError(err.message, err.detail)
+          : 'Failed to switch task',
+      )
+    },
+  })
+
   useEffect(() => {
     const session = sessionQuery.data
     if (!session || (session.submission_status === 'submitted' && !session.has_next_task)) {
       return
     }
+    // Timer only runs after proctor gate starts the session
+    if (!session.started_at || !session.ends_at) {
+      setRemainingSec(null)
+      return
+    }
 
-    const endsAtMs = session.ends_at
-      ? new Date(session.ends_at).getTime()
-      : session.started_at
-        ? new Date(session.started_at).getTime() +
-          (session.time_limit_min || 30) * 60_000
-        : Date.now() + (session.time_limit_min || 30) * 60_000
+    const endsAtMs = new Date(session.ends_at).getTime()
 
     const tick = () => {
       const left = Math.ceil((endsAtMs - Date.now()) / 1000)
@@ -218,6 +285,115 @@ export function CandidateCodingPage() {
     sessionQuery.data?.task?.id,
     sessionQuery.data?.has_next_task,
   ])
+
+  const proctoringOn =
+    Boolean(sessionQuery.data?.proctoring_enabled !== false) &&
+    sessionQuery.data?.submission_status !== 'submitted'
+  const needsProctorGate =
+    proctoringOn && !sessionQuery.data?.started_at && !submittedOk && !timeLocked
+
+  const taskId = sessionQuery.data?.task?.id
+  const startedAt = sessionQuery.data?.started_at
+  const hasNextTask = sessionQuery.data?.has_next_task
+
+  useEffect(() => {
+    if (!token || !proctoringOn) return
+    if (timeLocked || (submittedOk && !hasNextTask)) {
+      void proctorEngineRef.current?.stop()
+      proctorEngineRef.current = null
+      proctorBootKeyRef.current = null
+      return
+    }
+
+    const bootKey = `${token}:${taskId || 'task'}:${startedAt || 'gate'}`
+    if (proctorBootKeyRef.current === bootKey && proctorEngineRef.current) return
+
+    const video = videoRef.current
+    const canvas = canvasRef.current
+    if (!video || !canvas) return
+
+    void proctorEngineRef.current?.stop()
+    const engine = new CodingProctorEngine({
+      token,
+      enabled: true,
+      // Preserve attempts / FS exits if React remounts the engine mid-session
+      initialAttemptsLeft: startedAt
+        ? proctorAttemptsRef.current
+        : PROCTOR_MAX_WARNINGS,
+      initialFullscreenExitCount: startedAt ? proctorFsExitRef.current : 0,
+      onSummary: setProctorSummary,
+      onAlert: (message) => setProctorAlert(message),
+      onAttemptsChange: (left) => {
+        proctorAttemptsRef.current = left
+      },
+      onFullscreenExitCountChange: (count) => {
+        proctorFsExitRef.current = count
+      },
+      onForceSubmit: () => {
+        if (proctorForceEndRef.current) return
+        proctorForceEndRef.current = true
+        autoLockedRef.current = true
+        setProctorAlert(
+          'Proctoring limit reached. Your coding response is being submitted automatically.',
+        )
+        void saveMutation
+          .mutateAsync('submitted')
+          .then(() => {
+            setSubmittedOk(true)
+            setTimeLocked(true)
+          })
+          .catch(() => {
+            setSubmittedOk(true)
+            setTimeLocked(true)
+            setError('Auto-submit failed. Please contact the recruiter.')
+          })
+          .finally(() => {
+            void proctorEngineRef.current?.stop()
+          })
+      },
+    })
+    proctorEngineRef.current = engine
+    proctorBootKeyRef.current = bootKey
+    const unsub = engine.subscribe(setProctorState)
+
+    if (startedAt) {
+      void engine.resumeActive(video, canvas)
+    } else {
+      proctorAttemptsRef.current = PROCTOR_MAX_WARNINGS
+      proctorFsExitRef.current = 0
+      proctorForceEndRef.current = false
+      void engine.beginGate(video, canvas)
+    }
+
+    return () => {
+      unsub()
+    }
+  }, [
+    token,
+    proctoringOn,
+    taskId,
+    startedAt,
+    hasNextTask,
+    submittedOk,
+    timeLocked,
+  ])
+
+  useEffect(() => {
+    return () => {
+      void proctorEngineRef.current?.stop()
+      proctorEngineRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const el = displayVideoRef.current
+    const stream = proctorState?.stream ?? null
+    if (!el) return
+    if (el.srcObject !== stream) {
+      el.srcObject = stream
+      if (stream) void el.play().catch(() => undefined)
+    }
+  }, [proctorState?.stream])
 
   const activeCode = workspace.files[workspace.activePath] ?? ''
   const fileNames = useMemo(
@@ -277,7 +453,30 @@ export function CandidateCodingPage() {
     })
   }
 
-  const locked = submittedOk || timeLocked
+  const proctorScreenLocked = Boolean(
+    proctorState?.screenLocked ||
+      proctorState?.finalSubmitPending ||
+      proctorState?.forceSubmitted,
+  )
+  const proctorSoftWarned = Boolean(proctorState?.warningDialog)
+  const proctorFsGate = Boolean(proctorState?.fullscreenGateOpen)
+  const locked =
+    submittedOk ||
+    timeLocked ||
+    sessionQuery.data?.submission_status === 'submitted' ||
+    proctorScreenLocked ||
+    proctorSoftWarned ||
+    proctorFsGate ||
+    proctorForceEndRef.current
+  const taskSwitchBusy = switchTaskMutation.isPending
+  const canSwitchTasks =
+    !proctorForceEndRef.current &&
+    !timeLocked &&
+    !submittedOk &&
+    !proctorScreenLocked &&
+    !proctorSoftWarned &&
+    !proctorFsGate &&
+    !taskSwitchBusy
   const timerUrgent =
     remainingSec !== null && remainingSec <= 5 * 60 && remainingSec > 0
   const langLabel = codingLanguageMeta(language).label
@@ -347,8 +546,90 @@ export function CandidateCodingPage() {
   }
 
   const task = sessionQuery.data.task
-  const busy = saveMutation.isPending || runMutation.isPending
+  const busy = saveMutation.isPending || runMutation.isPending || taskSwitchBusy
   const entryFn = task.entry_function || 'solution'
+
+  const selectAssignedTask = (taskId: string) => {
+    if (!canSwitchTasks) return
+    if (taskId === task.id) return
+    switchTaskMutation.mutate(taskId)
+  }
+
+  const proctorPreview = (
+    <video
+      ref={displayVideoRef}
+      className={cn(
+        'h-full w-full object-cover',
+        needsProctorGate ? 'aspect-[4/3]' : 'aspect-video',
+      )}
+      muted
+      playsInline
+      autoPlay
+    />
+  )
+
+  const startProctoredSession = async () => {
+    if (!proctorEngineRef.current) return
+    setProctorStarting(true)
+    setError(null)
+    unlockProctorAudio()
+    try {
+      await proctorEngineRef.current.completeGateAndStart()
+      await queryClient.invalidateQueries({ queryKey: queryKeys.codingPublic(token) })
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Failed to start proctored coding session',
+      )
+    } finally {
+      setProctorStarting(false)
+    }
+  }
+
+  const captureNodes = (
+    <div className="pointer-events-none fixed h-0 w-0 overflow-hidden opacity-0" aria-hidden>
+      <video ref={videoRef} muted playsInline autoPlay />
+      <canvas ref={canvasRef} />
+    </div>
+  )
+
+  if (needsProctorGate) {
+    return (
+      <div className="relative h-full min-h-0">
+        {captureNodes}
+        {proctorState ? (
+          <ProctorGate
+            state={proctorState}
+            taskTitle={task.title}
+            timeLimitMin={sessionQuery.data.time_limit_min || 30}
+            starting={proctorStarting}
+            preview={proctorPreview}
+            onRequestFullscreen={() => void proctorEngineRef.current?.ensureFullscreen()}
+            onRetryCamera={() => {
+              const video = videoRef.current
+              const canvas = canvasRef.current
+              if (video && canvas) void proctorEngineRef.current?.beginGate(video, canvas)
+            }}
+            onStart={() => void startProctoredSession()}
+          />
+        ) : (
+          <div className="flex h-full items-center justify-center text-sm text-zinc-400">
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            Preparing secure coding environment…
+          </div>
+        )}
+        <FlashAlert
+          message={error || proctorAlert}
+          onDismiss={() => {
+            setError(null)
+            setProctorAlert(null)
+          }}
+          className="absolute bottom-4 left-1/2 z-50 w-[min(32rem,calc(100%-2rem))] -translate-x-1/2 border-amber-500/30 bg-amber-500/10 text-xs text-amber-50"
+        />
+      </div>
+    )
+  }
+
+  const risk = proctorSummary?.risk_level || proctorState?.summary?.risk_level
 
   return (
     <div
@@ -357,6 +638,35 @@ export function CandidateCodingPage() {
         draggingResults && 'coding-dragging',
       )}
     >
+      {captureNodes}
+      {proctoringOn && proctorState ? (
+        <ProctorHud
+          state={proctorState}
+          preview={proctorPreview}
+          onRequestFullscreen={() => void proctorEngineRef.current?.ensureFullscreen()}
+        />
+      ) : null}
+
+      {proctorState ? (
+        <>
+          <ProctorFullscreenGate
+            state={proctorState}
+            onEnterFullscreen={() => void proctorEngineRef.current?.ensureFullscreen()}
+          />
+          <ProctorWarningDialog
+            state={proctorState}
+            onDismiss={() => proctorEngineRef.current?.dismissWarningDialog()}
+          />
+          <ProctorLockOverlay state={proctorState} />
+        </>
+      ) : null}
+
+      <FlashAlert
+        message={proctorAlert}
+        onDismiss={() => setProctorAlert(null)}
+        className="absolute bottom-4 left-1/2 z-50 w-[min(32rem,calc(100%-2rem))] -translate-x-1/2 border-amber-500/30 bg-amber-500/10 text-xs text-amber-50"
+      />
+
       {timeLocked && (
         <div className="absolute inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-[#0f1115]/96 px-6 text-center backdrop-blur-sm">
           <div className="flex h-14 w-14 items-center justify-center rounded-full bg-emerald-500/15 ring-1 ring-emerald-500/30">
@@ -366,9 +676,18 @@ export function CandidateCodingPage() {
             Thank you for your time
           </p>
           <p className="max-w-md text-sm leading-relaxed text-zinc-400">
-            Your coding round has ended. Your latest work was saved automatically. You can
-            close this window.
+            {proctorForceEndRef.current
+              ? 'Your coding round ended because all proctoring warning attempts were used. Your latest work was submitted automatically. You can close this window.'
+              : 'Your coding round has ended. Your latest work was saved automatically. You can close this window.'}
           </p>
+          {risk ? (
+            <p className="text-xs text-zinc-500">
+              Integrity status: <span className="text-zinc-300">{risk}</span>
+              {proctorSummary
+                ? ` · ${proctorSummary.warn_count} warns · ${proctorSummary.critical_count} critical`
+                : ''}
+            </p>
+          ) : null}
         </div>
       )}
 
@@ -603,6 +922,18 @@ export function CandidateCodingPage() {
               value={activeCode}
               onChange={(v) => setActiveCode(v ?? '')}
               theme="vs-dark"
+              onMount={(editor, monaco) => {
+                editor.onKeyDown((e) => {
+                  if (locked) return
+                  const paste =
+                    (e.ctrlKey || e.metaKey) && e.keyCode === monaco.KeyCode.KeyV
+                  if (paste) {
+                    e.preventDefault()
+                    e.stopPropagation()
+                    proctorEngineRef.current?.notePasteBlocked('monaco')
+                  }
+                })
+              }}
               options={{
                 readOnly: locked,
                 minimap: { enabled: false },
@@ -834,6 +1165,101 @@ export function CandidateCodingPage() {
             </span>
           </div>
           <div className="min-h-0 flex-1 space-y-5 overflow-y-auto px-4 py-4">
+            {(sessionQuery.data.task_count ?? 1) > 1 ||
+            (sessionQuery.data.assigned_tasks?.length ?? 0) > 1 ? (
+              <div className="rounded-lg border border-white/10 bg-[#0f1115] px-3 py-2.5">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">
+                    Tasks in this round
+                  </p>
+                  <span className="text-[10px] font-medium tabular-nums text-zinc-400">
+                    {sessionQuery.data.task_index ?? 1}/
+                    {sessionQuery.data.task_count ??
+                      sessionQuery.data.assigned_tasks?.length ??
+                      1}
+                  </span>
+                </div>
+                <ul className="space-y-1.5">
+                  {(sessionQuery.data.assigned_tasks?.length
+                    ? sessionQuery.data.assigned_tasks
+                    : [
+                        {
+                          task_id: task.id,
+                          title: task.title,
+                          difficulty: task.difficulty || 'medium',
+                          time_limit_min: sessionQuery.data.time_limit_min,
+                          status: sessionQuery.data.submission_status || 'draft',
+                          is_current: true,
+                        },
+                      ]
+                  ).map((item, index) => {
+                    const done = item.status === 'submitted'
+                    const current = Boolean(item.is_current)
+                    const clickable = canSwitchTasks && !current
+                    return (
+                      <li key={item.task_id}>
+                        <button
+                          type="button"
+                          disabled={!clickable}
+                          onClick={() => selectAssignedTask(item.task_id)}
+                          className={cn(
+                            'flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left text-[11px] transition',
+                            current
+                              ? 'bg-sky-500/15 ring-1 ring-sky-500/30'
+                              : done
+                                ? 'bg-emerald-500/10'
+                                : 'bg-white/[0.03]',
+                            clickable &&
+                              'cursor-pointer hover:bg-white/[0.08] hover:ring-1 hover:ring-white/15',
+                            !clickable && !current && 'cursor-default opacity-90',
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-semibold',
+                              done
+                                ? 'bg-emerald-500/25 text-emerald-300'
+                                : current
+                                  ? 'bg-sky-500/30 text-sky-200'
+                                  : 'bg-white/10 text-zinc-500',
+                            )}
+                          >
+                            {done ? '✓' : index + 1}
+                          </span>
+                          <div className="min-w-0 flex-1">
+                            <p
+                              className={cn(
+                                'truncate font-medium',
+                                current
+                                  ? 'text-sky-100'
+                                  : done
+                                    ? 'text-emerald-200/90'
+                                    : 'text-zinc-400',
+                              )}
+                            >
+                              {item.title}
+                            </p>
+                            <p className="mt-0.5 text-[10px] text-zinc-500">
+                              {item.time_limit_min} min
+                              {done
+                                ? ' · submitted'
+                                : current
+                                  ? ' · in progress'
+                                  : ' · click to open'}
+                            </p>
+                          </div>
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+                <p className="mt-2 text-[10px] leading-relaxed text-zinc-500">
+                  Same link for all tasks. Click any task to switch; submit when
+                  that one is done.
+                </p>
+              </div>
+            ) : null}
+
             <div>
               <h2 className="text-base font-semibold tracking-tight text-white">
                 {task.title}
@@ -841,7 +1267,7 @@ export function CandidateCodingPage() {
               <p className="mt-1.5 text-[11px] text-zinc-500">
                 {sessionQuery.data.time_limit_min} min · {langLabel}
                 {(sessionQuery.data.task_count ?? 1) > 1
-                  ? ` · problem ${sessionQuery.data.task_index ?? 1}/${sessionQuery.data.task_count}`
+                  ? ` · task ${sessionQuery.data.task_index ?? 1}/${sessionQuery.data.task_count}`
                   : ''}
               </p>
             </div>

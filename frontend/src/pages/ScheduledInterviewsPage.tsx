@@ -169,8 +169,8 @@ export function ScheduledInterviewsPage() {
                     <th className="pb-3 pr-4 font-medium">Language</th>
                     <th className="pb-3 pr-4 font-medium">Questions</th>
                     <th className="pb-3 pr-4 font-medium">Meeting</th>
-                    <th className="pb-3 pr-4 font-medium">Created</th>
-                    <th className="pb-3 font-medium">Actions</th>
+                    <th className="pb-3 pr-4 font-medium whitespace-nowrap">Created</th>
+                    <th className="pb-3 pl-2 font-medium whitespace-nowrap">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -180,7 +180,12 @@ export function ScheduledInterviewsPage() {
                       className="row-hover border-b border-border last:border-0"
                     >
                       <td className="py-3 pr-4 font-medium">{row.candidate_name}</td>
-                      <td className="py-3 pr-4 text-muted-foreground">{row.job_title}</td>
+                      <td
+                        className="max-w-[12rem] truncate py-3 pr-4 text-muted-foreground"
+                        title={row.job_title}
+                      >
+                        {row.job_title}
+                      </td>
                       <td className="py-3 pr-4">
                         <Badge variant="secondary">{row.language_mode}</Badge>
                       </td>
@@ -220,18 +225,19 @@ export function ScheduledInterviewsPage() {
                           </Button>
                         </div>
                       </td>
-                      <td className="py-3 pr-4 text-muted-foreground">
-                        {new Date(row.created_at).toLocaleDateString(undefined, {
+                      <td className="whitespace-nowrap py-3 pr-4 text-muted-foreground tabular-nums">
+                        {new Date(row.created_at).toLocaleString('en-US', {
                           month: 'short',
                           day: 'numeric',
                           hour: '2-digit',
                           minute: '2-digit',
                         })}
                       </td>
-                      <td className="py-3">
-                        <div className="flex flex-wrap gap-2">
+                      <td className="whitespace-nowrap py-3 pl-2">
+                        <div className="flex shrink-0 items-center gap-2">
                           <Button
                             size="sm"
+                            className="shrink-0"
                             disabled={sendLobbyMutation.isPending}
                             onClick={() => {
                               setError(null)
@@ -243,6 +249,7 @@ export function ScheduledInterviewsPage() {
                           <Button
                             variant="ghost"
                             size="sm"
+                            className="shrink-0"
                             disabled={cancelMutation.isPending}
                             onClick={() => {
                               setError(null)

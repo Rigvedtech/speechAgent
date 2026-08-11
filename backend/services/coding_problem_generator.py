@@ -19,7 +19,8 @@ from services.coding_languages import language_label
 
 logger = logging.getLogger(__name__)
 
-MAX_PROBLEMS_PER_DOMAIN = 5
+# Legacy name — org shared bank cap lives in coding_bank_constants.
+MAX_PROBLEMS_PER_DOMAIN = 100
 # Each attempt = exactly one Groq call (no dual-verify/rewrite), so a few
 # retries here is cheap and mostly protects against local-verify rejections
 # (buggy reference code), not Groq rate limits.

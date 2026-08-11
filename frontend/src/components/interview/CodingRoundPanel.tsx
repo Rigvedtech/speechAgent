@@ -1,10 +1,15 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Code2, Loader2, Lock } from 'lucide-react'
-import { listCodingDomains, listDomainCodingTasks } from '@/lib/api'
+import { Code2, Loader2, RefreshCw } from 'lucide-react'
+import {
+  getCodingBankStatus,
+  listCodingDomains,
+  previewCodingAssign,
+} from '@/lib/api'
 import { queryKeys } from '@/lib/query-keys'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
 import {
   Select,
   SelectContent,
@@ -23,11 +28,11 @@ export type CodingRoundState = {
   enabled: boolean
   domainId: string | null
   defaultLanguage: CodingLanguage
-  /** Ordered selected task ids (multi-select). */
+  /** How many tasks the server should auto-assign from the shared bank. */
+  problemCount: number
+  /** Locked-in preview assignment (sent on schedule/join). */
   taskIds: string[]
-  /** Per-task recruiter time (minutes). Prefills from AI estimate. */
   taskTimes: Record<string, number>
-  /** @deprecated kept for callers that still read single-task fields */
   assignedTaskId: string | null
   timeLimitMin: number
 }
@@ -36,26 +41,8 @@ type CodingRoundPanelProps = {
   value: CodingRoundState
   onChange: (next: CodingRoundState) => void
   disabled?: boolean
-}
-
-function nearestTimeOption(minutes: number): number {
-  let best: number = TIME_OPTIONS[0]
-  let bestDiff = Math.abs(minutes - best)
-  for (const opt of TIME_OPTIONS) {
-    const diff = Math.abs(minutes - opt)
-    if (diff < bestDiff) {
-      best = opt
-      bestDiff = diff
-    }
-  }
-  return best
-}
-
-function estimateForTask(estimated?: number | null): number {
-  if (estimated != null && Number.isFinite(estimated)) {
-    return nearestTimeOption(Math.max(5, Math.min(180, Number(estimated))))
-  }
-  return DEFAULT_TASK_TIME
+  jobPostingId?: string | null
+  candidateId?: string | null
 }
 
 export function toInterviewCodingConfig(state: CodingRoundState): InterviewCodingConfig | undefined {
@@ -65,334 +52,308 @@ export function toInterviewCodingConfig(state: CodingRoundState): InterviewCodin
       domain_id: null,
       allowed_languages: state.defaultLanguage ? [state.defaultLanguage] : ['python'],
       default_language: state.defaultLanguage,
+      problem_count: null,
       task_ids: [],
       assigned_task_id: null,
       time_limit_min: state.timeLimitMin || DEFAULT_TASK_TIME,
       task_time_limits: {},
     }
   }
-  if (!state.domainId || state.taskIds.length === 0) return undefined
-  const firstId = state.taskIds[0]
+  if (!state.domainId) return undefined
+  const count = Math.max(1, Math.min(MAX_ASSIGNED, state.problemCount || 1))
+  const taskIds = state.taskIds.slice(0, count)
   const limits: Record<string, number> = {}
-  for (const id of state.taskIds) {
-    limits[id] = state.taskTimes[id] ?? DEFAULT_TASK_TIME
+  for (const id of taskIds) {
+    limits[id] = state.taskTimes[id] ?? (state.timeLimitMin || DEFAULT_TASK_TIME)
   }
   return {
     enabled: true,
     domain_id: state.domainId,
     allowed_languages: [state.defaultLanguage],
     default_language: state.defaultLanguage,
-    task_ids: state.taskIds,
-    assigned_task_id: firstId,
-    time_limit_min: limits[firstId] ?? DEFAULT_TASK_TIME,
+    problem_count: count,
+    // Prefer locked preview IDs so Join sees the same tasks shown here
+    task_ids: taskIds,
+    assigned_task_id: taskIds[0] ?? null,
+    time_limit_min: state.timeLimitMin || DEFAULT_TASK_TIME,
     task_time_limits: limits,
   }
 }
 
-export function CodingRoundPanel({ value, onChange, disabled }: CodingRoundPanelProps) {
-  const [localTimes, setLocalTimes] = useState<Record<string, number>>({})
+export function CodingRoundPanel({
+  value,
+  onChange,
+  disabled,
+  jobPostingId,
+  candidateId,
+}: CodingRoundPanelProps) {
+  const onChangeRef = useRef(onChange)
+  onChangeRef.current = onChange
 
   const domainsQuery = useQuery({
     queryKey: queryKeys.codingDomains,
     queryFn: listCodingDomains,
     staleTime: 60_000,
   })
-
-  // Same bank as Coding dashboard: org-owned domain problems only (no global seeds).
-  const tasksQuery = useQuery({
-    queryKey: queryKeys.codingDomainTasks(value.domainId ?? '', true),
-    queryFn: () => listDomainCodingTasks(value.domainId!, { owned_only: true }),
-    enabled: Boolean(value.enabled && value.domainId),
+  const bankStatusQuery = useQuery({
+    queryKey: queryKeys.codingBankStatus,
+    queryFn: getCodingBankStatus,
     staleTime: 30_000,
+    enabled: value.enabled,
   })
 
-  const domains = domainsQuery.data ?? []
-  const tasks = (tasksQuery.data ?? []).slice(0, MAX_ASSIGNED)
-  const selectedDomain = domains.find((d) => d.id === value.domainId)
-  const selected = new Set(value.taskIds)
+  const count = Math.max(1, Math.min(MAX_ASSIGNED, value.problemCount || 1))
+  const previewEnabled = Boolean(value.enabled && value.defaultLanguage && value.domainId)
 
+  const previewQuery = useQuery({
+    queryKey: [
+      ...queryKeys.codingAssignPreview(value.defaultLanguage, count),
+      jobPostingId ?? '',
+      candidateId ?? '',
+    ],
+    queryFn: () =>
+      previewCodingAssign({
+        language: value.defaultLanguage,
+        count,
+        job_posting_id: jobPostingId,
+        candidate_id: candidateId,
+      }),
+    enabled: previewEnabled,
+    staleTime: 0,
+  })
+
+  // Sync previewed task IDs into form state for schedule/join
   useEffect(() => {
-    setLocalTimes({})
-  }, [value.domainId])
-
-  // Prefill times from AI estimates when tasks load
-  useEffect(() => {
-    if (!tasks.length) return
-    setLocalTimes((prev) => {
-      const next = { ...prev }
-      let changed = false
-      for (const task of tasks) {
-        if (next[task.id] == null && value.taskTimes[task.id] == null) {
-          next[task.id] = estimateForTask(task.estimated_time_min)
-          changed = true
-        }
-      }
-      return changed ? next : prev
-    })
-  }, [tasks, value.taskTimes])
-
-  const timeForTask = (taskId: string, estimated?: number | null) =>
-    value.taskTimes[taskId] ??
-    localTimes[taskId] ??
-    estimateForTask(estimated)
-
-  const emitSelection = (
-    taskIds: string[],
-    timesPatch?: Record<string, number>,
-  ) => {
-    const mergedTimes = { ...localTimes, ...value.taskTimes, ...(timesPatch || {}) }
-    for (const id of taskIds) {
-      if (mergedTimes[id] == null) {
-        const task = tasks.find((t) => t.id === id)
-        mergedTimes[id] = estimateForTask(task?.estimated_time_min)
+    if (!previewEnabled || !previewQuery.data) return
+    const tasks = previewQuery.data.tasks
+    const ids = tasks.map((t) => t.id)
+    const same =
+      ids.length === value.taskIds.length && ids.every((id, i) => id === value.taskIds[i])
+    if (same) return
+    const times: Record<string, number> = { ...value.taskTimes }
+    for (const t of tasks) {
+      if (times[t.id] == null) {
+        times[t.id] = value.timeLimitMin || DEFAULT_TASK_TIME
       }
     }
-    setLocalTimes(mergedTimes)
-    onChange({
+    onChangeRef.current({
       ...value,
-      taskIds,
-      taskTimes: Object.fromEntries(taskIds.map((id) => [id, mergedTimes[id]])),
-      assignedTaskId: taskIds[0] ?? null,
-      timeLimitMin: taskIds[0]
-        ? mergedTimes[taskIds[0]] ?? DEFAULT_TASK_TIME
-        : value.timeLimitMin,
+      taskIds: ids,
+      taskTimes: times,
+      assignedTaskId: ids[0] ?? null,
     })
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- sync only when preview payload changes
+  }, [previewQuery.data, previewEnabled])
 
-  const toggleTask = (taskId: string, estimated?: number | null) => {
-    if (disabled) return
-    if (selected.has(taskId)) {
-      emitSelection(value.taskIds.filter((id) => id !== taskId))
-      return
-    }
-    if (value.taskIds.length >= MAX_ASSIGNED) return
-    const minutes = timeForTask(taskId, estimated)
-    emitSelection([...value.taskIds, taskId], { [taskId]: minutes })
-  }
-
-  const setTaskTime = (taskId: string, minutes: number, estimated?: number | null) => {
-    const nextTimes = {
-      ...localTimes,
-      ...value.taskTimes,
-      [taskId]: minutes,
-    }
-    setLocalTimes(nextTimes)
-    const taskIds = selected.has(taskId) ? value.taskIds : [...value.taskIds, taskId]
-    if (!selected.has(taskId) && value.taskIds.length >= MAX_ASSIGNED) {
-      // Already at max and not selected — only update local preview time
-      return
-    }
-    emitSelection(taskIds.slice(0, MAX_ASSIGNED), {
-      [taskId]: minutes || estimateForTask(estimated),
-    })
-  }
-
-  const totalMinutes = value.taskIds.reduce(
-    (sum, id) => sum + (value.taskTimes[id] ?? localTimes[id] ?? DEFAULT_TASK_TIME),
-    0,
-  )
+  const domains = domainsQuery.data ?? []
+  const bankCount = bankStatusQuery.data?.problem_count ?? 0
+  const bankEmpty = value.enabled && bankStatusQuery.isSuccess && bankCount === 0
+  const picked = previewQuery.data?.tasks ?? []
 
   return (
     <div className="space-y-4">
-      <div className="flex items-start justify-between gap-3">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <Code2 className="h-4 w-4 text-muted-foreground" strokeWidth={1.5} />
-            <Label className="text-sm font-medium">Coding task round</Label>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-sky-500/15 ring-1 ring-sky-500/30">
+            <Code2 className="h-4 w-4 text-sky-300" />
           </div>
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Choose a domain, select one or more problems, and set time per task.
-            The candidate works them one-by-one; each task uses its own timer.
-          </p>
+          <p className="text-sm font-medium">Enable coding round</p>
         </div>
         <button
           type="button"
           role="switch"
           aria-checked={value.enabled}
-          disabled={disabled || domainsQuery.isLoading}
-          onClick={() => {
-            const enabling = !value.enabled
-            const firstDomain = domains[0]
-            const lang = (firstDomain?.language as CodingLanguage) || 'python'
+          disabled={disabled}
+          onClick={() =>
             onChange({
               ...value,
-              enabled: enabling,
-              domainId: enabling ? value.domainId || firstDomain?.id || null : value.domainId,
-              defaultLanguage: enabling
-                ? ((domains.find((d) => d.id === (value.domainId || firstDomain?.id))
-                    ?.language as CodingLanguage) || lang)
-                : value.defaultLanguage,
+              enabled: !value.enabled,
+              taskIds: [],
+              assignedTaskId: null,
             })
-          }}
+          }
           className={cn(
-            'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors',
-            value.enabled ? 'border-primary bg-primary' : 'border-border bg-muted',
-            (disabled || domainsQuery.isLoading) && 'opacity-50',
+            'relative h-6 w-11 rounded-full transition-colors',
+            value.enabled ? 'bg-sky-500' : 'bg-muted',
+            disabled && 'opacity-50',
           )}
         >
           <span
             className={cn(
-              'inline-block h-4 w-4 transform rounded-full bg-background shadow transition-transform',
-              value.enabled ? 'translate-x-6' : 'translate-x-1',
+              'absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white transition-transform',
+              value.enabled && 'translate-x-5',
             )}
           />
         </button>
       </div>
 
-      {domainsQuery.isLoading && (
-        <p className="flex items-center gap-2 text-xs text-muted-foreground">
-          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          Loading domains…
-        </p>
-      )}
+      {value.enabled ? (
+        <div className="space-y-4 rounded-lg border border-border/60 bg-muted/20 p-3">
+          {domainsQuery.isLoading ? (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Loading languages…
+            </div>
+          ) : (
+            <>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Language</Label>
+                  <Select
+                    value={value.domainId ?? ''}
+                    disabled={disabled}
+                    onValueChange={(id) => {
+                      const domain = domains.find((d) => d.id === id)
+                      if (!domain) return
+                      onChange({
+                        ...value,
+                        domainId: domain.id,
+                        defaultLanguage: domain.language as CodingLanguage,
+                        taskIds: [],
+                        assignedTaskId: null,
+                      })
+                    }}
+                  >
+                    <SelectTrigger className="h-9">
+                      <SelectValue placeholder="Select language" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {domains.map((d) => (
+                        <SelectItem key={d.id} value={d.id}>
+                          {d.name} ({d.language})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
 
-      {value.enabled && (
-        <div className="space-y-4 rounded-lg border border-border bg-muted/20 p-3">
-          <div className="max-w-md">
-            <Label>Domain</Label>
-            <Select
-              value={value.domainId ?? undefined}
-              onValueChange={(id) => {
-                const domain = domains.find((d) => d.id === id)
-                const lang = (domain?.language as CodingLanguage) || 'python'
-                onChange({
-                  ...value,
-                  domainId: id,
-                  defaultLanguage: lang,
-                  assignedTaskId: null,
-                  taskIds: [],
-                  taskTimes: {},
-                })
-              }}
-              disabled={disabled}
-            >
-              <SelectTrigger className="mt-1.5">
-                <SelectValue placeholder="Select domain" />
-              </SelectTrigger>
-              <SelectContent>
-                {domains.map((d) => (
-                  <SelectItem key={d.id} value={d.id}>
-                    {d.name} ({d.language})
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {selectedDomain && (
-              <p className="mt-1.5 flex items-center gap-1 text-[11px] text-muted-foreground">
-                <Lock className="h-3 w-3" />
-                Candidate locked to {selectedDomain.language}
-              </p>
-            )}
-          </div>
-
-          <div className="space-y-2">
-            <div className="flex flex-wrap items-end justify-between gap-2">
-              <div>
-                <Label>Assign problems from this domain</Label>
-                <p className="text-[11px] text-muted-foreground">
-                  Problems from your Coding dashboard for this domain. Time defaults to the AI
-                  estimate — change it if needed.
-                </p>
+                <div className="space-y-1.5">
+                  <Label className="text-xs">Tasks assigned</Label>
+                  <Select
+                    value={String(value.problemCount || 1)}
+                    disabled={disabled}
+                    onValueChange={(v) =>
+                      onChange({
+                        ...value,
+                        problemCount: Number(v),
+                        taskIds: [],
+                        assignedTaskId: null,
+                      })
+                    }
+                  >
+                    <SelectTrigger className="h-9">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {[1, 2, 3, 4, 5].map((n) => (
+                        <SelectItem key={n} value={String(n)}>
+                          {n} task{n === 1 ? '' : 's'}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
               </div>
-              {value.taskIds.length > 0 && (
+
+              <div className="space-y-1.5">
+                <Label className="text-xs">Time per task</Label>
+                <Select
+                  value={String(value.timeLimitMin || DEFAULT_TASK_TIME)}
+                  disabled={disabled}
+                  onValueChange={(v) =>
+                    onChange({
+                      ...value,
+                      timeLimitMin: Number(v),
+                    })
+                  }
+                >
+                  <SelectTrigger className="h-9 w-full sm:w-[180px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {TIME_OPTIONS.map((m) => (
+                      <SelectItem key={m} value={String(m)}>
+                        {m} min
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {bankEmpty ? (
+                <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100">
+                  Coding bank is empty — open Coding dashboard and Seed bank first.
+                </p>
+              ) : null}
+
+              {previewEnabled ? (
+                <div className="space-y-2 border-t border-border/50 pt-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs font-medium text-foreground">Assigned tasks</p>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2 text-[11px]"
+                      disabled={disabled || previewQuery.isFetching}
+                      onClick={() => void previewQuery.refetch()}
+                    >
+                      {previewQuery.isFetching ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-3.5 w-3.5" />
+                      )}
+                      Re-pick
+                    </Button>
+                  </div>
+                  {previewQuery.isLoading ? (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Picking tasks…
+                    </div>
+                  ) : previewQuery.isError ? (
+                    <p className="rounded-md border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-100">
+                      Could not load assigned tasks. Restart the API server, then click Re-pick.
+                    </p>
+                  ) : picked.length === 0 ? (
+                    <p className="text-xs text-muted-foreground">No tasks available in the bank.</p>
+                  ) : (
+                    <ul className="space-y-1.5">
+                      {picked.map((task, index) => (
+                        <li
+                          key={task.id}
+                          className="flex items-start justify-between gap-2 rounded-md border border-border/50 bg-card/60 px-2.5 py-2"
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate text-xs font-medium">
+                              {index + 1}. {task.title}
+                            </p>
+                            <p className="mt-0.5 truncate text-[10px] text-muted-foreground">
+                              {(task.skill_tags || []).slice(0, 3).join(' · ') || 'DSA'}
+                            </p>
+                          </div>
+                          <Badge variant="secondary" className="shrink-0 text-[9px] uppercase">
+                            {task.difficulty}
+                          </Badge>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {bankStatusQuery.data ? (
+                    <p className="text-[11px] text-muted-foreground">
+                      Bank {bankStatusQuery.data.problem_count}/{bankStatusQuery.data.max_problems}
+                    </p>
+                  ) : null}
+                </div>
+              ) : (
                 <p className="text-[11px] text-muted-foreground">
-                  {value.taskIds.length} selected · ~{totalMinutes} min total
+                  Select a language to preview assigned tasks.
                 </p>
               )}
-            </div>
-            {tasksQuery.isLoading && (
-              <p className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Loading problems…
-              </p>
-            )}
-            <div className="space-y-2">
-              {tasks.map((task) => {
-                const isSelected = selected.has(task.id)
-                const aiEstimate = estimateForTask(task.estimated_time_min)
-                const rowTime = timeForTask(task.id, task.estimated_time_min)
-                return (
-                  <div
-                    key={task.id}
-                    className={cn(
-                      'w-full rounded-md border px-3 py-2.5 transition-colors',
-                      isSelected
-                        ? 'border-primary bg-primary/5'
-                        : 'border-border bg-background hover:bg-muted/40',
-                      disabled && 'pointer-events-none opacity-50',
-                    )}
-                  >
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <label className="flex min-w-0 flex-1 cursor-pointer items-start gap-2.5">
-                        <input
-                          type="checkbox"
-                          className="mt-1 h-4 w-4 accent-primary"
-                          checked={isSelected}
-                          disabled={disabled || (!isSelected && value.taskIds.length >= MAX_ASSIGNED)}
-                          onChange={() => toggleTask(task.id, task.estimated_time_min)}
-                        />
-                        <span className="min-w-0">
-                          <span className="flex flex-wrap items-center gap-2">
-                            <span className="text-sm font-medium">{task.title}</span>
-                            <Badge variant="secondary">{task.difficulty}</Badge>
-                          </span>
-                          <span className="mt-1 block text-[11px] text-muted-foreground">
-                            {(task.skill_tags ?? []).join(' · ') || task.slug}
-                          </span>
-                          <span className="mt-1 block text-[11px] text-muted-foreground">
-                            AI estimate: {aiEstimate} min
-                          </span>
-                        </span>
-                      </label>
-                      <div
-                        className="w-[7.5rem] shrink-0"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        <Select
-                          value={String(rowTime)}
-                          onValueChange={(v) =>
-                            setTaskTime(task.id, Number(v), task.estimated_time_min)
-                          }
-                          disabled={disabled}
-                        >
-                          <SelectTrigger
-                            className="h-8"
-                            aria-label={`Time limit for ${task.title}`}
-                          >
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {TIME_OPTIONS.map((n) => (
-                              <SelectItem key={n} value={String(n)}>
-                                {n} min
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-            {!value.domainId && (
-              <p className="text-xs text-destructive">Select a domain first.</p>
-            )}
-            {value.domainId && !tasksQuery.isLoading && tasks.length === 0 && (
-              <p className="text-xs text-destructive">
-                No coding task assigned — this domain has no problems yet.
-                Go to the Coding dashboard and generate tasks, then come back
-                and select one or more.
-              </p>
-            )}
-            {value.domainId && tasks.length > 0 && value.taskIds.length === 0 && (
-              <p className="text-xs text-destructive">
-                No coding task assigned yet — select at least one problem and set its time.
-              </p>
-            )}
-          </div>
+            </>
+          )}
         </div>
-      )}
+      ) : null}
     </div>
   )
 }
