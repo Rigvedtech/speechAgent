@@ -73,6 +73,16 @@ jobs:
             WEB_ROOT="/var/www/speechagent"
             BACKUP_DIR="${REPO_DIR}/backups/db"
             MIGRATE_PY="${REPO_DIR}/database/migrate.py"
+            API_STARTED=0
+
+            # If deploy fails before API is confirmed up, bring the previous process back.
+            restore_api_if_needed() {
+              if [ "${API_STARTED}" -eq 0 ]; then
+                echo "==> Deploy failed before API healthy — attempting to restart speechagent-api"
+                sudo systemctl start speechagent-api || true
+              fi
+            }
+            trap restore_api_if_needed EXIT
 
             echo "==> Deploy branch: ${DEPLOY_BRANCH}"
             echo "==> Repo: ${REPO_DIR}"
@@ -93,22 +103,37 @@ jobs:
             echo "==> Backend dependencies"
             cd "${REPO_DIR}/backend"
             # shellcheck disable=SC1091
-            source venv/bin/activate
+            . venv/bin/activate
             pip install -r requirements.txt
 
             echo "==> Database migrations (additive only; no DROP SCHEMA)"
-            # Uses backend/.env DATABASE_URL. Auto-baselines existing prod DB
-            # on first run so historical CREATE TABLE files are not re-executed.
-            # pending-count prints ONLY an integer on stdout (logs → stderr).
-            PENDING_COUNT="$(python "${MIGRATE_PY}" pending-count | tr -d '[:space:]')"
-            echo "Pending migrations: ${PENDING_COUNT}"
-            if ! [[ "${PENDING_COUNT}" =~ ^[0-9]+$ ]]; then
-              echo "ERROR: pending-count did not return an integer: '${PENDING_COUNT}'" >&2
+            if [ ! -f "${MIGRATE_PY}" ]; then
+              echo "ERROR: missing ${MIGRATE_PY}" >&2
               exit 1
             fi
+            if [ ! -f "${REPO_DIR}/backend/.env" ]; then
+              echo "ERROR: missing backend/.env (DATABASE_URL required)" >&2
+              exit 1
+            fi
+
+            # pending-count: integer on stdout only; progress logs on stderr (visible in Actions).
+            # Use POSIX tests only — drone-ssh/shell portability (no [[ =~ ]]).
+            PENDING_COUNT="$(python "${MIGRATE_PY}" pending-count | tr -d '[:space:]')"
+            echo "Pending migrations: ${PENDING_COUNT}"
+            case "${PENDING_COUNT}" in
+              ''|*[!0-9]*)
+                echo "ERROR: pending-count did not return an integer: '${PENDING_COUNT}'" >&2
+                exit 1
+                ;;
+            esac
+
             if [ "${PENDING_COUNT}" -gt 0 ]; then
               echo "==> Pre-migrate dump (schema + data, compressed; keep last 3)"
               mkdir -p "${BACKUP_DIR}"
+              command -v pg_dump >/dev/null 2>&1 || {
+                echo "ERROR: pg_dump not found. Install postgresql-client on the VM." >&2
+                exit 1
+              }
               python "${MIGRATE_PY}" dump --dir "${BACKUP_DIR}" --keep 3
               echo "==> Apply pending migrations"
               python "${MIGRATE_PY}" apply
@@ -120,7 +145,12 @@ jobs:
             echo "==> Start backend (speechagent-api)"
             sudo systemctl start speechagent-api
             sleep 3
-            sudo systemctl is-active --quiet speechagent-api
+            if ! sudo systemctl is-active --quiet speechagent-api; then
+              echo "ERROR: speechagent-api failed to start" >&2
+              sudo systemctl status speechagent-api --no-pager >&2 || true
+              exit 1
+            fi
+            API_STARTED=1
 
             echo "==> Frontend production build"
             cd "${REPO_DIR}/frontend"
@@ -133,7 +163,17 @@ jobs:
             sudo chown -R www-data:www-data "${WEB_ROOT}"
 
             echo "==> Health checks"
-            curl -fsS --retry 5 --retry-delay 2 http://127.0.0.1:8000/health
-            curl -fsSI --retry 3 http://127.0.0.1/ | head -n 1
+            curl -fsS --retry 5 --retry-delay 2 "http://127.0.0.1:8000/health" >/dev/null
+            # Avoid curl|head SIGPIPE under pipefail (curl exit 141 can fail the job)
+            HTTP_CODE="$(curl -fsS -o /dev/null -w '%{http_code}' --retry 3 'http://127.0.0.1/')"
+            echo "Frontend HTTP status: ${HTTP_CODE}"
+            case "${HTTP_CODE}" in
+              2??|3??) ;;
+              *)
+                echo "ERROR: unexpected frontend HTTP status ${HTTP_CODE}" >&2
+                exit 1
+                ;;
+            esac
 
             echo "==> Deploy OK (${DEPLOY_BRANCH} @ $(cd "${REPO_DIR}" && git rev-parse --short HEAD))"
+            trap - EXIT
