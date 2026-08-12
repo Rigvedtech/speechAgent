@@ -48,6 +48,11 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 """
 
 
+def log(msg: str) -> None:
+    """Human-readable progress → stderr so shell capture of stdout stays clean."""
+    print(msg, file=sys.stderr)
+
+
 def _load_database_url() -> str:
     # Prefer already-exported env (CI / systemd). Else load backend/.env.
     url = (os.environ.get("DATABASE_URL") or "").strip()
@@ -145,8 +150,8 @@ def baseline_all(conn, *, reason: str) -> int:
     for path in files:
         mark_applied(conn, path.name, commit=False)
     conn.commit()
-    print(f"[migrate] Baselined {len(files)} file(s) ({reason}). No SQL executed.")
-    print(
+    log(f"[migrate] Baselined {len(files)} file(s) ({reason}). No SQL executed.")
+    log(
         "[migrate] Note: if this deploy also introduced brand-new NNN_*.sql files, "
         "remove those filenames from schema_migrations and re-run apply."
     )
@@ -168,7 +173,7 @@ def maybe_auto_baseline(conn) -> bool:
             reason="existing database detected; first migrate run",
         )
         return True
-    print("[migrate] Fresh database (no organization/users). Will apply all migrations.")
+    log("[migrate] Fresh database (no organization/users). Will apply all migrations.")
     return False
 
 
@@ -176,7 +181,7 @@ def apply_file(conn, path: Path) -> None:
     sql = path.read_text(encoding="utf-8")
     if sql.startswith("\ufeff"):
         sql = sql.lstrip("\ufeff")
-    print(f"[migrate] Applying {path.name} ...")
+    log(f"[migrate] Applying {path.name} ...")
     with conn.cursor() as cur:
         cur.execute(sql)
         cur.execute(
@@ -188,7 +193,7 @@ def apply_file(conn, path: Path) -> None:
             (path.name,),
         )
     conn.commit()
-    print(f"[migrate] OK {path.name}")
+    log(f"[migrate] OK {path.name}")
 
 
 def cmd_status(_: argparse.Namespace) -> int:
@@ -198,23 +203,24 @@ def cmd_status(_: argparse.Namespace) -> int:
         maybe_auto_baseline(conn)
         pending = pending_files(conn)
         applied = sorted(applied_filenames(conn))
-        print(f"[migrate] Applied: {len(applied)}")
-        print(f"[migrate] Pending: {len(pending)}")
+        log(f"[migrate] Applied: {len(applied)}")
+        log(f"[migrate] Pending: {len(pending)}")
         for p in pending:
-            print(f"  - {p.name}")
+            log(f"  - {p.name}")
         if not pending:
-            print("[migrate] Database is up to date.")
+            log("[migrate] Database is up to date.")
         return 0
     finally:
         conn.close()
 
 
 def cmd_pending_count(_: argparse.Namespace) -> int:
-    """Print pending count only (for shell). Auto-baselines first if needed."""
+    """Print pending count only on stdout (for shell). Logs go to stderr."""
     conn = _connect()
     try:
         ensure_tracker(conn)
         maybe_auto_baseline(conn)
+        # stdout must be a bare integer — used by deploy-vm.yml `[ "$PENDING_COUNT" -gt 0 ]`
         print(len(pending_files(conn)))
         return 0
     finally:
@@ -238,9 +244,9 @@ def cmd_apply(_: argparse.Namespace) -> int:
         maybe_auto_baseline(conn)
         pending = pending_files(conn)
         if not pending:
-            print("[migrate] No pending migrations.")
+            log("[migrate] No pending migrations.")
             return 0
-        print(f"[migrate] {len(pending)} pending migration(s).")
+        log(f"[migrate] {len(pending)} pending migration(s).")
         for path in pending:
             # One file per transaction: commit on success; rollback file on failure
             try:
@@ -254,7 +260,7 @@ def cmd_apply(_: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
                 return 1
-        print("[migrate] All pending migrations applied successfully.")
+        log("[migrate] All pending migrations applied successfully.")
         return 0
     finally:
         conn.close()
@@ -290,9 +296,9 @@ def prune_dumps(backup_dir: Path, keep: int) -> None:
     for old in dumps[max(0, keep) :]:
         try:
             old.unlink()
-            print(f"[migrate] Pruned old dump: {old.name}")
+            log(f"[migrate] Pruned old dump: {old.name}")
         except OSError as ex:
-            print(f"[migrate] Warning: could not delete {old}: {ex}", file=sys.stderr)
+            log(f"[migrate] Warning: could not delete {old}: {ex}")
 
 
 def cmd_dump(args: argparse.Namespace) -> int:
@@ -327,7 +333,7 @@ def cmd_dump(args: argparse.Namespace) -> int:
         "-f",
         str(out),
     ]
-    print(f"[migrate] Dumping to {out} (schema + data, compressed) ...")
+    log(f"[migrate] Dumping to {out} (schema + data, compressed) ...")
     try:
         subprocess.run(cmd, env=env, check=True)
     except FileNotFoundError:
@@ -342,7 +348,7 @@ def cmd_dump(args: argparse.Namespace) -> int:
         return 1
 
     size_mb = out.stat().st_size / (1024 * 1024)
-    print(f"[migrate] Dump OK ({size_mb:.2f} MiB): {out}")
+    log(f"[migrate] Dump OK ({size_mb:.2f} MiB): {out}")
     prune_dumps(backup_dir, keep)
     return 0
 
