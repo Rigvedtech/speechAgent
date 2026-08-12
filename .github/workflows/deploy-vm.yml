@@ -5,10 +5,14 @@
 #   2. Stop backend (systemd speechagent-api)
 #   3. git fetch + checkout + pull main
 #   4. pip install backend deps
-#   5. Start backend (systemd)
-#   6. npm ci + npm run build (uses frontend/.env.production on VM)
-#   7. Copy dist → /var/www/speechagent (nginx stays running)
-#   8. Health checks
+#   5. DB migrate (additive only — never DROP SCHEMA / wipe data):
+#        - pending-count (auto-baselines existing prod DB on first run)
+#        - if pending > 0: compressed pg_dump (schema+data), keep last 3
+#        - apply pending database/NNN_*.sql only
+#   6. Start backend (systemd)
+#   7. npm ci + npm run build (uses frontend/.env.production on VM)
+#   8. Copy dist → /var/www/speechagent (nginx stays running)
+#   9. Health checks
 #
 # Required GitHub Actions secrets:
 #   VM_HOST     – VM public IP (e.g. 20.244.7.67)
@@ -17,10 +21,11 @@
 #
 # VM prerequisites (one-time):
 #   - repo at /home/azureuser/speechAgent; git pull origin main works without prompts
-#   - backend/.env present (gitignored; not overwritten by pull)
+#   - backend/.env present with DATABASE_URL (gitignored; not overwritten by pull)
 #   - frontend/.env.production: VITE_LANDING_ONLY=false and VITE_API_BASE_URL=
 #   - systemd unit speechagent-api enabled
 #   - nginx serving /var/www/speechagent
+#   - postgresql-client installed (pg_dump) for pre-migrate backups
 #   - passwordless sudo for azureuser, e.g.:
 #       azureuser ALL=(ALL) NOPASSWD: /bin/systemctl stop speechagent-api, /bin/systemctl start speechagent-api, /bin/systemctl restart speechagent-api, /bin/cp, /bin/mkdir, /bin/chown
 #
@@ -50,7 +55,7 @@ jobs:
     # Manual runs must type "deploy" to avoid accidents
     if: ${{ github.event_name == 'push' || github.event.inputs.confirm == 'deploy' }}
     steps:
-      - name: SSH stop, pull main, start API, build frontend
+      - name: SSH stop, pull main, migrate DB, start API, build frontend
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VM_HOST }}
@@ -66,6 +71,8 @@ jobs:
             DEPLOY_BRANCH="main"
             REPO_DIR="/home/azureuser/speechAgent"
             WEB_ROOT="/var/www/speechagent"
+            BACKUP_DIR="${REPO_DIR}/backups/db"
+            MIGRATE_PY="${REPO_DIR}/database/migrate.py"
 
             echo "==> Deploy branch: ${DEPLOY_BRANCH}"
             echo "==> Repo: ${REPO_DIR}"
@@ -88,6 +95,22 @@ jobs:
             # shellcheck disable=SC1091
             source venv/bin/activate
             pip install -r requirements.txt
+
+            echo "==> Database migrations (additive only; no DROP SCHEMA)"
+            # Uses backend/.env DATABASE_URL. Auto-baselines existing prod DB
+            # on first run so historical CREATE TABLE files are not re-executed.
+            PENDING_COUNT="$(python "${MIGRATE_PY}" pending-count)"
+            echo "Pending migrations: ${PENDING_COUNT}"
+            if [ "${PENDING_COUNT}" -gt 0 ]; then
+              echo "==> Pre-migrate dump (schema + data, compressed; keep last 3)"
+              mkdir -p "${BACKUP_DIR}"
+              python "${MIGRATE_PY}" dump --dir "${BACKUP_DIR}" --keep 3
+              echo "==> Apply pending migrations"
+              python "${MIGRATE_PY}" apply
+            else
+              echo "==> No pending migrations — skip dump (saves disk)"
+            fi
+            python "${MIGRATE_PY}" status
 
             echo "==> Start backend (speechagent-api)"
             sudo systemctl start speechagent-api

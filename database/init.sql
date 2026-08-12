@@ -38,5 +38,7 @@
 \ir 029_coding_domains.sql
 \ir 030_coding_languages_expand.sql
 \ir 031_coding_multi_task_times.sql
+\ir 032_coding_proctoring.sql
+\ir 033_coding_shared_bank.sql
 
 \echo 'Schema applied successfully.'

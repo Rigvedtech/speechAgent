@@ -110,7 +110,6 @@ export function AppShell() {
     location.pathname === '/ats/jobs' || location.pathname.startsWith('/ats/jobs/')
   const isBulkUploadPage = location.pathname === '/jobs/bulk-upload'
   const isJobResumesPage = /^\/jobs\/[^/]+\/resumes$/.test(location.pathname)
-  const isCodingDashboard = location.pathname === '/coding'
   const isCodingPage =
     location.pathname.includes('/coding') || location.pathname.startsWith('/coding/')
   const isReportDetailPage = /^\/interviews\/[^/]+\/report$/.test(location.pathname)
@@ -231,22 +230,11 @@ export function AppShell() {
       </aside>
 
       <div className="flex h-screen min-w-0 flex-1 flex-col overflow-hidden">
-        <header
-          className={cn(
-            'no-print z-10 flex h-14 shrink-0 items-center justify-between gap-4 border-b border-sidebar-border bg-sidebar px-6 backdrop-blur-sm',
-            isCodingDashboard && 'min-h-14 h-auto py-2.5',
-          )}
-        >
+        <header className="no-print z-10 flex h-14 shrink-0 items-center justify-between gap-4 border-b border-sidebar-border bg-sidebar px-6 backdrop-blur-sm">
           <div className="min-w-0 flex-1">
             <h1 className="truncate text-base font-semibold leading-none tracking-tight">
               {title}
             </h1>
-            {isCodingDashboard ? (
-              <p className="mt-1 max-w-3xl text-[11px] leading-snug text-muted-foreground">
-                A domain is a language track (Python, Java, …). Create one, then add up to
-                5 DSA problems. Candidates stay locked to that language.
-              </p>
-            ) : null}
           </div>
 
           <button

@@ -17,23 +17,49 @@ import config as app_config
 from auth.deps import get_current_user, get_db, require_writer
 from db.models import (
     CodingDomain,
+    CodingProctorEvent,
     CodingSubmission,
     CodingTask,
     InterviewCodingConfig,
     InterviewSession,
     User,
 )
+from services.coding_proctor import (
+    ALLOWED_EVENT_TYPES,
+    SEVERITIES,
+    analyze_frame_bgr,
+    apply_events_to_summary,
+    decode_image_b64,
+    empty_summary,
+)
 from services.coding_languages import (
     SUPPORTED_LANGUAGES,
     language_entry,
     languages_for_api,
 )
+from services.coding_bank_constants import (
+    GENERATE_BATCH_SIZE,
+    MAX_ASSIGNED_PER_INTERVIEW,
+    MAX_PROBLEMS_PER_ORG,
+    SEED_TARGET_COUNT,
+)
+from services.coding_bank import (
+    free_slots,
+    generate_batch_size_for_org,
+    list_org_bank_tasks,
+    multi_lang_starters,
+    org_active_problem_count,
+    persist_bank_task,
+    seed_org_bank,
+)
+from services.coding_task_assigner import pick_tasks_for_interview
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/coding", tags=["coding"])
 
-MAX_PROBLEMS_PER_DOMAIN = 5
+# Legacy alias — domains are language tracks; bank cap is org-wide.
+MAX_PROBLEMS_PER_DOMAIN = MAX_PROBLEMS_PER_ORG
 SEED_TASK_IDS = [
     UUID("a1111111-1111-4111-8111-111111111101"),
     UUID("a1111111-1111-4111-8111-111111111102"),
@@ -114,7 +140,9 @@ class InterviewCodingConfigIn(BaseModel):
     domain_id: Optional[UUID] = None
     allowed_languages: List[str] = Field(default_factory=lambda: ["python", "javascript"])
     default_language: str = "python"
-    task_ids: List[UUID] = Field(default_factory=list, max_length=5)
+    # When task_ids empty, server auto-picks this many from the shared org bank.
+    problem_count: Optional[int] = Field(default=None, ge=1, le=MAX_ASSIGNED_PER_INTERVIEW)
+    task_ids: List[UUID] = Field(default_factory=list, max_length=MAX_ASSIGNED_PER_INTERVIEW)
     assigned_task_id: Optional[UUID] = None
     time_limit_min: int = Field(default=25, ge=5, le=180)
     # task_id string -> minutes (recruiter override; AI estimate used as default in UI)
@@ -188,6 +216,16 @@ class CodingWorkspace(BaseModel):
     entryPath: str = "main.py"
 
 
+class CodingProctorSummary(BaseModel):
+    risk_level: str = "clean"
+    warn_count: int = 0
+    critical_count: int = 0
+    counts: dict[str, int] = Field(default_factory=dict)
+    last_event_type: Optional[str] = None
+    last_severity: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
 class CodingSessionOut(BaseModel):
     interview_id: Optional[UUID] = None
     bot_id: Optional[str] = None
@@ -211,6 +249,9 @@ class CodingSessionOut(BaseModel):
     task_count: int = 1
     has_next_task: bool = False
     assigned_tasks: List[CodingAssignedTaskProgress] = Field(default_factory=list)
+    proctoring_enabled: bool = True
+    proctor_started: bool = False
+    proctor_summary: CodingProctorSummary = Field(default_factory=CodingProctorSummary)
 
 
 class CodingSubmitIn(BaseModel):
@@ -231,6 +272,10 @@ class CodingSubmitIn(BaseModel):
     @classmethod
     def strip_code(cls, value: str) -> str:
         return value if value is not None else ""
+
+
+class SwitchTaskIn(BaseModel):
+    task_id: UUID
 
 
 class CodingSubmitOut(BaseModel):
@@ -582,32 +627,11 @@ def _validate_config_tasks(
     db: Session,
     user: User,
     body: InterviewCodingConfigIn,
+    *,
+    interview: Optional[InterviewSession] = None,
 ) -> None:
     if not body.enabled:
         return
-
-    task_ids = list(body.task_ids or [])
-    if body.assigned_task_id is not None and body.assigned_task_id not in task_ids:
-        task_ids.insert(0, body.assigned_task_id)
-    # Deduplicate while preserving order
-    seen: set[UUID] = set()
-    ordered: List[UUID] = []
-    for tid in task_ids:
-        if tid not in seen:
-            seen.add(tid)
-            ordered.append(tid)
-    task_ids = ordered
-
-    if not task_ids:
-        raise HTTPException(
-            status_code=400,
-            detail="Select at least one coding task when coding is enabled",
-        )
-    if len(task_ids) > MAX_PROBLEMS_PER_DOMAIN:
-        raise HTTPException(
-            status_code=400,
-            detail=f"At most {MAX_PROBLEMS_PER_DOMAIN} tasks can be assigned",
-        )
 
     domain = None
     if body.domain_id is not None:
@@ -622,17 +646,61 @@ def _validate_config_tasks(
             detail="default_language must be included in allowed_languages",
         )
 
+    task_ids = list(body.task_ids or [])
+    if body.assigned_task_id is not None and body.assigned_task_id not in task_ids:
+        task_ids.insert(0, body.assigned_task_id)
+    # Deduplicate while preserving order
+    seen: set[UUID] = set()
+    ordered: List[UUID] = []
+    for tid in task_ids:
+        if tid not in seen:
+            seen.add(tid)
+            ordered.append(tid)
+    task_ids = ordered
+
+    # Auto-assign from shared org bank when recruiter only chose language + count
+    if not task_ids:
+        count = int(body.problem_count or 1)
+        picked = pick_tasks_for_interview(
+            db,
+            organization_id=user.organization_id,
+            language=body.default_language,
+            count=count,
+            job_posting_id=interview.job_posting_id if interview else None,
+            candidate_id=interview.candidate_id if interview else None,
+        )
+        if not picked:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No coding problems in the shared bank. Open Coding dashboard, "
+                    "Seed bank or Generate problems, then try again."
+                ),
+            )
+        task_ids = picked
+
+    if len(task_ids) > MAX_ASSIGNED_PER_INTERVIEW:
+        raise HTTPException(
+            status_code=400,
+            detail=f"At most {MAX_ASSIGNED_PER_INTERVIEW} tasks can be assigned",
+        )
+
     tasks_by_id: dict[UUID, CodingTask] = {}
     for task_id in task_ids:
         task = _get_task_for_org(db, user, task_id)
         tasks_by_id[task_id] = task
-        if domain is not None and task.domain_id and task.domain_id != domain.id:
+        # Shared bank tasks have domain_id=NULL — allow any domain language track.
+        if (
+            domain is not None
+            and task.domain_id
+            and task.domain_id != domain.id
+        ):
             raise HTTPException(
                 status_code=400,
                 detail=f"Task '{task.title}' is not in the selected domain",
             )
         overlap = set(task.allowed_languages or []) & set(body.allowed_languages)
-        if not overlap:
+        if task.allowed_languages and not overlap:
             raise HTTPException(
                 status_code=400,
                 detail=f"Task '{task.title}' does not support selected languages",
@@ -654,8 +722,8 @@ def upsert_interview_coding_config(
     body: InterviewCodingConfigIn,
 ) -> InterviewCodingConfig:
     """Create/update coding config for an interview (used by schedule + dedicated API)."""
-    _get_org_interview(db, user, interview_id)
-    _validate_config_tasks(db, user, body)
+    interview = _get_org_interview(db, user, interview_id)
+    _validate_config_tasks(db, user, body, interview=interview)
 
     row = db.scalar(
         select(InterviewCodingConfig).where(
@@ -715,15 +783,15 @@ def _ensure_submission_for_task(
             code=starter,
             status="draft",
             is_demo=False,
-            demo_token=cfg.access_token,
+            # Interview access uses InterviewCodingConfig.access_token — do NOT
+            # copy it onto every submission (unique demo_token constraint).
+            demo_token=None,
             workspace_json=_workspace_to_json(workspace),
-            started_at=now if start_timer else now,
+            started_at=now if start_timer else None,
         )
         db.add(row)
         db.flush()
     else:
-        if not row.demo_token and cfg.access_token:
-            row.demo_token = cfg.access_token
         if not row.workspace_json:
             row.workspace_json = _workspace_to_json(workspace)
         if start_timer and row.status != "submitted" and row.started_at is None:
@@ -796,6 +864,7 @@ def _submission_status_for_task(
 
 
 def _current_task_id(db: Session, cfg: InterviewCodingConfig) -> Optional[UUID]:
+    """First incomplete assigned task (fallback when pointer is unset/invalid)."""
     task_ids = _ordered_task_ids(cfg)
     if not task_ids:
         return None
@@ -806,11 +875,22 @@ def _current_task_id(db: Session, cfg: InterviewCodingConfig) -> Optional[UUID]:
     return task_ids[-1]
 
 
+def _active_task_id(db: Session, cfg: InterviewCodingConfig) -> Optional[UUID]:
+    """Task the candidate is currently viewing/editing (supports free switching)."""
+    task_ids = _ordered_task_ids(cfg)
+    if not task_ids:
+        return None
+    assigned = cfg.assigned_task_id
+    if assigned is not None and assigned in task_ids:
+        return assigned
+    return _current_task_id(db, cfg) or task_ids[0]
+
+
 def _assigned_task_progress(
     db: Session, cfg: InterviewCodingConfig
 ) -> List[CodingAssignedTaskProgress]:
     task_ids = _ordered_task_ids(cfg)
-    current = _current_task_id(db, cfg)
+    current = _active_task_id(db, cfg)
     out: List[CodingAssignedTaskProgress] = []
     for task_id in task_ids:
         task = db.get(CodingTask, task_id)
@@ -868,7 +948,6 @@ def _advance_to_next_task(
             CodingSubmission.is_demo.is_(False),
         )
     )
-    token = public_token or cfg.access_token
     if row is None:
         row = CodingSubmission(
             interview_id=cfg.interview_id,
@@ -878,17 +957,16 @@ def _advance_to_next_task(
             code=starter,
             status="draft",
             is_demo=False,
-            demo_token=token,
+            demo_token=None,
             workspace_json=_workspace_to_json(workspace),
-            started_at=now,
+            # Timer starts only after proctor gate /start for this task
+            started_at=None,
         )
         db.add(row)
     else:
-        if token and not row.demo_token:
-            row.demo_token = token
         if row.status != "submitted":
-            # Fresh timer for the next problem
-            row.started_at = now
+            # Fresh timer after candidate starts next task via /start
+            row.started_at = None
             if not row.code and starter:
                 row.code = starter
             if not row.workspace_json:
@@ -945,7 +1023,8 @@ def _get_domain_for_org(db: Session, user: User, domain_id: UUID) -> CodingDomai
     return domain
 
 
-def _org_problem_count(db: Session, user: User, domain_id: UUID) -> int:
+def _domain_problem_count(db: Session, user: User, domain_id: UUID) -> int:
+    """Legacy per-domain count (domain-attached tasks only)."""
     rows = db.scalars(
         select(CodingTask).where(
             CodingTask.domain_id == domain_id,
@@ -956,8 +1035,14 @@ def _org_problem_count(db: Session, user: User, domain_id: UUID) -> int:
     return len(rows)
 
 
+def _org_problem_count(db: Session, user: User, domain_id: UUID) -> int:
+    """Backward-compatible name used by older generate path."""
+    return _domain_problem_count(db, user, domain_id)
+
+
 def _domain_out(db: Session, user: User, domain: CodingDomain) -> CodingDomainOut:
-    count = _org_problem_count(db, user, domain.id)
+    # Domains are language tracks; generation capacity is org bank-wide.
+    bank_count = org_active_problem_count(db, user.organization_id)
     return CodingDomainOut(
         id=domain.id,
         slug=domain.slug,
@@ -965,9 +1050,9 @@ def _domain_out(db: Session, user: User, domain: CodingDomain) -> CodingDomainOu
         language=domain.language,
         description=domain.description or "",
         is_active=domain.is_active,
-        problem_count=count,
-        max_problems=MAX_PROBLEMS_PER_DOMAIN,
-        can_generate=count < MAX_PROBLEMS_PER_DOMAIN,
+        problem_count=_domain_problem_count(db, user, domain.id),
+        max_problems=MAX_PROBLEMS_PER_ORG,
+        can_generate=bank_count < MAX_PROBLEMS_PER_ORG,
         is_org_owned=domain.organization_id is not None,
     )
 
@@ -999,6 +1084,235 @@ def list_coding_languages(user: User = Depends(get_current_user)):
     """Languages available for domains / editor / AI generate."""
     _ = user
     return {"languages": languages_for_api()}
+
+
+# ── Shared org DSA bank ──────────────────────────────────────────────────────
+
+
+class CodingBankStatusOut(BaseModel):
+    problem_count: int
+    max_problems: int = MAX_PROBLEMS_PER_ORG
+    free_slots: int
+    generate_batch_size: int = GENERATE_BATCH_SIZE
+    next_generate_count: int
+    seed_target: int = SEED_TARGET_COUNT
+    can_generate: bool
+    can_seed: bool
+
+
+class CodingBankGenerateOut(BaseModel):
+    created: List[CodingTaskDetail]
+    requested: int
+    created_count: int
+    problem_count: int
+    max_problems: int = MAX_PROBLEMS_PER_ORG
+    errors: List[str] = Field(default_factory=list)
+
+
+class CodingBankSeedOut(BaseModel):
+    before: int
+    inserted: int
+    after: int
+    target: int
+
+
+@router.get("/bank", response_model=List[CodingTaskSummary])
+def list_coding_bank(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Shared org DSA bank (language-agnostic problems)."""
+    rows = list_org_bank_tasks(db, user.organization_id)
+    return [_task_to_summary(row) for row in rows]
+
+
+@router.get("/bank/status", response_model=CodingBankStatusOut)
+def coding_bank_status(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    count = org_active_problem_count(db, user.organization_id)
+    free = free_slots(db, user.organization_id)
+    next_n = generate_batch_size_for_org(db, user.organization_id)
+    return CodingBankStatusOut(
+        problem_count=count,
+        max_problems=MAX_PROBLEMS_PER_ORG,
+        free_slots=free,
+        generate_batch_size=GENERATE_BATCH_SIZE,
+        next_generate_count=next_n,
+        seed_target=SEED_TARGET_COUNT,
+        can_generate=next_n > 0,
+        can_seed=count < SEED_TARGET_COUNT and free > 0,
+    )
+
+
+class CodingAssignPreviewIn(BaseModel):
+    language: str = "python"
+    count: int = Field(default=1, ge=1, le=MAX_ASSIGNED_PER_INTERVIEW)
+    job_posting_id: Optional[UUID] = None
+    candidate_id: Optional[UUID] = None
+
+    @field_validator("language")
+    @classmethod
+    def normalize_language(cls, value: str) -> str:
+        lang = (value or "").strip().lower()
+        if lang not in SUPPORTED_LANGUAGES:
+            raise ValueError(f"Unsupported language: {lang}")
+        return lang
+
+
+class CodingAssignPreviewOut(BaseModel):
+    tasks: List[CodingTaskSummary]
+    language: str
+    count: int
+
+
+@router.post("/bank/preview-assign", response_model=CodingAssignPreviewOut)
+def preview_coding_assign(
+    body: CodingAssignPreviewIn,
+    user: User = Depends(require_writer),
+    db: Session = Depends(get_db),
+):
+    """Preview which shared-bank tasks would be auto-assigned (does not persist)."""
+    ids = pick_tasks_for_interview(
+        db,
+        organization_id=user.organization_id,
+        language=body.language,
+        count=body.count,
+        job_posting_id=body.job_posting_id,
+        candidate_id=body.candidate_id,
+    )
+    tasks: list[CodingTaskSummary] = []
+    for tid in ids:
+        row = db.get(CodingTask, tid)
+        if row is not None and row.is_active:
+            tasks.append(_task_to_summary(row))
+    return CodingAssignPreviewOut(
+        tasks=tasks,
+        language=body.language,
+        count=body.count,
+    )
+
+
+@router.post("/bank/seed", response_model=CodingBankSeedOut)
+def seed_coding_bank(
+    user: User = Depends(require_writer),
+    db: Session = Depends(get_db),
+):
+    """Seed curated DSA problems into the org bank (up to 90 / max 100)."""
+    result = seed_org_bank(db, user, target=SEED_TARGET_COUNT)
+    return CodingBankSeedOut(**result)
+
+
+@router.post("/bank/generate", response_model=CodingBankGenerateOut)
+def generate_coding_bank_batch(
+    user: User = Depends(require_writer),
+    db: Session = Depends(get_db),
+):
+    """AI-generate up to 10 new shared-bank problems (or fewer near max 100)."""
+    from services.coding_problem_generator import generate_dsa_problem
+
+    requested = generate_batch_size_for_org(db, user.organization_id)
+    if requested <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Bank is full ({MAX_PROBLEMS_PER_ORG}/{MAX_PROBLEMS_PER_ORG}). Delete some to generate more.",
+        )
+
+    existing = list_org_bank_tasks(db, user.organization_id)
+    titles = [t.title for t in existing]
+    tags: list[str] = []
+    for t in existing:
+        tags.extend([str(x) for x in (t.skill_tags or []) if str(x).strip()])
+
+    created: list[CodingTaskDetail] = []
+    errors: list[str] = []
+    for i in range(requested):
+        if free_slots(db, user.organization_id) <= 0:
+            break
+        draft = generate_dsa_problem(
+            language="python",
+            domain_name="Shared DSA bank",
+            existing_titles=titles,
+            existing_tags=tags,
+        )
+        if not draft:
+            errors.append(f"generate failed for slot {i + 1}")
+            # Stop early on rate-limit / hard failure
+            break
+        entry = str(draft.get("entry_function") or "solution")
+        starters = multi_lang_starters(entry)
+        if draft.get("starter_code"):
+            starters["python"] = str(draft["starter_code"])
+        draft["starter_code_json"] = starters
+        draft["allowed_languages"] = list(starters.keys())
+        try:
+            row = persist_bank_task(
+                db,
+                organization_id=user.organization_id,
+                draft=draft,
+            )
+            db.commit()
+            db.refresh(row)
+            titles.append(row.title)
+            tags.extend([str(x) for x in (row.skill_tags or []) if str(x).strip()])
+            created.append(_task_to_detail(row))
+        except Exception as exc:  # noqa: BLE001
+            db.rollback()
+            errors.append(str(exc)[:200])
+            break
+
+    if not created:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "AI generate failed. Wait ~1 minute if Groq rate-limited you, then try "
+                "Generate again. Check GROQ_API_KEY if it keeps failing."
+                + (f" ({errors[0]})" if errors else "")
+            ),
+        )
+
+    return CodingBankGenerateOut(
+        created=created,
+        requested=requested,
+        created_count=len(created),
+        problem_count=org_active_problem_count(db, user.organization_id),
+        max_problems=MAX_PROBLEMS_PER_ORG,
+        errors=errors,
+    )
+
+
+@router.delete("/bank/tasks/{task_id}")
+def deactivate_bank_task(
+    task_id: UUID,
+    user: User = Depends(require_writer),
+    db: Session = Depends(get_db),
+):
+    row = db.get(CodingTask, task_id)
+    if (
+        row is None
+        or row.organization_id != user.organization_id
+        or not row.is_active
+    ):
+        raise HTTPException(status_code=404, detail="Task not found")
+    row.is_active = False
+    row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    return {"ok": True, "id": str(row.id)}
+
+
+@router.delete("/bank/tasks")
+def deactivate_all_bank_tasks(
+    user: User = Depends(require_writer),
+    db: Session = Depends(get_db),
+):
+    rows = list_org_bank_tasks(db, user.organization_id)
+    now = datetime.now(timezone.utc)
+    for row in rows:
+        row.is_active = False
+        row.updated_at = now
+    db.commit()
+    return {"ok": True, "deleted": len(rows)}
 
 
 @router.get("/domains", response_model=List[CodingDomainOut])
@@ -1130,35 +1444,23 @@ def generate_domain_task(
     user: User = Depends(require_writer),
     db: Session = Depends(get_db),
 ):
-    """AI-generate and save one DSA problem. Disabled when org already has 5 in domain."""
+    """Legacy: generate one problem into the shared org bank (prefer POST /bank/generate)."""
     from services.coding_problem_generator import generate_dsa_problem
 
-    domain = _get_domain_for_org(db, user, domain_id)
-    count = _org_problem_count(db, user, domain.id)
-    if count >= MAX_PROBLEMS_PER_DOMAIN:
+    _ = _get_domain_for_org(db, user, domain_id)
+    if free_slots(db, user.organization_id) <= 0:
         raise HTTPException(
             status_code=400,
-            detail=f"Domain already has {MAX_PROBLEMS_PER_DOMAIN} problems. Delete one to generate more.",
+            detail=f"Bank is full ({MAX_PROBLEMS_PER_ORG}/{MAX_PROBLEMS_PER_ORG}). Delete some to generate more.",
         )
-
-    existing = db.scalars(
-        select(CodingTask).where(
-            CodingTask.domain_id == domain.id,
-            CodingTask.is_active.is_(True),
-            or_(
-                CodingTask.organization_id.is_(None),
-                CodingTask.organization_id == user.organization_id,
-            ),
-        )
-    ).all()
+    existing = list_org_bank_tasks(db, user.organization_id)
     titles = [t.title for t in existing]
     tags: list[str] = []
     for t in existing:
         tags.extend([str(x) for x in (t.skill_tags or []) if str(x).strip()])
-
     draft = generate_dsa_problem(
-        language=domain.language,
-        domain_name=domain.name,
+        language="python",
+        domain_name="Shared DSA bank",
         existing_titles=titles,
         existing_tags=tags,
     )
@@ -1170,48 +1472,14 @@ def generate_domain_task(
                 "Generate once more. Check GROQ_API_KEY if it keeps failing."
             ),
         )
-
-    base_slug = _slugify(draft["title"])
-    slug = base_slug
-    n = 1
-    while db.scalar(
-        select(CodingTask).where(
-            CodingTask.organization_id == user.organization_id,
-            CodingTask.slug == slug,
-        )
-    ):
-        n += 1
-        slug = f"{base_slug}-{n}"
-
-    lang = domain.language
-    estimated = _clamp_estimated_minutes(
-        draft.get("estimated_minutes"), draft.get("difficulty") or "medium"
-    )
-    row = CodingTask(
-        organization_id=user.organization_id,
-        domain_id=domain.id,
-        slug=slug,
-        title=draft["title"],
-        difficulty=draft["difficulty"],
-        statement=draft["statement"],
-        examples_json=draft["examples"],
-        constraints_text=draft.get("constraints_text") or "",
-        starter_code_json={lang: draft["starter_code"]},
-        entry_function=draft["entry_function"],
-        allowed_languages=[lang],
-        skill_tags=draft.get("skill_tags") or [],
-        estimated_time_min=estimated,
-        is_active=True,
-    )
-    db.add(row)
+    entry = str(draft.get("entry_function") or "solution")
+    starters = multi_lang_starters(entry)
+    if draft.get("starter_code"):
+        starters["python"] = str(draft["starter_code"])
+    draft["starter_code_json"] = starters
+    row = persist_bank_task(db, organization_id=user.organization_id, draft=draft)
     db.commit()
     db.refresh(row)
-    logger.info(
-        "[coding] generated task org=%s domain=%s slug=%s",
-        user.organization_id,
-        domain.slug,
-        row.slug,
-    )
     return _task_to_detail(row)
 
 
@@ -1361,7 +1629,7 @@ def _build_interview_session(
             detail="Coding round is not enabled for this interview",
         )
 
-    current_id = _current_task_id(db, cfg) or task_ids[0]
+    current_id = _active_task_id(db, cfg) or task_ids[0]
     cfg.assigned_task_id = current_id
     task = _get_task_for_org(db, user, current_id)
     time_limit = _time_limit_for_task(cfg, current_id, task=task)
@@ -1404,6 +1672,16 @@ def _build_interview_session(
     has_next = any(
         p.status != "submitted" and p.task_id != current_id for p in progress
     )
+    summary_raw = (
+        submission.proctor_summary_json
+        if submission is not None and isinstance(submission.proctor_summary_json, dict)
+        else empty_summary()
+    )
+    try:
+        proctor_summary = CodingProctorSummary(**{**empty_summary(), **summary_raw})
+    except Exception:
+        proctor_summary = CodingProctorSummary(**empty_summary())
+
     return CodingSessionOut(
         interview_id=interview.id,
         bot_id=bot_id,
@@ -1426,6 +1704,9 @@ def _build_interview_session(
         task_count=len(progress) or 1,
         has_next_task=has_next,
         assigned_tasks=progress,
+        proctoring_enabled=status != "submitted",
+        proctor_started=started is not None,
+        proctor_summary=proctor_summary,
     )
 
 
@@ -1477,7 +1758,7 @@ def _submit_for_interview(
     if body.language not in (cfg.allowed_languages or []):
         raise HTTPException(status_code=400, detail="Language not allowed for this interview")
 
-    current_id = _current_task_id(db, cfg) or task_ids[0]
+    current_id = _active_task_id(db, cfg) or task_ids[0]
     cfg.assigned_task_id = current_id
     task = _get_task_for_org(db, user, current_id)
     row = db.scalar(
@@ -1615,40 +1896,54 @@ def start_demo_coding_session(
         domain = _get_domain_for_org(db, user, body.domain_id)
 
     task_id = body.task_id
-    if task_id is None and domain is not None:
+    if task_id is None:
+        # Prefer shared org bank, then domain-attached, then global seeds
         first = db.scalar(
             select(CodingTask)
             .where(
-                CodingTask.domain_id == domain.id,
+                CodingTask.organization_id == user.organization_id,
                 CodingTask.is_active.is_(True),
-                or_(
-                    CodingTask.organization_id.is_(None),
-                    CodingTask.organization_id == user.organization_id,
-                ),
             )
             .order_by(CodingTask.created_at.asc())
             .limit(1)
         )
+        if first is None and domain is not None:
+            first = db.scalar(
+                select(CodingTask)
+                .where(
+                    CodingTask.domain_id == domain.id,
+                    CodingTask.is_active.is_(True),
+                    or_(
+                        CodingTask.organization_id.is_(None),
+                        CodingTask.organization_id == user.organization_id,
+                    ),
+                )
+                .order_by(CodingTask.created_at.asc())
+                .limit(1)
+            )
         if first is None:
             raise HTTPException(
                 status_code=400,
-                detail="No problems in this domain yet. Generate one from the Coding dashboard.",
+                detail="No problems in the coding bank yet. Seed or Generate from the Coding dashboard.",
             )
         task_id = first.id
-    task_id = task_id or SEED_TASK_IDS[0]
     task = _get_task_for_org(db, user, task_id)
 
     if domain is None and task.domain_id:
         domain = db.get(CodingDomain, task.domain_id)
 
-    language = (
-        domain.language
-        if domain is not None
-        else (body.language or (task.allowed_languages or ["python"])[0])
-    )
-    if language not in (task.allowed_languages or []):
-        # Prefer domain lock; if seed task allows both, still lock to domain language
-        if domain is None:
+    # Prefer explicit language from Coding dashboard "Demo lang" dropdown.
+    if body.language:
+        language = body.language
+    elif domain is not None:
+        language = domain.language
+    else:
+        language = (task.allowed_languages or ["python"])[0]
+
+    allowed = [str(x).lower() for x in (task.allowed_languages or [])]
+    if allowed and language not in allowed:
+        # Shared bank should include all runnable langs; still allow domain lock
+        if domain is None and not body.language:
             raise HTTPException(
                 status_code=400,
                 detail=f"Language '{language}' not allowed for this task",
@@ -1658,9 +1953,11 @@ def start_demo_coding_session(
     starter = ""
     if task.starter_code_json:
         starter = str(task.starter_code_json.get(language) or "")
-        if not starter and domain is not None:
-            # Fall back to any starter then rewrite extension via workspace
-            starter = str(next(iter(task.starter_code_json.values()), "") or "")
+    if not starter:
+        from services.coding_problem_generator import _default_starter
+
+        entry = str(getattr(task, "entry_function", None) or "solution")
+        starter = _default_starter(language, entry)
     workspace = _default_workspace(language, starter)
 
     row = CodingSubmission(
@@ -1673,7 +1970,7 @@ def start_demo_coding_session(
         is_demo=True,
         demo_token=token,
         workspace_json=_workspace_to_json(workspace),
-        started_at=datetime.now(timezone.utc),
+        started_at=None,
     )
     db.add(row)
     db.commit()
@@ -1725,9 +2022,28 @@ def get_demo_coding_session(
         raise HTTPException(status_code=404, detail="Demo coding session not found")
     task = _get_task_for_org(db, user, row.task_id)
     workspace = _workspace_from_row(row, row.language)
-    locked, domain_id, domain_name = _locked_langs_for_session(
-        db, task=task, domain_id=task.domain_id
-    )
+    # Demo is locked to the language chosen at start — not the full bank list.
+    locked = [row.language] if row.language else ["python"]
+    domain_id = task.domain_id
+    domain_name = None
+    if domain_id:
+        domain = db.get(CodingDomain, domain_id)
+        if domain is not None:
+            domain_name = domain.name
+    elif row.language:
+        domain = db.scalar(
+            select(CodingDomain).where(
+                CodingDomain.is_active.is_(True),
+                CodingDomain.language == row.language,
+                or_(
+                    CodingDomain.organization_id.is_(None),
+                    CodingDomain.organization_id == user.organization_id,
+                ),
+            ).order_by(CodingDomain.sort_order, CodingDomain.name)
+        )
+        if domain is not None:
+            domain_id = domain.id
+            domain_name = domain.name
     lang = row.language if row.language in locked else locked[0]
     return CodingSessionOut(
         demo_token=row.demo_token,
@@ -1817,7 +2133,7 @@ def _resolve_public_submission(
         if not task_ids:
             raise HTTPException(status_code=404, detail="Coding session not found")
 
-        current_id = _current_task_id(db, cfg) or task_ids[0]
+        current_id = _active_task_id(db, cfg) or task_ids[0]
         cfg.assigned_task_id = current_id
         task = db.get(CodingTask, current_id)
         if task is None or not task.is_active:
@@ -1845,18 +2161,11 @@ def _resolve_public_submission(
                 code=starter,
                 status="draft",
                 is_demo=False,
-                demo_token=token,
+                demo_token=None,
                 workspace_json=_workspace_to_json(workspace),
-                started_at=now,
+                started_at=None,
             )
             db.add(row)
-            db.commit()
-            db.refresh(row)
-        else:
-            if not row.demo_token:
-                row.demo_token = token
-            if row.status != "submitted" and row.started_at is None:
-                row.started_at = now
             db.commit()
             db.refresh(row)
         return row, task, token, cfg
@@ -1876,8 +2185,8 @@ def _resolve_public_submission(
             )
         )
         if interview_cfg is not None and interview_cfg.enabled:
-            # Prefer current incomplete task for multi-task rounds
-            current_id = _current_task_id(db, interview_cfg)
+            # Prefer candidate-selected / active task for multi-task rounds
+            current_id = _active_task_id(db, interview_cfg)
             if current_id and current_id != row.task_id:
                 current_row = db.scalar(
                     select(CodingSubmission).where(
@@ -1888,6 +2197,8 @@ def _resolve_public_submission(
                 )
                 if current_row is not None:
                     row = current_row
+                else:
+                    interview_cfg.assigned_task_id = current_id
 
     task = db.get(CodingTask, row.task_id)
     if task is None or not task.is_active:
@@ -1922,7 +2233,13 @@ def _public_session_out(
     db: Optional[Session] = None,
 ) -> CodingSessionOut:
     workspace = _workspace_from_row(row, row.language)
-    locked = allowed_languages or [row.language]
+    locked = list(allowed_languages or [row.language or "python"])
+    # Use the language chosen when the session was created (demo dropdown / interview
+    # config). Do NOT force locked[0] — shared-bank tasks list python first and that
+    # was incorrectly overriding javascript/java/go demos.
+    session_lang = (row.language or "").strip().lower() or "python"
+    if locked and session_lang not in [str(x).lower() for x in locked]:
+        session_lang = str(locked[0]).strip().lower()
     started, ends = _session_timing(
         started_at=row.started_at, time_limit_min=time_limit_min
     )
@@ -1940,12 +2257,18 @@ def _public_session_out(
         has_next = any(
             p.status != "submitted" and p.task_id != row.task_id for p in progress
         )
+    summary_raw = row.proctor_summary_json if isinstance(row.proctor_summary_json, dict) else {}
+    try:
+        proctor_summary = CodingProctorSummary(**{**empty_summary(), **summary_raw})
+    except Exception:
+        proctor_summary = CodingProctorSummary(**empty_summary())
+
     return CodingSessionOut(
         interview_id=row.interview_id,
         demo_token=public_token or None,
         access_token=public_token or None,
         enabled=True,
-        language=locked[0] if locked else row.language,
+        language=session_lang,
         allowed_languages=locked,
         language_locked=True,
         domain_id=domain_id,
@@ -1962,33 +2285,171 @@ def _public_session_out(
         task_count=task_count,
         has_next_task=has_next,
         assigned_tasks=progress,
+        proctoring_enabled=row.status != "submitted",
+        proctor_started=started is not None,
+        proctor_summary=proctor_summary,
     )
 
 
-@router.get("/public/{token}", response_model=CodingSessionOut)
-def get_public_coding_session(token: str, db: Session = Depends(get_db)):
-    """Candidate opens shared URI — no auth cookie/JWT required."""
-    row, task, public_token, cfg = _resolve_public_submission(db, token)
-    # Ensure timer has a start if older rows lack started_at
-    if row.started_at is None and row.status != "submitted":
-        row.started_at = datetime.now(timezone.utc)
-        db.commit()
-        db.refresh(row)
-
+def _public_time_limit(
+    db: Session,
+    row: CodingSubmission,
+    task: CodingTask,
+    cfg: Optional[InterviewCodingConfig],
+) -> tuple[int, Optional[InterviewCodingConfig]]:
     time_limit = 30
     if cfg is not None:
-        time_limit = _time_limit_for_task(cfg, row.task_id, task=task)
-    elif row.interview_id:
+        return _time_limit_for_task(cfg, row.task_id, task=task), cfg
+    if row.interview_id:
         cfg = db.scalar(
             select(InterviewCodingConfig).where(
                 InterviewCodingConfig.interview_id == row.interview_id
             )
         )
         if cfg:
-            time_limit = _time_limit_for_task(cfg, row.task_id, task=task)
+            return _time_limit_for_task(cfg, row.task_id, task=task), cfg
+    return time_limit, cfg
+
+
+@router.get("/public/{token}", response_model=CodingSessionOut)
+def get_public_coding_session(token: str, db: Session = Depends(get_db)):
+    """Candidate opens shared URI — no auth cookie/JWT required.
+
+    Does not start the timer. Timer starts via POST /public/{token}/start
+    after the browser proctor gate clears.
+    """
+    row, task, public_token, cfg = _resolve_public_submission(db, token)
+    time_limit, cfg = _public_time_limit(db, row, task, cfg)
     locked, domain_id, domain_name = _locked_langs_for_session(
         db, cfg=cfg, task=task
     )
+    # Demo sessions: lock to the language selected on the Coding dashboard
+    # (stored on the submission), not the full shared-bank language list.
+    if cfg is None and row.is_demo and row.language:
+        locked = [row.language]
+        if domain_id is None and row.language:
+            # Keep domain metadata if a matching language track exists
+            domain = db.scalar(
+                select(CodingDomain).where(
+                    CodingDomain.is_active.is_(True),
+                    CodingDomain.language == row.language,
+                    or_(
+                        CodingDomain.organization_id.is_(None),
+                        CodingDomain.organization_id == row.organization_id,
+                    ),
+                ).order_by(CodingDomain.sort_order, CodingDomain.name)
+            )
+            if domain is not None:
+                domain_id = domain.id
+                domain_name = domain.name
+    return _public_session_out(
+        row,
+        task,
+        public_token=public_token,
+        time_limit_min=time_limit,
+        allowed_languages=locked,
+        domain_id=domain_id,
+        domain_name=domain_name,
+        cfg=cfg,
+        db=db,
+    )
+
+
+def _ensure_public_task_row(
+    db: Session,
+    *,
+    interview: InterviewSession,
+    cfg: InterviewCodingConfig,
+    task: CodingTask,
+) -> CodingSubmission:
+    row = db.scalar(
+        select(CodingSubmission).where(
+            CodingSubmission.interview_id == cfg.interview_id,
+            CodingSubmission.task_id == task.id,
+            CodingSubmission.is_demo.is_(False),
+        )
+    )
+    if row is not None:
+        return row
+    lang = cfg.default_language or "python"
+    starter = ""
+    if task.starter_code_json:
+        starter = str(task.starter_code_json.get(lang) or "")
+    workspace = _default_workspace(lang, starter)
+    row = CodingSubmission(
+        interview_id=cfg.interview_id,
+        task_id=task.id,
+        organization_id=interview.organization_id,
+        language=lang,
+        code=starter,
+        status="draft",
+        is_demo=False,
+        demo_token=None,
+        workspace_json=_workspace_to_json(workspace),
+        started_at=None,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def _autostart_if_round_already_started(
+    db: Session,
+    *,
+    interview_id: UUID,
+    row: CodingSubmission,
+) -> None:
+    """Avoid re-showing the proctor gate when switching mid-round."""
+    if row.started_at is not None or row.status == "submitted":
+        return
+    sibling_started = db.scalar(
+        select(CodingSubmission.id).where(
+            CodingSubmission.interview_id == interview_id,
+            CodingSubmission.is_demo.is_(False),
+            CodingSubmission.started_at.is_not(None),
+            CodingSubmission.id != row.id,
+        )
+    )
+    if sibling_started is not None:
+        row.started_at = datetime.now(timezone.utc)
+
+
+@router.post("/public/{token}/switch-task", response_model=CodingSessionOut)
+def switch_public_coding_task(
+    token: str,
+    body: SwitchTaskIn,
+    db: Session = Depends(get_db),
+):
+    """Candidate switches to any assigned task on the same coding URI."""
+    _row, _task, public_token, cfg = _resolve_public_submission(db, token)
+    if cfg is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Task switching is only available for interview coding rounds",
+        )
+    task_ids = _ordered_task_ids(cfg)
+    if body.task_id not in task_ids:
+        raise HTTPException(status_code=400, detail="Task is not assigned to this round")
+
+    interview = db.get(InterviewSession, cfg.interview_id)
+    if interview is None:
+        raise HTTPException(status_code=404, detail="Coding session not found")
+
+    task = db.get(CodingTask, body.task_id)
+    if task is None or not task.is_active:
+        raise HTTPException(status_code=404, detail="Coding task not found")
+
+    row = _ensure_public_task_row(db, interview=interview, cfg=cfg, task=task)
+    _autostart_if_round_already_started(db, interview_id=cfg.interview_id, row=row)
+
+    cfg.assigned_task_id = body.task_id
+    cfg.time_limit_min = _time_limit_for_task(cfg, body.task_id, task=task)
+    cfg.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(row)
+
+    time_limit, cfg = _public_time_limit(db, row, task, cfg)
+    locked, domain_id, domain_name = _locked_langs_for_session(db, cfg=cfg, task=task)
     return _public_session_out(
         row,
         task,
@@ -2102,3 +2563,202 @@ def run_public_coding_examples(
     )
     complexity = analyze_complexity(language=language, code=code)
     return CodingRunExamplesOut(**payload, complexity=CodingComplexityOut(**complexity))
+
+
+# ── Public proctoring ─────────────────────────────────────────────────────────
+
+
+class ProctorEventIn(BaseModel):
+    event_type: str
+    severity: Literal["info", "warn", "critical"] = "info"
+    detail: dict[str, Any] = Field(default_factory=dict)
+    client_ts: Optional[datetime] = None
+
+
+class ProctorEventsIn(BaseModel):
+    events: List[ProctorEventIn] = Field(default_factory=list, max_length=50)
+
+
+class ProctorEventsOut(BaseModel):
+    accepted: int
+    summary: CodingProctorSummary
+
+
+class ProctorFrameIn(BaseModel):
+    image_b64: str = Field(..., min_length=32, max_length=2_500_000)
+    client_ts: Optional[datetime] = None
+
+
+class ProctorFrameOut(BaseModel):
+    face_count: int
+    multi_face: bool
+    gaze: Optional[str] = None
+    risk: Optional[str] = None
+    signal: str
+    severity: str
+    gate_ok: bool
+    summary: CodingProctorSummary
+
+
+class ProctorStartOut(BaseModel):
+    started_at: datetime
+    ends_at: datetime
+    time_limit_min: int
+    summary: CodingProctorSummary
+
+
+def _persist_proctor_events(
+    db: Session,
+    row: CodingSubmission,
+    events: List[ProctorEventIn],
+) -> CodingProctorSummary:
+    accepted: list[dict[str, Any]] = []
+    for ev in events:
+        et = (ev.event_type or "").strip()
+        sev = (ev.severity or "info").strip()
+        if et not in ALLOWED_EVENT_TYPES or sev not in SEVERITIES:
+            continue
+        detail = ev.detail if isinstance(ev.detail, dict) else {}
+        db.add(
+            CodingProctorEvent(
+                submission_id=row.id,
+                event_type=et,
+                severity=sev,
+                detail_json=detail,
+                client_ts=ev.client_ts,
+            )
+        )
+        accepted.append({"event_type": et, "severity": sev})
+
+    summary = apply_events_to_summary(row.proctor_summary_json, accepted)
+    row.proctor_summary_json = summary
+    row.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(row)
+    return CodingProctorSummary(**summary)
+
+
+@router.post("/public/{token}/start", response_model=ProctorStartOut)
+def start_public_coding_session(token: str, db: Session = Depends(get_db)):
+    """Start the task timer after the candidate clears the proctor gate."""
+    row, task, _public_token, cfg = _resolve_public_submission(db, token)
+    if row.status == "submitted":
+        raise HTTPException(status_code=400, detail="Submission already finalized")
+
+    time_limit, _cfg = _public_time_limit(db, row, task, cfg)
+    now = datetime.now(timezone.utc)
+    if row.started_at is None:
+        row.started_at = now
+        db.add(
+            CodingProctorEvent(
+                submission_id=row.id,
+                event_type="session_started",
+                severity="info",
+                detail_json={"source": "proctor_gate"},
+                client_ts=now,
+            )
+        )
+        summary = apply_events_to_summary(
+            row.proctor_summary_json,
+            [{"event_type": "session_started", "severity": "info"}],
+        )
+        row.proctor_summary_json = summary
+        row.updated_at = now
+        db.commit()
+        db.refresh(row)
+    else:
+        summary_raw = (
+            row.proctor_summary_json
+            if isinstance(row.proctor_summary_json, dict)
+            else empty_summary()
+        )
+        summary = {**empty_summary(), **summary_raw}
+
+    started, ends = _session_timing(started_at=row.started_at, time_limit_min=time_limit)
+    assert started is not None and ends is not None
+    return ProctorStartOut(
+        started_at=started,
+        ends_at=ends,
+        time_limit_min=time_limit,
+        summary=CodingProctorSummary(**summary),
+    )
+
+
+@router.post("/public/{token}/proctor/events", response_model=ProctorEventsOut)
+def post_public_proctor_events(
+    token: str,
+    body: ProctorEventsIn,
+    db: Session = Depends(get_db),
+):
+    row, _task, _public_token, _cfg = _resolve_public_submission(db, token)
+    summary = _persist_proctor_events(db, row, body.events or [])
+    return ProctorEventsOut(accepted=len(body.events or []), summary=summary)
+
+
+@router.post("/public/{token}/proctor/frame", response_model=ProctorFrameOut)
+def post_public_proctor_frame(
+    token: str,
+    body: ProctorFrameIn,
+    db: Session = Depends(get_db),
+):
+    """Upload a webcam JPEG/PNG for server-side face / multi-face / gaze checks."""
+    row, _task, _public_token, _cfg = _resolve_public_submission(db, token)
+    frame = decode_image_b64(body.image_b64)
+    if frame is None:
+        raise HTTPException(status_code=400, detail="Invalid image payload")
+
+    try:
+        analysis = analyze_frame_bgr(frame)
+    except Exception as ex:
+        logger.exception("[coding-proctor] frame analysis failed: %s", ex)
+        raise HTTPException(status_code=503, detail="Face analysis unavailable") from ex
+
+    signal = str(analysis.get("signal") or "face_ok")
+    severity = str(analysis.get("severity") or "info")
+    # Persist only non-ok face signals (and critical) to avoid spam
+    events: List[ProctorEventIn] = []
+    if signal != "face_ok" or severity != "info":
+        events.append(
+            ProctorEventIn(
+                event_type=signal if signal in ALLOWED_EVENT_TYPES else "heartbeat",
+                severity=severity if severity in SEVERITIES else "info",  # type: ignore[arg-type]
+                detail={
+                    "face_count": analysis.get("face_count"),
+                    "gaze": analysis.get("gaze"),
+                    "risk": analysis.get("risk"),
+                },
+                client_ts=body.client_ts,
+            )
+        )
+
+    if events:
+        summary = _persist_proctor_events(db, row, events)
+    else:
+        raw = (
+            row.proctor_summary_json
+            if isinstance(row.proctor_summary_json, dict)
+            else empty_summary()
+        )
+        summary = CodingProctorSummary(**{**empty_summary(), **raw})
+
+    return ProctorFrameOut(
+        face_count=int(analysis.get("face_count") or 0),
+        multi_face=bool(analysis.get("multi_face")),
+        gaze=analysis.get("gaze"),
+        risk=analysis.get("risk"),
+        signal=signal,
+        severity=severity,
+        gate_ok=bool(analysis.get("gate_ok")),
+        summary=summary,
+    )
+
+
+@router.get("/public/{token}/proctor/summary", response_model=CodingProctorSummary)
+def get_public_proctor_summary(token: str, db: Session = Depends(get_db)):
+    row, _task, _public_token, _cfg = _resolve_public_submission(db, token)
+    raw = (
+        row.proctor_summary_json
+        if isinstance(row.proctor_summary_json, dict)
+        else empty_summary()
+    )
+    return CodingProctorSummary(**{**empty_summary(), **raw})

@@ -7,12 +7,43 @@ PostgreSQL schema for the AI voice interview platform. Apply files via `init.sql
 - PostgreSQL 14+
 - Extensions: `pgcrypto` (UUIDs), `pg_trgm` (job title search)
 
+## Production deploys (Azure VM / GitHub Actions)
+
+Deploys use `database/migrate.py` (wired in `.github/workflows/deploy-vm.yml`):
+
+1. Stop API → git pull → pip install
+2. If there are **pending** `NNN_*.sql` files:
+   - compressed `pg_dump` (schema + data) under `backups/db/` (keep last 3)
+   - apply **only** those pending files
+3. Start API → frontend build
+
+Rules that protect data:
+
+- Never runs `DROP SCHEMA` / fresh wipe
+- Never re-runs `init.sql` as a full reset
+- Tracks applied files in `schema_migrations`
+- First run on an **existing** DB auto-baselines current files (marks them applied without re-executing historical `CREATE TABLE` scripts)
+- Daily code-only pushes with no new SQL → **no dump**, no schema change
+
+Local / VM commands (backend venv + `backend/.env` `DATABASE_URL`):
+
+```bash
+python database/migrate.py status
+python database/migrate.py pending-count
+python database/migrate.py apply
+python database/migrate.py dump --dir backups/db --keep 3
+```
+
+When you need a schema change: add a **new** numbered file (e.g. `034_my_change.sql`) using `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`. Do not edit old already-applied files as the primary approach.
+
 ## Fresh apply
 
 ```bash
 psql -U postgres -d speechagent -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
 psql -U postgres -d speechagent -f database/init.sql
 ```
+
+**Warning:** the `DROP SCHEMA` path is for empty/local rebuilds only — never use it on production.
 
 ## Table map
 

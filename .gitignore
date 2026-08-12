@@ -2,6 +2,9 @@
 temp/
 temp.rar
 
+# DB dumps from deploy migrate (schema + data) — never commit
+backups/
+
 # OS / editor noise at repo root
 .DS_Store
 Thumbs.db

@@ -264,6 +264,22 @@ export function CodingPage() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="secondary">{task.difficulty}</Badge>
+          {session.proctor_summary?.risk_level ? (
+            <Badge
+              variant={
+                session.proctor_summary.risk_level === 'high'
+                  ? 'destructive'
+                  : session.proctor_summary.risk_level === 'review'
+                    ? 'secondary'
+                    : 'success'
+              }
+            >
+              Integrity: {session.proctor_summary.risk_level}
+              {' · '}
+              {session.proctor_summary.warn_count}w/
+              {session.proctor_summary.critical_count}c
+            </Badge>
+          ) : null}
           {readOnly ? (
             <Badge variant="success">
               <CheckCircle2 className="mr-1 h-3 w-3" />

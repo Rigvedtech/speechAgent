@@ -101,14 +101,15 @@ const defaultValues: JoinFormValues = {
   ],
 }
 
-const WIZARD_LABELS = ['Job', 'Candidate', 'Questions', 'Join']
-const TOTAL_STEPS = 6
+const WIZARD_LABELS = ['Job', 'Candidate', 'Questions', 'Coding', 'Join']
+const TOTAL_STEPS = 7
 
 function displayWizardStep(step: number): number {
   if (step <= 2) return 1
   if (step <= 4) return 2
   if (step === 5) return 3
-  return 4
+  if (step === 6) return 4
+  return 5
 }
 
 function resolveInitialStep(
@@ -138,6 +139,7 @@ export function NewInterviewPage() {
     enabled: false,
     domainId: null,
     defaultLanguage: 'python',
+    problemCount: 1,
     assignedTaskId: null,
     timeLimitMin: 30,
     taskIds: [],
@@ -211,7 +213,7 @@ export function NewInterviewPage() {
   }, [form])
 
   useEffect(() => {
-    if (step === 6) {
+    if (step === 7) {
       form.setValue('bot_name', DEFAULT_BOT_NAME)
     }
   }, [step, form])
@@ -300,6 +302,11 @@ export function NewInterviewPage() {
     if (step === 3) return candidateSelectReady
     if (step === 4) return step1bReady
     if (step === 5) return questionsGenerated ? step3Ready : true
+    if (step === 6) {
+      // Coding is optional; if enabled, require language + assigned tasks
+      if (!codingRound.enabled) return true
+      return Boolean(codingRound.domainId && codingRound.taskIds.length > 0)
+    }
     return step4Ready
   }, [
     step,
@@ -310,6 +317,9 @@ export function NewInterviewPage() {
     step3Ready,
     step4Ready,
     questionsGenerated,
+    codingRound.enabled,
+    codingRound.domainId,
+    codingRound.taskIds.length,
   ])
 
   const questionCount = values.questions?.filter((q) => q.question.trim()).length ?? 0
@@ -340,7 +350,7 @@ export function NewInterviewPage() {
       if (first?.path.includes('questions') || first?.path.includes('jdText') || first?.path.includes('cvText')) {
         setStep(5)
       } else if (first?.path.includes('meeting_url')) {
-        setStep(6)
+        setStep(7)
       }
       return null
     }
@@ -552,8 +562,19 @@ export function NewInterviewPage() {
   }
 
   const assertCodingReady = () => {
-    if (codingRound.enabled && (!codingRound.domainId || codingRound.taskIds.length === 0)) {
-      setError('Select a coding domain and at least one task, or turn off the coding round.')
+    if (codingRound.enabled && !codingRound.domainId) {
+      setError('Select a coding language, or turn off the coding round.')
+      return false
+    }
+    if (
+      codingRound.enabled &&
+      (codingRound.problemCount < 1 || codingRound.problemCount > 5)
+    ) {
+      setError('Choose between 1 and 5 coding tasks.')
+      return false
+    }
+    if (codingRound.enabled && codingRound.taskIds.length === 0) {
+      setError('No tasks were assigned from the bank. Seed the bank or Re-pick, then continue.')
       return false
     }
     return true
@@ -614,6 +635,7 @@ export function NewInterviewPage() {
       resetQuestionsBank()
       setStep(4)
     } else if (step === 6) setStep(5)
+    else if (step === 7) setStep(6)
   }
 
   const nextStep = async () => {
@@ -724,6 +746,12 @@ export function NewInterviewPage() {
       }
 
       setStep(6)
+      return
+    }
+
+    if (step === 6) {
+      if (!assertCodingReady()) return
+      setStep(7)
     }
   }
 
@@ -745,7 +773,8 @@ export function NewInterviewPage() {
     if (step === 2) return 'Continue to candidate'
     if (step === 3) return 'Continue'
     if (step === 4) return 'Continue to questions'
-    if (step === 5) return questionsGenerated ? 'Continue to join' : 'Generate questions'
+    if (step === 5) return questionsGenerated ? 'Continue to coding' : 'Generate questions'
+    if (step === 6) return 'Continue to join'
     return 'Continue'
   }, [step, questionsGenerated, questionsMutation.isPending, joinMutation.isPending])
 
@@ -1028,6 +1057,18 @@ export function NewInterviewPage() {
               )}
 
               {step === 6 && (
+                <FormSectionCard title="Coding round">
+                  <CodingRoundPanel
+                    value={codingRound}
+                    onChange={setCodingRound}
+                    disabled={submitBusy || wizardBusy}
+                    jobPostingId={jobPostingId}
+                    candidateId={candidateId}
+                  />
+                </FormSectionCard>
+              )}
+
+              {step === 7 && (
                 <div className="space-y-5">
                   <Alert className="border-border bg-muted/30 py-2.5">
                     <p className="text-xs">
@@ -1043,16 +1084,12 @@ export function NewInterviewPage() {
                       {values.language_mode}
                       {' · '}
                       {questionCount} questions ready
-                    </p>
-                    <p className="mt-1 text-[11px] leading-snug text-muted-foreground">
-                      Schedule saves the setup without creating a bot. Send to lobby creates the
-                      Recall bot and opens the live session.
+                      {codingRound.enabled
+                        ? ` · coding ${codingRound.problemCount || 1}×${codingRound.defaultLanguage}`
+                        : ''}
                     </p>
                   </Alert>
-                  <FormSectionCard
-                    title="Join meeting"
-                    description="Paste the Teams, Zoom, or Meet link. The bot waits in the lobby until you start."
-                  >
+                  <FormSectionCard title="Join meeting">
                     <div className="space-y-4">
                       <div>
                         <Label htmlFor="meeting_url">Meeting URL</Label>
@@ -1080,7 +1117,6 @@ export function NewInterviewPage() {
                           className="mt-1.5 cursor-not-allowed bg-muted/40 text-foreground"
                           {...form.register('bot_name')}
                         />
-                  
                       </div>
                       <div>
                         <Label htmlFor="greeting_message">Custom greeting (optional)</Label>
@@ -1092,16 +1128,6 @@ export function NewInterviewPage() {
                         />
                       </div>
                     </div>
-                  </FormSectionCard>
-                  <FormSectionCard
-                    title="Coding round (optional)"
-                    description="Enable to assign one coding task after the voice interview wraps up."
-                  >
-                    <CodingRoundPanel
-                      value={codingRound}
-                      onChange={setCodingRound}
-                      disabled={submitBusy || wizardBusy}
-                    />
                   </FormSectionCard>
                 </div>
               )}

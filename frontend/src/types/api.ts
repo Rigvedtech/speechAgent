@@ -562,11 +562,40 @@ export interface InterviewCodingConfig {
   domain_id?: string | null
   allowed_languages: CodingLanguage[]
   default_language: CodingLanguage
+  /** When task_ids empty, server auto-assigns this many from shared bank. */
+  problem_count?: number | null
   task_ids: string[]
   assigned_task_id?: string | null
   time_limit_min: number
   /** task_id -> recruiter time limit (minutes) */
   task_time_limits?: Record<string, number>
+}
+
+export interface CodingBankStatus {
+  problem_count: number
+  max_problems: number
+  free_slots: number
+  generate_batch_size: number
+  next_generate_count: number
+  seed_target: number
+  can_generate: boolean
+  can_seed: boolean
+}
+
+export interface CodingBankGenerateResult {
+  created: CodingTaskDetail[]
+  requested: number
+  created_count: number
+  problem_count: number
+  max_problems: number
+  errors: string[]
+}
+
+export interface CodingBankSeedResult {
+  before: number
+  inserted: number
+  after: number
+  target: number
 }
 
 export interface InterviewCodingConfigOut extends InterviewCodingConfig {
@@ -588,6 +617,16 @@ export interface CodingAssignedTaskProgress {
   time_limit_min: number
   status: string
   is_current: boolean
+}
+
+export interface CodingProctorSummary {
+  risk_level: 'clean' | 'review' | 'high' | string
+  warn_count: number
+  critical_count: number
+  counts: Record<string, number>
+  last_event_type?: string | null
+  last_severity?: string | null
+  updated_at?: string | null
 }
 
 export interface CodingSession {
@@ -613,6 +652,36 @@ export interface CodingSession {
   task_count?: number
   has_next_task?: boolean
   assigned_tasks?: CodingAssignedTaskProgress[]
+  proctoring_enabled?: boolean
+  proctor_started?: boolean
+  proctor_summary?: CodingProctorSummary
+}
+
+export type CodingProctorSeverity = 'info' | 'warn' | 'critical'
+
+export interface CodingProctorEventInput {
+  event_type: string
+  severity?: CodingProctorSeverity
+  detail?: Record<string, unknown>
+  client_ts?: string | null
+}
+
+export interface CodingProctorFrameResult {
+  face_count: number
+  multi_face: boolean
+  gaze?: string | null
+  risk?: string | null
+  signal: string
+  severity: string
+  gate_ok: boolean
+  summary: CodingProctorSummary
+}
+
+export interface CodingProctorStartResult {
+  started_at: string
+  ends_at: string
+  time_limit_min: number
+  summary: CodingProctorSummary
 }
 
 export interface CodingSubmitRequest {

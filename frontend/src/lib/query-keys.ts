@@ -14,6 +14,10 @@ export const queryKeys = {
   atsJobs: ['atsJobs'] as const,
   uploadBatch: (batchId: string) => ['uploadBatch', batchId] as const,
   codingTasks: ['codingTasks'] as const,
+  codingBank: ['codingBank'] as const,
+  codingBankStatus: ['codingBankStatus'] as const,
+  codingAssignPreview: (language: string, count: number) =>
+    ['codingAssignPreview', language, count] as const,
   codingDomains: ['codingDomains'] as const,
   codingDomainTasks: (domainId: string, ownedOnly = true) =>
     ['codingDomainTasks', domainId, ownedOnly ? 'owned' : 'all'] as const,
