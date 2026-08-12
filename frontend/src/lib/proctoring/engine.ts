@@ -7,6 +7,8 @@
  * - Face missing ≥10s continuous → auto-submit
  * - Fullscreen exits: SEPARATE track (blur + button). Exit1 soft, exit2 warn next,
  *   exit3 auto-submit. Does not use 3/3.
+ * - Second / extended display: SEPARATE track. Gate blocks start. Mid-session:
+ *   soft warn once, then auto-submit on next detection.
  */
 
 import {
@@ -35,6 +37,8 @@ import {
   FULLSCREEN_SUBMIT_AT_EXIT,
   FULLSCREEN_WARN_AT_EXIT,
   PROCTOR_MAX_WARNINGS,
+  SECOND_DISPLAY_COOLDOWN_MS,
+  SECOND_DISPLAY_SUBMIT_AT_WARN,
   TAB_AWAY_AUTO_SUBMIT_MS,
 } from './types'
 
@@ -50,7 +54,7 @@ function nowIso() {
 }
 
 function emptyChecklist(): ProctorChecklist {
-  return { camera: false, face: false, fullscreen: false }
+  return { camera: false, face: false, fullscreen: false, singleDisplay: true }
 }
 
 function initialState(
@@ -69,6 +73,7 @@ function initialState(
     tabHidden: false,
     fullscreen: false,
     secondDisplaySuspected: false,
+    secondDisplayWarnCount: 0,
     devtoolsSuspected: false,
     banner: null,
     summary: null,
@@ -89,10 +94,20 @@ function initialState(
 }
 
 function dialogFor(
-  kind: ProctorViolationKind,
+  kind: ProctorViolationKind | 'second_display',
   attemptsLeft: number,
   warningNumber: number,
 ): ProctorWarningDialog {
+  if (kind === 'second_display') {
+    return {
+      kind,
+      title: 'Multiple displays detected',
+      message:
+        'Disconnect or disable the extra monitor (use a single display only). If a second display is detected again, your code will be submitted automatically.',
+      attemptsLeft: 0,
+      warningNumber: 1,
+    }
+  }
   if (kind === 'tab_switch') {
     return {
       kind,
@@ -143,6 +158,7 @@ export class CodingProctorEngine {
   private tabHiddenAt: number | null = null
   private lastEmitted = new Map<string, number>()
   private lastViolationAt = new Map<string, number>()
+  private lastSecondDisplayActionAt = 0
   private lockUntilMs = 0
   private finalLockStarted = false
   private forceSubmitFired = false
@@ -249,13 +265,16 @@ export class CodingProctorEngine {
       forceSubmitted: false,
       fullscreenGateOpen: false,
       fullscreenFinalWarn: false,
+      secondDisplayWarnCount: 0,
       faceMissingSecondsLeft: null,
       tabAwaySecondsLeft: null,
     })
     this.setFullscreenExits(0)
+    this.lastSecondDisplayActionAt = 0
     this.attachDomListeners()
     await this.ensureCamera()
     await this.ensureFullscreen()
+    this.refreshSecondDisplayCheck()
     this.startFrameLoop()
     this.startDevtoolsWatch()
     this.enqueue('proctor_resume', 'info', { phase: 'gating' })
@@ -269,6 +288,7 @@ export class CodingProctorEngine {
     this.attachDomListeners()
     await this.ensureCamera()
     await this.ensureFullscreen()
+    this.refreshSecondDisplayCheck()
     // If still not fullscreen after resume, open gate without counting another exit
     if (!document.fullscreenElement) {
       this.setState({
@@ -283,9 +303,17 @@ export class CodingProctorEngine {
   }
 
   async completeGateAndStart(): Promise<CodingProctorStartResult> {
+    this.refreshSecondDisplayCheck()
     const { checklist } = this.state
-    if (!checklist.camera || !checklist.face || !checklist.fullscreen) {
-      throw new Error('Complete camera, face, and fullscreen checks before starting')
+    if (
+      !checklist.camera ||
+      !checklist.face ||
+      !checklist.fullscreen ||
+      !checklist.singleDisplay
+    ) {
+      throw new Error(
+        'Complete camera, face, fullscreen, and single-display checks before starting',
+      )
     }
     unlockProctorAudio()
     this.enqueue('proctor_gate_passed', 'info', { ...checklist })
@@ -293,6 +321,7 @@ export class CodingProctorEngine {
     const result = await startPublicCodingSession(this.token)
     this.finalLockStarted = false
     this.forceSubmitFired = false
+    this.lastSecondDisplayActionAt = 0
     this.setAttempts(PROCTOR_MAX_WARNINGS)
     this.setFullscreenExits(0)
     this.setState({
@@ -307,6 +336,7 @@ export class CodingProctorEngine {
       lockReason: null,
       fullscreenGateOpen: false,
       fullscreenFinalWarn: false,
+      secondDisplayWarnCount: 0,
       faceMissingSecondsLeft: null,
       tabAwaySecondsLeft: null,
     })
@@ -429,20 +459,6 @@ export class CodingProctorEngine {
       'critical',
     )
     this.startFinalLockAndSubmit(kind)
-  }
-
-  private showSoftWarningDialog(
-    kind: ProctorViolationKind,
-    attemptsLeft: number,
-    warningNumber: number,
-  ) {
-    if (this.softDialogTimer != null) {
-      window.clearTimeout(this.softDialogTimer)
-      this.softDialogTimer = null
-    }
-    this.setState({
-      warningDialog: dialogFor(kind, attemptsLeft, warningNumber),
-    })
   }
 
   private startFinalLockAndSubmit(reason: Exclude<ProctorLockReason, null>) {
@@ -915,6 +931,137 @@ export class CodingProctorEngine {
     }, DEVTOOLS_CHECK_MS)
   }
 
+  private showSoftWarningDialog(
+    kind: ProctorViolationKind | 'second_display',
+    attemptsLeft: number,
+    warningNumber: number,
+  ) {
+    if (this.softDialogTimer != null) {
+      window.clearTimeout(this.softDialogTimer)
+      this.softDialogTimer = null
+    }
+    this.setState({
+      warningDialog: dialogFor(kind, attemptsLeft, warningNumber),
+    })
+  }
+
+  private detectSecondDisplay(): {
+    suspected: boolean
+    isExtended: boolean | null
+    screenLeft: number | null
+  } {
+    const screenAny = window.screen as Screen & { isExtended?: boolean }
+    const isExtended =
+      typeof screenAny.isExtended === 'boolean' ? screenAny.isExtended : null
+    const screenLeft =
+      typeof window.screenLeft === 'number' ? window.screenLeft : null
+    const offPrimary =
+      screenLeft != null &&
+      (screenLeft < -50 || screenLeft > window.screen.width + 50)
+    return {
+      suspected: Boolean(isExtended) || offPrimary,
+      isExtended,
+      screenLeft,
+    }
+  }
+
+  /** Public recheck for the gate UI. */
+  refreshSecondDisplayCheck() {
+    this.checkSecondDisplay(true)
+  }
+
+  // ── Second / extended display (separate track) ─────────────────────────
+
+  private checkSecondDisplay(force = false) {
+    if (this.state.phase !== 'gating' && this.state.phase !== 'active') return
+    if (this.isTerminal()) return
+
+    const { suspected, isExtended, screenLeft } = this.detectSecondDisplay()
+    const detail = {
+      isExtended,
+      screenLeft,
+      confidence: isExtended === true ? 'medium' : 'low',
+    }
+
+    this.setChecklist({ singleDisplay: !suspected })
+
+    if (!suspected) {
+      if (this.state.secondDisplaySuspected) {
+        this.setState({ secondDisplaySuspected: false })
+        this.enqueue('second_display_cleared', 'info', detail)
+        if (this.state.banner?.toLowerCase().includes('display')) {
+          this.setState({ banner: null })
+        }
+      }
+      return
+    }
+
+    // Gating: block start, do not count toward auto-submit yet
+    if (this.state.phase === 'gating') {
+      if (!this.state.secondDisplaySuspected || force) {
+        this.setState({
+          secondDisplaySuspected: true,
+          banner:
+            'Multiple displays detected. Disconnect the extra monitor to continue.',
+        })
+        this.emitThrottled('second_display_suspected', 'warn', 15000, detail)
+      }
+      return
+    }
+
+    // Active session — option B: soft warn once, then auto-submit
+    if (this.state.warningDialog?.kind === 'second_display') {
+      // Wait until candidate dismisses before escalating
+      this.setState({ secondDisplaySuspected: true })
+      return
+    }
+
+    const now = Date.now()
+    if (
+      !force &&
+      now - this.lastSecondDisplayActionAt < SECOND_DISPLAY_COOLDOWN_MS
+    ) {
+      this.setState({ secondDisplaySuspected: true })
+      return
+    }
+
+    const next = this.state.secondDisplayWarnCount + 1
+    this.lastSecondDisplayActionAt = now
+    this.setState({
+      secondDisplaySuspected: true,
+      secondDisplayWarnCount: next,
+    })
+
+    if (next >= SECOND_DISPLAY_SUBMIT_AT_WARN) {
+      this.enqueue('second_display_detected', 'critical', {
+        ...detail,
+        warn_count: next,
+      })
+      this.alert(
+        'Second display detected again. Screen locked — your code will be submitted.',
+        'critical',
+      )
+      this.startFinalLockAndSubmit('second_display')
+      return
+    }
+
+    // First detection — soft warn
+    this.enqueue('second_display_detected', 'warn', {
+      ...detail,
+      warn_count: next,
+    })
+    playProctorClip('warning')
+    this.alert(
+      'Multiple displays detected. Disconnect the extra monitor. Next detection will auto-submit.',
+      'warn',
+    )
+    this.showSoftWarningDialog('second_display', 0, 1)
+    this.setState({
+      banner:
+        'Multiple displays: warning 1/1. Next detection will auto-submit your code.',
+    })
+  }
+
   private checkDevtools() {
     if (this.state.phase !== 'active') return
     const widthGap = Math.abs(window.outerWidth - window.innerWidth)
@@ -929,25 +1076,6 @@ export class CodingProctorEngine {
       })
     } else if (!suspected && this.state.devtoolsSuspected) {
       this.setState({ devtoolsSuspected: false })
-    }
-  }
-
-  private checkSecondDisplay() {
-    if (this.state.phase !== 'active') return
-    const screenAny = window.screen as Screen & { isExtended?: boolean }
-    const suspected =
-      Boolean(screenAny.isExtended) ||
-      (typeof window.screenLeft === 'number' &&
-        (window.screenLeft < -50 || window.screenLeft > window.screen.width + 50))
-    if (suspected && !this.state.secondDisplaySuspected) {
-      this.setState({ secondDisplaySuspected: true })
-      this.emitThrottled('second_display_suspected', 'info', 60000, {
-        isExtended: screenAny.isExtended ?? null,
-        screenLeft: window.screenLeft,
-        confidence: 'low',
-      })
-    } else if (!suspected && this.state.secondDisplaySuspected) {
-      this.setState({ secondDisplaySuspected: false })
     }
   }
 

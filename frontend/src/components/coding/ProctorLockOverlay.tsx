@@ -1,4 +1,4 @@
-import { AppWindow, Lock, Maximize2, UserRound, Users } from 'lucide-react'
+import { AppWindow, Lock, Maximize2, Monitor, UserRound, Users } from 'lucide-react'
 import type { ProctorLiveState } from '@/lib/proctoring/types'
 
 export function ProctorLockOverlay({ state }: { state: ProctorLiveState }) {
@@ -15,7 +15,9 @@ export function ProctorLockOverlay({ state }: { state: ProctorLiveState }) {
             ? 'Face not visible for 10 seconds'
             : state.lockReason === 'fullscreen_exit'
               ? 'Fullscreen exited too many times'
-              : state.lockReason === 'camera_lost'
+              : state.lockReason === 'second_display'
+                ? 'Multiple displays detected again'
+                : state.lockReason === 'camera_lost'
                 ? 'Camera disconnected'
                 : 'Proctoring violation'
 
@@ -26,6 +28,8 @@ export function ProctorLockOverlay({ state }: { state: ProctorLiveState }) {
         ? UserRound
         : state.lockReason === 'fullscreen_exit'
           ? Maximize2
+          : state.lockReason === 'second_display'
+            ? Monitor
           : AppWindow
 
   return (

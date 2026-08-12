@@ -609,6 +609,7 @@ export function CandidateCodingPage() {
               const canvas = canvasRef.current
               if (video && canvas) void proctorEngineRef.current?.beginGate(video, canvas)
             }}
+            onRecheckDisplay={() => proctorEngineRef.current?.refreshSecondDisplayCheck()}
             onStart={() => void startProctoredSession()}
           />
         ) : (

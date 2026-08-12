@@ -46,6 +46,8 @@ ALLOWED_EVENT_TYPES = frozenset(
         "context_menu_blocked",
         "devtools_suspected",
         "second_display_suspected",
+        "second_display_detected",
+        "second_display_cleared",
         "proctor_gate_passed",
         "proctor_resume",
         "heartbeat",

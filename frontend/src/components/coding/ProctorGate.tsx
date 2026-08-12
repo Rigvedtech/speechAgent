@@ -1,5 +1,13 @@
 import type { ReactNode } from 'react'
-import { Camera, CheckCircle2, Loader2, Maximize2, ShieldAlert, UserRound } from 'lucide-react'
+import {
+  Camera,
+  CheckCircle2,
+  Loader2,
+  Maximize2,
+  Monitor,
+  ShieldAlert,
+  UserRound,
+} from 'lucide-react'
 import type { ProctorChecklist, ProctorLiveState } from '@/lib/proctoring/types'
 import { cn } from '@/lib/utils'
 
@@ -45,6 +53,7 @@ export function ProctorGate({
   preview,
   onRequestFullscreen,
   onRetryCamera,
+  onRecheckDisplay,
   onStart,
 }: {
   state: ProctorLiveState
@@ -54,10 +63,11 @@ export function ProctorGate({
   preview: ReactNode
   onRequestFullscreen: () => void
   onRetryCamera: () => void
+  onRecheckDisplay: () => void
   onStart: () => void
 }) {
   const c: ProctorChecklist = state.checklist
-  const ready = c.camera && c.face && c.fullscreen
+  const ready = c.camera && c.face && c.fullscreen && c.singleDisplay
 
   return (
     <div className="flex h-full min-h-0 items-center justify-center bg-[#0f1115] px-4 py-8">
@@ -69,8 +79,9 @@ export function ProctorGate({
           </div>
           <h1 className="text-2xl font-semibold tracking-tight text-white">{taskTitle}</h1>
           <p className="text-sm leading-relaxed text-zinc-400">
-            Before the timer starts, enable your webcam, keep your face clearly visible, and enter
-            fullscreen. Camera, focus, and paste activity are logged for review.
+            Before the timer starts, enable your webcam, keep your face clearly visible, enter
+            fullscreen, and use a single display only. Camera, focus, and paste activity are logged
+            for review.
           </p>
           <p className="text-xs text-zinc-500">Time limit once started: {timeLimitMin} minutes</p>
 
@@ -109,6 +120,16 @@ export function ProctorGate({
                   : 'Fullscreen is required for the coding round'
               }
             />
+            <Row
+              ok={c.singleDisplay}
+              icon={Monitor}
+              label="Single display"
+              hint={
+                c.singleDisplay
+                  ? 'Only one display detected'
+                  : 'Disconnect or disable the extra monitor, then recheck'
+              }
+            />
           </div>
 
           <div className="flex flex-wrap gap-2 pt-1">
@@ -128,6 +149,15 @@ export function ProctorGate({
                 className="rounded-md border border-white/15 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
               >
                 Enter fullscreen
+              </button>
+            )}
+            {!c.singleDisplay && (
+              <button
+                type="button"
+                onClick={onRecheckDisplay}
+                className="rounded-md border border-white/15 bg-white/5 px-3 py-2 text-xs font-medium text-zinc-100 hover:bg-white/10"
+              >
+                Recheck display
               </button>
             )}
             <button

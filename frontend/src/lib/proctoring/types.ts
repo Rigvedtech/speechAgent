@@ -10,6 +10,7 @@ export type ProctorLockReason =
   | 'no_face'
   | 'tab_away'
   | 'fullscreen_exit'
+  | 'second_display'
   | 'camera_lost'
   | null
 
@@ -17,11 +18,13 @@ export interface ProctorChecklist {
   camera: boolean
   face: boolean
   fullscreen: boolean
+  /** False when an extended / second display is detected. */
+  singleDisplay: boolean
 }
 
-/** Soft warning dialog (blur) for 3/3 attempt pool. */
+/** Soft warning dialog (blur) — 3/3 pool or second-display track. */
 export interface ProctorWarningDialog {
-  kind: ProctorViolationKind
+  kind: ProctorViolationKind | 'second_display'
   title: string
   message: string
   attemptsLeft: number
@@ -40,6 +43,11 @@ export interface ProctorLiveState {
   tabHidden: boolean
   fullscreen: boolean
   secondDisplaySuspected: boolean
+  /**
+   * Second-display track (separate from 3/3).
+   * 0 = clean, 1 = soft warned, 2 = auto-submit triggered.
+   */
+  secondDisplayWarnCount: number
   devtoolsSuspected: boolean
   banner: string | null
   summary: CodingProctorSummary | null
@@ -90,3 +98,7 @@ export const FULLSCREEN_SUBMIT_AT_EXIT = 3
 export const FACE_MISSING_AUTO_SUBMIT_MS = 10_000
 /** Tab away without return → auto-submit. */
 export const TAB_AWAY_AUTO_SUBMIT_MS = 10_000
+/** Soft warn once for second display; next detection auto-submits. */
+export const SECOND_DISPLAY_SUBMIT_AT_WARN = 2
+/** Cooldown between second-display soft-warn and escalate. */
+export const SECOND_DISPLAY_COOLDOWN_MS = 8_000

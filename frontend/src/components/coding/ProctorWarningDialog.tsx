@@ -1,4 +1,4 @@
-import { AlertTriangle, AppWindow, Users } from 'lucide-react'
+import { AlertTriangle, AppWindow, Monitor, Users } from 'lucide-react'
 import type { ProctorLiveState } from '@/lib/proctoring/types'
 import { PROCTOR_MAX_WARNINGS } from '@/lib/proctoring/types'
 
@@ -12,7 +12,13 @@ export function ProctorWarningDialog({
   const dialog = state.warningDialog
   if (!dialog || state.screenLocked || state.fullscreenGateOpen) return null
 
-  const Icon = dialog.kind === 'multi_face' ? Users : AppWindow
+  const isSecondDisplay = dialog.kind === 'second_display'
+  const Icon =
+    dialog.kind === 'multi_face'
+      ? Users
+      : dialog.kind === 'second_display'
+        ? Monitor
+        : AppWindow
 
   return (
     <div className="absolute inset-0 z-[55] flex items-center justify-center bg-[#0f1115]/75 px-4 backdrop-blur-md">
@@ -26,8 +32,9 @@ export function ProctorWarningDialog({
             <p className="mt-1.5 text-sm leading-relaxed text-zinc-400">{dialog.message}</p>
             <p className="mt-3 inline-flex items-center gap-1.5 text-xs font-medium text-amber-200">
               <Icon className="h-3.5 w-3.5" />
-              Warning {dialog.warningNumber} of {PROCTOR_MAX_WARNINGS} · Attempts left:{' '}
-              {dialog.attemptsLeft}
+              {isSecondDisplay
+                ? 'Final warning · Next detection auto-submits'
+                : `Warning ${dialog.warningNumber} of ${PROCTOR_MAX_WARNINGS} · Attempts left: ${dialog.attemptsLeft}`}
             </p>
           </div>
         </div>
