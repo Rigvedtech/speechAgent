@@ -1,37 +1,27 @@
 # Production deploy to Azure VM on push/merge to main.
 #
-# Flow:
+# Flow (see scripts/deploy-vm.sh for full logic):
 #   1. SSH into VM
-#   2. Stop backend (systemd speechagent-api)
-#   3. git fetch + checkout + pull main
-#   4. pip install backend deps
-#   5. DB migrate (additive only — never DROP SCHEMA / wipe data):
-#        - pending-count (auto-baselines existing prod DB on first run)
-#        - if pending > 0: compressed pg_dump (schema+data), keep last 3
-#        - apply pending database/NNN_*.sql only
-#   6. Start backend (systemd)
-#   7. npm ci + npm run build (uses frontend/.env.production on VM)
-#   8. Copy dist → /var/www/speechagent (nginx stays running)
-#   9. Health checks
+#   2. git fetch + reset to origin/main (so latest scripts/deploy-vm.sh exists)
+#   3. bash scripts/deploy-vm.sh
+#        stop API → pull → pip → migrate (dump only if pending) → start API
+#        → npm ci/build → publish to nginx → health checks
 #
-# IMPORTANT (appleboy/ssh-action / drone-ssh):
-#   Remote script is executed via bash -c '...' — NEVER use single quotes (')
-#   inside this script block or the shell breaks with:
-#     syntax error near unexpected token `;'
+# Why a separate script?
+#   appleboy/ssh-action runs inline YAML via bash -c '...'. Complex shell
+#   (single quotes, case/;;, redirects) breaks there. The deploy script runs
+#   as a normal file and is safe.
 #
 # Required GitHub Actions secrets:
-#   VM_HOST     – VM public IP (e.g. 20.244.7.67)
-#   VM_USER     – SSH user (e.g. azureuser)
-#   VM_SSH_KEY  – private key (full PEM including BEGIN/END lines)
+#   VM_HOST, VM_USER, VM_SSH_KEY
 #
 # VM prerequisites (one-time):
-#   - repo at /home/azureuser/speechAgent; git pull origin main works without prompts
-#   - backend/.env present with DATABASE_URL (gitignored; not overwritten by pull)
-#   - frontend/.env.production: VITE_LANDING_ONLY=false and VITE_API_BASE_URL=
-#   - systemd unit speechagent-api enabled
-#   - nginx serving /var/www/speechagent
-#   - postgresql-client installed (pg_dump) for pre-migrate backups
-#   - passwordless sudo for azureuser for systemctl/cp/mkdir/chown
+#   - repo at /home/azureuser/speechAgent
+#   - backend/.env with DATABASE_URL
+#   - frontend/.env.production
+#   - systemd speechagent-api, nginx /var/www/speechagent
+#   - postgresql-client (pg_dump)
+#   - passwordless sudo for systemctl/cp/mkdir/chown
 #
 # Dev branch middleware_layer does NOT deploy. Merge/push to main only.
 
@@ -58,7 +48,7 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' || github.event.inputs.confirm == 'deploy' }}
     steps:
-      - name: SSH stop, pull main, migrate DB, start API, build frontend
+      - name: SSH pull main and run deploy-vm.sh
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.VM_HOST }}
@@ -67,112 +57,17 @@ jobs:
           port: 22
           script_stop: true
           command_timeout: 30m
+          # Keep this block minimal. No single quotes (drone-ssh bash -c wrapper).
+          # Full deploy logic lives in scripts/deploy-vm.sh after git reset.
           script: |
             set -euo pipefail
-
-            DEPLOY_BRANCH="main"
-            REPO_DIR="/home/azureuser/speechAgent"
-            WEB_ROOT="/var/www/speechagent"
-            BACKUP_DIR="${REPO_DIR}/backups/db"
-            MIGRATE_PY="${REPO_DIR}/database/migrate.py"
-            API_STARTED=0
-
-            restore_api_if_needed() {
-              if [ "${API_STARTED}" -eq 0 ]; then
-                echo "==> Deploy failed before API healthy - attempting to restart speechagent-api"
-                sudo systemctl start speechagent-api || true
-              fi
-            }
-            trap restore_api_if_needed EXIT
-
-            echo "==> Deploy branch: ${DEPLOY_BRANCH}"
-            echo "==> Repo: ${REPO_DIR}"
-            cd "${REPO_DIR}"
-
-            echo "==> Stop backend (speechagent-api)"
-            sudo systemctl stop speechagent-api || true
-
-            echo "==> Fetch and pull ${DEPLOY_BRANCH}"
-            git remote -v
+            REPO_DIR=/home/azureuser/speechAgent
+            cd ${REPO_DIR}
             git fetch origin
-            git checkout "${DEPLOY_BRANCH}"
-            git reset --hard "origin/${DEPLOY_BRANCH}"
-            git pull --ff-only origin "${DEPLOY_BRANCH}"
-            echo "Now at: $(git log -1 --oneline)"
-            echo "HEAD: $(git rev-parse HEAD)"
-
-            echo "==> Backend dependencies"
-            cd "${REPO_DIR}/backend"
-            . venv/bin/activate
-            pip install -r requirements.txt
-
-            echo "==> Database migrations (additive only; no DROP SCHEMA)"
-            if [ ! -f "${MIGRATE_PY}" ]; then
-              echo "ERROR: missing migrate.py" >&2
-              exit 1
-            fi
-            if [ ! -f "${REPO_DIR}/backend/.env" ]; then
-              echo "ERROR: missing backend/.env (DATABASE_URL required)" >&2
-              exit 1
-            fi
-
-            # Integer on stdout only. Avoid single quotes (breaks drone-ssh bash -c).
-            PENDING_COUNT="$(python "${MIGRATE_PY}" pending-count | tr -d "[:space:]")"
-            echo "Pending migrations: ${PENDING_COUNT}"
-
-            # Validate integer without case/;; or single quotes
-            if [ -z "${PENDING_COUNT}" ]; then
-              echo "ERROR: pending-count returned empty" >&2
-              exit 1
-            fi
-            if ! [ "${PENDING_COUNT}" -eq "${PENDING_COUNT}" ] 2>/dev/null; then
-              echo "ERROR: pending-count did not return an integer: [${PENDING_COUNT}]" >&2
-              exit 1
-            fi
-
-            if [ "${PENDING_COUNT}" -gt 0 ]; then
-              echo "==> Pre-migrate dump (schema + data, compressed; keep last 3)"
-              mkdir -p "${BACKUP_DIR}"
-              if ! command -v pg_dump >/dev/null 2>&1; then
-                echo "ERROR: pg_dump not found. Install postgresql-client on the VM." >&2
-                exit 1
-              fi
-              python "${MIGRATE_PY}" dump --dir "${BACKUP_DIR}" --keep 3
-              echo "==> Apply pending migrations"
-              python "${MIGRATE_PY}" apply
-            else
-              echo "==> No pending migrations - skip dump (saves disk)"
-            fi
-            python "${MIGRATE_PY}" status
-
-            echo "==> Start backend (speechagent-api)"
-            sudo systemctl start speechagent-api
-            sleep 3
-            if ! sudo systemctl is-active --quiet speechagent-api; then
-              echo "ERROR: speechagent-api failed to start" >&2
-              sudo systemctl status speechagent-api --no-pager >&2 || true
-              exit 1
-            fi
-            API_STARTED=1
-
-            echo "==> Frontend production build"
-            cd "${REPO_DIR}/frontend"
-            npm ci
-            npm run build
-
-            echo "==> Publish static files to nginx root (nginx stays up)"
-            sudo mkdir -p "${WEB_ROOT}"
-            sudo cp -r dist/. "${WEB_ROOT}/"
-            sudo chown -R www-data:www-data "${WEB_ROOT}"
-
-            echo "==> Health checks"
-            curl -fsS --retry 5 --retry-delay 2 "http://127.0.0.1:8000/health" >/dev/null
-            HTTP_CODE="$(curl -fsS -o /dev/null -w "%{http_code}" --retry 3 "http://127.0.0.1/")"
-            echo "Frontend HTTP status: ${HTTP_CODE}"
-            if [ "${HTTP_CODE}" -lt 200 ] || [ "${HTTP_CODE}" -ge 400 ]; then
-              echo "ERROR: unexpected frontend HTTP status ${HTTP_CODE}" >&2
-              exit 1
-            fi
-
-            echo "==> Deploy OK (${DEPLOY_BRANCH} @ $(cd "${REPO_DIR}" && git rev-parse --short HEAD))"
-            trap - EXIT
+            git checkout main
+            git reset --hard origin/main
+            git pull --ff-only origin main
+            echo Now at: $(git log -1 --oneline)
+            test -f ${REPO_DIR}/scripts/deploy-vm.sh
+            chmod +x ${REPO_DIR}/scripts/deploy-vm.sh
+            bash ${REPO_DIR}/scripts/deploy-vm.sh

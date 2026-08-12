@@ -9,13 +9,17 @@ PostgreSQL schema for the AI voice interview platform. Apply files via `init.sql
 
 ## Production deploys (Azure VM / GitHub Actions)
 
-Deploys use `database/migrate.py` (wired in `.github/workflows/deploy-vm.yml`):
+GitHub Actions SSHs to the VM, resets to `origin/main`, then runs
+[`scripts/deploy-vm.sh`](../scripts/deploy-vm.sh) (not a huge inline YAML script —
+that broke under `appleboy/ssh-action` / `bash -c`).
+
+Deploy script flow:
 
 1. Stop API → git pull → pip install
 2. If there are **pending** `NNN_*.sql` files:
    - compressed `pg_dump` (schema + data) under `backups/db/` (keep last 3)
-   - apply **only** those pending files
-3. Start API → frontend build
+   - apply **only** those pending files via `database/migrate.py`
+3. Start API → frontend build → nginx publish → health checks
 
 Rules that protect data:
 
@@ -32,6 +36,9 @@ python database/migrate.py status
 python database/migrate.py pending-count
 python database/migrate.py apply
 python database/migrate.py dump --dir backups/db --keep 3
+
+# Full production deploy (same as CI):
+bash scripts/deploy-vm.sh
 ```
 
 When you need a schema change: add a **new** numbered file (e.g. `034_my_change.sql`) using `IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`. Do not edit old already-applied files as the primary approach.
