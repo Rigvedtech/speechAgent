@@ -99,8 +99,13 @@ jobs:
             echo "==> Database migrations (additive only; no DROP SCHEMA)"
             # Uses backend/.env DATABASE_URL. Auto-baselines existing prod DB
             # on first run so historical CREATE TABLE files are not re-executed.
-            PENDING_COUNT="$(python "${MIGRATE_PY}" pending-count)"
+            # pending-count prints ONLY an integer on stdout (logs → stderr).
+            PENDING_COUNT="$(python "${MIGRATE_PY}" pending-count | tr -d '[:space:]')"
             echo "Pending migrations: ${PENDING_COUNT}"
+            if ! [[ "${PENDING_COUNT}" =~ ^[0-9]+$ ]]; then
+              echo "ERROR: pending-count did not return an integer: '${PENDING_COUNT}'" >&2
+              exit 1
+            fi
             if [ "${PENDING_COUNT}" -gt 0 ]; then
               echo "==> Pre-migrate dump (schema + data, compressed; keep last 3)"
               mkdir -p "${BACKUP_DIR}"
