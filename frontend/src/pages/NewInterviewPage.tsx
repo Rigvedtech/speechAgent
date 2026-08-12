@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useForm, FormProvider } from 'react-hook-form'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Download, Loader2, Sparkles } from 'lucide-react'
@@ -128,13 +128,34 @@ function resolveInitialStep(
   return savedStep
 }
 
+function readShortlistPrefill(search: string): { jobId: string; candidateId: string } | null {
+  const params = new URLSearchParams(search)
+  const jobId = params.get('jobId')?.trim() || ''
+  const candidateId = params.get('candidateId')?.trim() || ''
+  if (!jobId || !candidateId) return null
+  return { jobId, candidateId }
+}
+
 export function NewInterviewPage() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const savedDraft = loadInterviewDraft()
   const savedMeta = loadInterviewDraftMeta()
+  const shortlistPrefill = useMemo(
+    () => readShortlistPrefill(searchParams.toString()),
+    // Only evaluate on mount so later draft saves don't re-trigger prefill.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  )
+  const shortlistPrefillRef = useRef(shortlistPrefill)
+  const shortlistAppliedRef = useRef(false)
 
-  const [step, setStep] = useState(() => resolveInitialStep(savedMeta?.wizardStep, savedMeta))
+  const [step, setStep] = useState(() =>
+    shortlistPrefill
+      ? 5
+      : resolveInitialStep(savedMeta?.wizardStep, savedMeta),
+  )
   const [codingRound, setCodingRound] = useState<CodingRoundState>({
     enabled: false,
     domainId: null,
@@ -147,13 +168,29 @@ export function NewInterviewPage() {
   })
   const [error, setError] = useState<string | null>(null)
   const [cvStructured, setCvStructured] = useState<CvStructured | null>(
-    savedMeta?.cvStructured ?? null,
+    shortlistPrefill &&
+      savedMeta?.jobPostingId === shortlistPrefill.jobId &&
+      savedMeta?.candidateId === shortlistPrefill.candidateId
+      ? (savedMeta?.cvStructured ?? null)
+      : shortlistPrefill
+        ? null
+        : (savedMeta?.cvStructured ?? null),
   )
   const [jdStructured, setJdStructured] = useState<JdStructured | null>(
-    savedMeta?.jdStructured ?? null,
+    shortlistPrefill &&
+      savedMeta?.jobPostingId === shortlistPrefill.jobId &&
+      savedMeta?.candidateId === shortlistPrefill.candidateId
+      ? (savedMeta?.jdStructured ?? null)
+      : shortlistPrefill
+        ? null
+        : (savedMeta?.jdStructured ?? null),
   )
-  const [candidateId, setCandidateId] = useState<string | null>(savedMeta?.candidateId ?? null)
-  const [jobPostingId, setJobPostingId] = useState<string | null>(savedMeta?.jobPostingId ?? null)
+  const [candidateId, setCandidateId] = useState<string | null>(
+    shortlistPrefill?.candidateId ?? savedMeta?.candidateId ?? null,
+  )
+  const [jobPostingId, setJobPostingId] = useState<string | null>(
+    shortlistPrefill?.jobId ?? savedMeta?.jobPostingId ?? null,
+  )
   const [extractionId, setExtractionId] = useState<string | null>(savedMeta?.extractionId ?? null)
   const [atsJobExternalId, setAtsJobExternalId] = useState<string | null>(
     savedMeta?.atsJobExternalId ?? null,
@@ -168,6 +205,7 @@ export function NewInterviewPage() {
     savedMeta?.pendingAtsCandidateParentId ?? null,
   )
   const [questionsGenerated, setQuestionsGenerated] = useState(() => {
+    if (shortlistPrefill) return false
     if (savedMeta?.questionsGenerated) return true
     return (savedDraft?.questions ?? []).some((q) => q.question.trim().length >= 10)
   })
@@ -178,6 +216,12 @@ export function NewInterviewPage() {
   const [atsImportOpen, setAtsImportOpen] = useState(false)
   const [atsImportMode, setAtsImportMode] = useState<'candidate' | 'job'>('job')
   const selectedJobId = jobPostingId ?? null
+
+  const draftMatchesShortlist = Boolean(
+    shortlistPrefill &&
+      savedMeta?.jobPostingId === shortlistPrefill.jobId &&
+      savedMeta?.candidateId === shortlistPrefill.candidateId,
+  )
 
   const candidatesQuery = useQuery({
     queryKey: queryKeys.candidatesByJob(selectedJobId),
@@ -199,7 +243,11 @@ export function NewInterviewPage() {
   const atsConnected = Boolean(atsSettingsQuery.data?.is_connected)
 
   const form = useForm<JoinFormValues>({
-    defaultValues: savedDraft ?? defaultValues,
+    defaultValues: draftMatchesShortlist
+      ? (savedDraft ?? defaultValues)
+      : shortlistPrefill
+        ? defaultValues
+        : (savedDraft ?? defaultValues),
     mode: 'onChange',
   })
 
@@ -543,6 +591,8 @@ export function NewInterviewPage() {
     if (!candidateId || pendingAtsCandidateExternalId) return
     if (candidatesQuery.isLoading || candidatesQuery.isFetching) return
     if (!candidatesQuery.data) return
+    // Keep shortlist prefill selection while queries catch up / apply.
+    if (shortlistPrefillRef.current && !shortlistAppliedRef.current) return
     const inFilteredList = (candidatesQuery.data ?? []).some((candidate) => candidate.id === candidateId)
     if (!inFilteredList) {
       clearCandidateSelection()
@@ -554,6 +604,93 @@ export function NewInterviewPage() {
     candidatesQuery.isFetching,
     pendingAtsCandidateExternalId,
     clearCandidateSelection,
+  ])
+
+  useEffect(() => {
+    const prefill = shortlistPrefillRef.current
+    if (!prefill || shortlistAppliedRef.current) return
+
+    const clearPrefillParams = () => {
+      if (searchParams.get('jobId') || searchParams.get('candidateId')) {
+        setSearchParams({}, { replace: true })
+      }
+    }
+
+    // Draft was seeded from the CV shortlist — already on Questions with texts filled.
+    const seededJd = form.getValues('jdText').trim()
+    const seededCv = form.getValues('cvText').trim()
+    if (
+      jobPostingId === prefill.jobId &&
+      candidateId === prefill.candidateId &&
+      seededJd.length >= 100 &&
+      seededCv.length >= 50
+    ) {
+      setStep(5)
+      setQuestionsGenerated(false)
+      shortlistAppliedRef.current = true
+      clearPrefillParams()
+      return
+    }
+
+    if (jobsQuery.isLoading || candidatesQuery.isLoading || candidatesQuery.isFetching) return
+
+    const job = (jobsQuery.data ?? []).find((row) => row.id === prefill.jobId)
+    const candidate = (candidatesQuery.data ?? []).find((row) => row.id === prefill.candidateId)
+
+    if (!job) {
+      if (jobsQuery.isFetched || jobsQuery.isError) {
+        setError('Could not load the selected job for scheduling. Return to Job Requirements and try again.')
+        shortlistAppliedRef.current = true
+        clearPrefillParams()
+      }
+      return
+    }
+
+    if (!candidate) {
+      if (candidatesQuery.isFetched) {
+        setError(
+          'Could not load the selected candidate for this job. Return to the CV shortlist and try again.',
+        )
+        shortlistAppliedRef.current = true
+        clearPrefillParams()
+      }
+      return
+    }
+
+    applyJobRow(job)
+    applyCandidateRow(candidate)
+
+    const jd = job.jd_text?.trim() || ''
+    const cv = candidate.cv_text?.trim() || ''
+    if (jd.length < 100 || cv.length < 50) {
+      setError(
+        jd.length < 100
+          ? 'Selected job has no usable JD text yet. Process the JD in Job Requirements first.'
+          : 'Selected candidate has no usable resume text yet. Process the CV first.',
+      )
+      shortlistAppliedRef.current = true
+      clearPrefillParams()
+      return
+    }
+
+    setStep(5)
+    setQuestionsGenerated(false)
+    shortlistAppliedRef.current = true
+    clearPrefillParams()
+  }, [
+    jobPostingId,
+    candidateId,
+    jobsQuery.data,
+    jobsQuery.isLoading,
+    jobsQuery.isFetched,
+    jobsQuery.isError,
+    candidatesQuery.data,
+    candidatesQuery.isLoading,
+    candidatesQuery.isFetching,
+    candidatesQuery.isFetched,
+    searchParams,
+    setSearchParams,
+    form,
   ])
 
   const resetQuestionsBank = () => {
