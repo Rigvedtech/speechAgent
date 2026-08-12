@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
   ArrowLeft,
+  CalendarPlus,
   CheckCircle2,
   Eye,
   FileText,
@@ -25,7 +26,13 @@ import {
   uploadJobResumes,
 } from '@/lib/api'
 import { ApiError } from '@/lib/api-client'
+import {
+  clearInterviewDraft,
+  saveInterviewDraft,
+  saveInterviewDraftMeta,
+} from '@/lib/draft-store'
 import { queryKeys } from '@/lib/query-keys'
+import { splitFullName } from '@/schemas/join-form.schema'
 import { useAuth } from '@/hooks/useAuth'
 import { FileDropzone } from '@/components/bulk-upload/FileDropzone'
 import { Alert } from '@/components/ui/alert'
@@ -191,6 +198,7 @@ export function JobResumesPage() {
   const [cvTextDraft, setCvTextDraft] = useState('')
   const [scoring, setScoring] = useState(false)
   const [scoringCandidateId, setScoringCandidateId] = useState<string | null>(null)
+  const [schedulingCandidateId, setSchedulingCandidateId] = useState<string | null>(null)
   const [scoreDetailResume, setScoreDetailResume] = useState<JobResume | null>(null)
 
   const busy = stage !== 'idle'
@@ -438,6 +446,90 @@ export function JobResumesPage() {
     }
   }
 
+  const scheduleInterviewFromResume = async (resume: JobResume) => {
+    const candidateId = resume.candidate_id
+    const jobRow = job.data
+    if (!candidateId || !jobId) {
+      setError('This resume is not linked to a candidate profile yet.')
+      return
+    }
+    if (!jobRow) {
+      setError('Job details are still loading. Try again in a moment.')
+      return
+    }
+
+    setError(null)
+    setSchedulingCandidateId(candidateId)
+    try {
+      let jd = jobRow.jd_text?.trim() || ''
+      if (jd.length < 100 && jobRow.jd_document_id) {
+        const doc = await getDocument(jobRow.jd_document_id)
+        jd = doc.extracted_text?.trim() || ''
+      }
+      const cv = resume.cv_text?.trim() || ''
+      if (jd.length < 100) {
+        setError(
+          'Job description text is missing. Open Preview JD and ensure the JD is processed before scheduling.',
+        )
+        return
+      }
+      if (cv.length < 50) {
+        setError(
+          'This CV has no usable resume text yet. Open Preview CV, save the text, then try again.',
+        )
+        return
+      }
+
+      const { first, last } = splitFullName(resume.full_name || '')
+      clearInterviewDraft()
+      saveInterviewDraft({
+        meeting_url: '',
+        bot_name: 'Prabhat',
+        candidate_first_name: first,
+        candidate_last_name: last,
+        language_mode: 'english',
+        position_name: jobRow.job_title,
+        jdText: jd,
+        cvText: cv,
+        greeting_message: '',
+        questions: [
+          {
+            id: '1',
+            difficulty: 'Low',
+            source: 'jd',
+            question: '',
+          },
+        ],
+      })
+      saveInterviewDraftMeta({
+        cvFileName: null,
+        jdFileName: null,
+        wizardStep: 5,
+        jobPostingId: jobId,
+        candidateId,
+        jdStructured: { jd_summary: jd },
+        cvStructured: {
+          name: resume.full_name || undefined,
+          raw_text: cv,
+        },
+        questionsGenerated: false,
+        extractionId: null,
+        atsJobExternalId: jobRow.external_ats_id ?? null,
+        pendingAtsJobExternalId: null,
+        pendingAtsCandidateExternalId: null,
+        pendingAtsCandidateParentId: null,
+      })
+      navigate({
+        pathname: '/interviews/new',
+        search: `?jobId=${encodeURIComponent(jobId)}&candidateId=${encodeURIComponent(candidateId)}`,
+      })
+    } catch (nextError) {
+      setError(errorMessage(nextError))
+    } finally {
+      setSchedulingCandidateId(null)
+    }
+  }
+
   return (
     <div className="relative flex h-full min-h-0 flex-col overflow-hidden">
       <div
@@ -658,32 +750,32 @@ export function JobResumesPage() {
           </section>
         ) : null}
 
-        <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-card">
-          <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-3">
+        <section className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border bg-card shadow-[0_1px_2px_rgba(0,0,0,0.03)]">
+          <div className="flex h-12 shrink-0 items-center justify-between gap-3 border-b border-border px-4 sm:px-5">
             <div className="min-w-0">
               <h2 className="text-sm font-semibold tracking-tight">Candidates</h2>
-              <p className="text-xs text-muted-foreground">
+              <p className="text-[11px] leading-none text-muted-foreground">
                 Click fit score for breakdown · ranked against this JD
               </p>
             </div>
-            <span className="rounded-full border border-border bg-muted/40 px-2.5 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+            <span className="rounded-md border border-border bg-muted/40 px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
               {resumeRows.length} total
             </span>
           </div>
 
           <div className="min-h-0 flex-1 overflow-auto">
             {resumeRows.length > 0 ? (
-              <table className="w-full min-w-[920px] table-fixed text-left">
+              <table className="w-full min-w-[980px] table-fixed text-left">
                 <thead className="sticky top-0 z-10 border-b border-border bg-card/95 backdrop-blur-sm">
                   <tr className="text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
                     <th className="w-12 px-4 py-2.5 font-medium">#</th>
-                    <th className="w-[24%] px-3 py-2.5 font-medium">Candidate</th>
-                    <th className="w-[18%] px-3 py-2.5 font-medium">Resume</th>
+                    <th className="w-[22%] px-3 py-2.5 font-medium">Candidate</th>
+                    <th className="w-[16%] px-3 py-2.5 font-medium">Resume</th>
                     <th className="w-[14%] px-3 py-2.5 font-medium">Title</th>
-                    <th className="w-[12%] px-3 py-2.5 font-medium">JD fit</th>
+                    <th className="w-[10%] px-3 py-2.5 font-medium">JD fit</th>
                     <th className="w-[12%] px-3 py-2.5 font-medium">Status</th>
                     <th className="w-[10%] px-3 py-2.5 font-medium">Uploaded</th>
-                    <th className="w-[10%] px-3 py-2.5 font-medium text-right">Actions</th>
+                    <th className="w-[168px] px-3 py-2.5 pr-4 font-medium text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -699,18 +791,22 @@ export function JobResumesPage() {
                       scoring &&
                       scoringCandidateId != null &&
                       scoringCandidateId === resume.candidate_id
+                    const rowScheduling = schedulingCandidateId === resume.candidate_id
                     const displayRank = resume.match_rank ?? index + 1
+                    const canSchedule = Boolean(
+                      canWrite && resume.candidate_id && isScoreable(resume) && jdReady,
+                    )
                     return (
                       <tr
                         key={resume.document_id}
                         className="group border-b border-border/70 transition-colors duration-150 last:border-b-0 hover:bg-muted/40"
                       >
-                        <td className="px-4 py-3.5 align-middle">
+                        <td className="px-4 py-3 align-middle">
                           <span className="text-xs font-medium tabular-nums text-muted-foreground">
                             {String(displayRank).padStart(2, '0')}
                           </span>
                         </td>
-                        <td className="px-3 py-3.5 align-middle">
+                        <td className="px-3 py-3 align-middle">
                           <div className="flex min-w-0 items-center gap-3">
                             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-foreground transition-transform duration-200 group-hover:scale-[1.04]">
                               <UserRound className="h-4 w-4" />
@@ -725,7 +821,7 @@ export function JobResumesPage() {
                             </div>
                           </div>
                         </td>
-                        <td className="px-3 py-3.5 align-middle">
+                        <td className="px-3 py-3 align-middle">
                           <div className="flex min-w-0 items-start gap-2">
                             <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                             <div className="min-w-0">
@@ -738,12 +834,12 @@ export function JobResumesPage() {
                             </div>
                           </div>
                         </td>
-                        <td className="px-3 py-3.5 align-middle text-sm text-muted-foreground">
+                        <td className="px-3 py-3 align-middle text-sm text-muted-foreground">
                           <span className="line-clamp-2" title={resume.current_title || undefined}>
                             {resume.current_title || '—'}
                           </span>
                         </td>
-                        <td className="px-3 py-3.5 align-middle">
+                        <td className="px-3 py-3 align-middle">
                           {resume.match_score != null ? (
                             <button
                               type="button"
@@ -762,18 +858,18 @@ export function JobResumesPage() {
                             <FitScoreMark score={resume.match_score} />
                           )}
                         </td>
-                        <td className="px-3 py-3.5 align-middle">{resumeStatus(resume)}</td>
-                        <td className="px-3 py-3.5 align-middle text-sm whitespace-nowrap text-muted-foreground">
+                        <td className="px-3 py-3 align-middle">{resumeStatus(resume)}</td>
+                        <td className="px-3 py-3 align-middle text-sm whitespace-nowrap text-muted-foreground">
                           {formatDate(resume.created_at)}
                         </td>
-                        <td className="px-3 py-3.5 align-middle">
+                        <td className="px-3 py-3 pr-4 align-middle">
                           <div className="flex justify-end">
-                            <div className="inline-flex items-center rounded-md border border-border bg-background p-0.5 opacity-70 transition-opacity group-hover:opacity-100">
+                            <div className="inline-flex h-8 items-center rounded-md border border-border bg-card p-0.5 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
                               <Button
                                 type="button"
                                 variant="ghost"
                                 size="icon"
-                                className="h-7 w-7"
+                                className="h-7 w-7 shrink-0 rounded-[5px]"
                                 title="Preview CV"
                                 onClick={() => setCvPreviewDocumentId(resume.document_id)}
                               >
@@ -784,7 +880,7 @@ export function JobResumesPage() {
                                   type="button"
                                   variant="ghost"
                                   size="icon"
-                                  className="h-7 w-7"
+                                  className="h-7 w-7 shrink-0 rounded-[5px]"
                                   disabled={scoring || busy || !jdReady}
                                   title={
                                     resume.match_score != null
@@ -804,6 +900,35 @@ export function JobResumesPage() {
                                     <RefreshCcw className="h-3.5 w-3.5" />
                                   )}
                                 </Button>
+                              ) : null}
+                              {canWrite && resume.candidate_id ? (
+                                <>
+                                  <span
+                                    className="mx-0.5 h-4 w-px shrink-0 bg-border"
+                                    aria-hidden
+                                  />
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    className="h-7 shrink-0 gap-1.5 rounded-[5px] px-2.5 text-[11px] font-medium"
+                                    disabled={busy || !canSchedule || rowScheduling}
+                                    title={
+                                      !jdReady
+                                        ? 'JD must be ready before scheduling'
+                                        : !isScoreable(resume)
+                                          ? 'CV text is required before scheduling'
+                                          : 'Schedule interview with this job and candidate'
+                                    }
+                                    onClick={() => void scheduleInterviewFromResume(resume)}
+                                  >
+                                    {rowScheduling ? (
+                                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                    ) : (
+                                      <CalendarPlus className="h-3.5 w-3.5" />
+                                    )}
+                                    Schedule
+                                  </Button>
+                                </>
                               ) : null}
                             </div>
                           </div>
