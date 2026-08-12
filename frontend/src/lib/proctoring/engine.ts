@@ -20,7 +20,6 @@ import type {
   CodingProctorEventInput,
   CodingProctorSeverity,
   CodingProctorStartResult,
-  CodingProctorSummary,
 } from '@/types/api'
 import { playProctorClip, stopProctorAudio, unlockProctorAudio } from './audio'
 import type {
@@ -159,7 +158,6 @@ export class CodingProctorEngine {
   private lastEmitted = new Map<string, number>()
   private lastViolationAt = new Map<string, number>()
   private lastSecondDisplayActionAt = 0
-  private lockUntilMs = 0
   private finalLockStarted = false
   private forceSubmitFired = false
   private destroyed = false
@@ -466,7 +464,6 @@ export class CodingProctorEngine {
     this.finalLockStarted = true
     this.clearTabAwayTimers()
     this.clearFaceMissingTimer()
-    this.lockUntilMs = 0
 
     playProctorClip('auto-submit')
     this.enqueue('session_submitted', 'critical', {
@@ -498,7 +495,6 @@ export class CodingProctorEngine {
       window.clearInterval(this.lockTimer)
       this.lockTimer = null
     }
-    this.lockUntilMs = 0
     this.setState({
       screenLocked: true,
       finalSubmitPending: false,
