@@ -233,7 +233,8 @@ export interface SubmitFeedbackResponse {
   message?: string
 }
 
-export type UserRole = 'admin' | 'recruiter' | 'viewer'
+export type UserRole = 'admin' | 'recruiter' | 'viewer' | 'platform_admin'
+export type TenantUserRole = 'admin' | 'recruiter' | 'viewer'
 
 export interface AuthUser {
   id: string
@@ -244,6 +245,72 @@ export interface AuthUser {
   is_active: boolean
   last_login_at?: string | null
   created_at?: string
+}
+
+export type AccessRequestStatus = 'pending' | 'granted' | 'rejected'
+
+export interface AccessRequest {
+  id: string
+  company_name: string
+  contact_name: string
+  email: string
+  phone?: string | null
+  message?: string | null
+  status: AccessRequestStatus
+  granted_org_id?: string | null
+  granted_at?: string | null
+  created_at: string
+}
+
+export interface AccessRequestPublicResult {
+  ok: boolean
+  message: string
+}
+
+export interface GrantAccessResult {
+  request: AccessRequest
+  organization_name: string
+  login_email: string
+}
+
+export interface AdminOrganization {
+  id: string
+  name: string
+  slug: string
+  is_active: boolean
+  is_platform: boolean
+  created_at: string
+  user_count: number
+}
+
+export interface AdminOrganizationDetail {
+  organization: AdminOrganization
+  users: AuthUser[]
+}
+
+export interface AdminOverview {
+  pending_requests: number
+  customer_orgs: number
+  active_orgs: number
+  inactive_orgs: number
+  tenant_users: number
+  operators: number
+  interviews_this_month: number
+  requests_by_status: {
+    pending: number
+    granted: number
+    rejected: number
+  }
+  users_by_role: {
+    admin: number
+    recruiter: number
+    viewer: number
+  }
+  interviews_by_month: Array<{
+    month: string
+    label: string
+    count: number
+  }>
 }
 
 export interface Candidate {
@@ -478,12 +545,12 @@ export interface CreateUserRequest {
   full_name: string
   email: string
   password: string
-  role: UserRole
+  role: TenantUserRole
 }
 
 export interface UpdateUserRequest {
   full_name?: string
-  role?: UserRole
+  role?: TenantUserRole
   is_active?: boolean
   password?: string
 }

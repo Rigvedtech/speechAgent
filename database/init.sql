@@ -40,5 +40,7 @@
 \ir 031_coding_multi_task_times.sql
 \ir 032_coding_proctoring.sql
 \ir 033_coding_shared_bank.sql
+\ir 034_access_requests.sql
+\ir 035_platform_admin.sql
 
 \echo 'Schema applied successfully.'

@@ -4,10 +4,12 @@ import { Link as RouterLink } from 'react-router-dom'
 /** Marketing / Vercel build — landing page only (no /login in this bundle). */
 export const LANDING_ONLY = import.meta.env.VITE_LANDING_ONLY === 'true'
 
-/** External site for Get Started when LANDING_ONLY=true */
-export const PRABHAT_SITE_URL =
-  (import.meta.env.VITE_GET_STARTED_URL || 'https://rigvedtech.com').trim() ||
-  'https://rigvedtech.com'
+/** Full app request-access URL when the marketing site is hosted separately. */
+export const PRABHAT_APP_ACCESS_URL =
+  (import.meta.env.VITE_GET_STARTED_URL || 'https://prabhat.rigvedtech.com/request-access').trim() ||
+  'https://prabhat.rigvedtech.com/request-access'
+
+export const PRABHAT_APP_LOGIN_URL = 'https://prabhat.rigvedtech.com/login'
 
 /** @deprecated Prefer GetStartedLink; kept for any contact deep-links */
 export const PRABHAT_CONTACT_URL = 'https://rigvedtech.com/contact'
@@ -18,8 +20,8 @@ type GetStartedLinkProps = {
 }
 
 /**
- * LANDING_ONLY=true  → https://rigvedtech.com (or VITE_GET_STARTED_URL)
- * LANDING_ONLY=false → /login (full app)
+ * LANDING_ONLY=true  → full-app request-access (VM)
+ * LANDING_ONLY=false → /request-access on this origin
  */
 export function GetStartedLink({
   className,
@@ -27,19 +29,14 @@ export function GetStartedLink({
 }: GetStartedLinkProps): ReactElement {
   if (LANDING_ONLY) {
     return (
-      <a
-        href={PRABHAT_SITE_URL}
-        target="_blank"
-        rel="noopener noreferrer"
-        className={className}
-      >
+      <a href={PRABHAT_APP_ACCESS_URL} className={className}>
         {children}
       </a>
     )
   }
 
   return (
-    <RouterLink to="/login" className={className}>
+    <RouterLink to="/request-access" className={className}>
       {children}
     </RouterLink>
   )

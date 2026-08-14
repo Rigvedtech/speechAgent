@@ -363,6 +363,13 @@ JWT_EXPIRE_MINUTES = _env_int(
 )
 JWT_ISSUER = _env_str("JWT_ISSUER", "speechagent")
 JWT_AUDIENCE = _env_str("JWT_AUDIENCE", "speechagent-api")
+# Platform operators: users.role = platform_admin (seeded). Optional extra allow-list:
+# PLATFORM_ADMIN_EMAILS=pranay@rigvedtech.com
+PLATFORM_ADMIN_EMAILS = {
+    e.strip().lower()
+    for e in _env_str("PLATFORM_ADMIN_EMAILS", "").split(",")
+    if e.strip()
+}
 # Comma-separated browser origins only (no hardcoded defaults). Example:
 # CORS_ORIGINS=http://20.244.7.67,http://localhost:5173
 CORS_ORIGINS = [

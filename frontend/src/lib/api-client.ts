@@ -23,7 +23,7 @@ function authHeaders(): Record<string, string> {
 function handleUnauthorized(path: string, status: number) {
   if (status !== 401) return
   // Don't clear session while trying to log in / register
-  if (path.startsWith('/api/auth/login') || path.startsWith('/api/auth/register-org')) {
+  if (path.startsWith('/api/auth/login')) {
     return
   }
   if (!getAccessToken()) return
