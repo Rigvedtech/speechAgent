@@ -107,6 +107,28 @@
   --app-scrollbar-track: #0a0a0a;
 }
 
+/* Login / request-access stay light even when html has .dark */
+.auth-split {
+  color-scheme: light;
+  --app-background: #ffffff;
+  --app-foreground: #0a0a0a;
+  --app-card: #ffffff;
+  --app-card-foreground: #0a0a0a;
+  --app-muted: #f0f0f0;
+  --app-muted-foreground: #737373;
+  --app-border: rgba(0, 0, 0, 0.1);
+  --app-input: rgba(0, 0, 0, 0.12);
+  --app-primary: #0a0a0a;
+  --app-primary-foreground: #ffffff;
+  --app-destructive: #dc2626;
+  --app-destructive-foreground: #ffffff;
+  --app-warning: #a16207;
+  --app-success: #15803d;
+  --app-accent: #f0f0f0;
+  --app-accent-foreground: #0a0a0a;
+  --app-ring: rgba(0, 0, 0, 0.2);
+}
+
 @layer base {
   * {
     @apply border-border;

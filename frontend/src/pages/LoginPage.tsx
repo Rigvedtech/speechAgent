@@ -10,7 +10,7 @@ import { Input } from '@/components/ui/input'
 import { PasswordInput } from '@/components/ui/password-input'
 import { Label } from '@/components/ui/label'
 import { FlashAlert } from '@/components/ui/flash-alert'
-import { AUTH_CONTROL_CLASS, AUTH_LABEL_CLASS, AuthSplitLayout } from '@/layouts/AuthSplitLayout'
+import { AUTH_BUTTON_CLASS, AUTH_CONTROL_CLASS, AUTH_FOOTER_CLASS, AUTH_LABEL_CLASS, AUTH_LINK_CLASS, AUTH_SUB_CLASS, AUTH_TITLE_CLASS, AuthSplitLayout } from '@/layouts/AuthSplitLayout'
 import { clearInterviewDraft } from '@/lib/draft-store'
 
 export function LoginPage() {
@@ -48,10 +48,10 @@ export function LoginPage() {
   return (
     <AuthSplitLayout>
       <div>
-        <h1 className="font-serif text-[2rem] font-medium leading-tight tracking-tight">
+        <h1 className={AUTH_TITLE_CLASS}>
           Sign in to your account
         </h1>
-        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+        <p className={AUTH_SUB_CLASS}>
           Use your organization account to schedule interviews.
         </p>
 
@@ -101,16 +101,16 @@ export function LoginPage() {
           </div>
           <Button
             type="submit"
-            className="h-12 w-full rounded-xl text-[15px]"
+            className={AUTH_BUTTON_CLASS}
             disabled={mutation.isPending}
           >
             {mutation.isPending ? 'Signing in…' : 'Sign in'}
           </Button>
         </form>
 
-        <p className="mt-8 text-sm text-muted-foreground">
+        <p className={AUTH_FOOTER_CLASS}>
           Need access?{' '}
-          <Link to="/request-access" className="font-medium text-foreground underline-offset-4 hover:underline">
+          <Link to="/request-access" className={AUTH_LINK_CLASS}>
             Request access
           </Link>
         </p>
