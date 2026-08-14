@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { FlashAlert } from '@/components/ui/flash-alert'
-import { AUTH_CONTROL_CLASS, AUTH_LABEL_CLASS, AuthSplitLayout } from '@/layouts/AuthSplitLayout'
+import { AUTH_BUTTON_CLASS, AUTH_CONTROL_CLASS, AUTH_FOOTER_CLASS, AUTH_LABEL_CLASS, AUTH_LINK_CLASS, AUTH_SUB_CLASS, AUTH_TITLE_CLASS, AuthSplitLayout } from '@/layouts/AuthSplitLayout'
 
 export function RequestAccessPage() {
   const [companyName, setCompanyName] = useState('')
@@ -44,10 +44,10 @@ export function RequestAccessPage() {
   return (
     <AuthSplitLayout>
       <div>
-        <h1 className="font-serif text-[2rem] font-medium leading-tight tracking-tight">
+        <h1 className={AUTH_TITLE_CLASS}>
           Request access
         </h1>
-        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+        <p className={AUTH_SUB_CLASS}>
           Access is granted by our team. Submit your details to request a login.
         </p>
 
@@ -59,11 +59,11 @@ export function RequestAccessPage() {
 
         {done ? (
           <div className="mt-8 space-y-4">
-            <p className="text-sm leading-relaxed text-muted-foreground">
+            <p className="text-sm leading-relaxed text-neutral-500">
               Thanks. If this request is new, our team will review it and email you if access is
               granted. You cannot sign in until then.
             </p>
-            <Button asChild className="h-12 w-full rounded-xl text-[15px]">
+            <Button asChild className={AUTH_BUTTON_CLASS}>
               <Link to="/login">Back to sign in</Link>
             </Button>
           </div>
@@ -151,7 +151,7 @@ export function RequestAccessPage() {
             </div>
             <Button
               type="submit"
-              className="h-12 w-full rounded-xl text-[15px]"
+              className={AUTH_BUTTON_CLASS}
               disabled={mutation.isPending}
             >
               {mutation.isPending ? 'Submitting…' : 'Request access'}
@@ -160,9 +160,9 @@ export function RequestAccessPage() {
         )}
 
         {!done ? (
-          <p className="mt-8 text-sm text-muted-foreground">
+          <p className={AUTH_FOOTER_CLASS}>
             Already approved?{' '}
-            <Link to="/login" className="font-medium text-foreground underline-offset-4 hover:underline">
+            <Link to="/login" className={AUTH_LINK_CLASS}>
               Sign in
             </Link>
           </p>
