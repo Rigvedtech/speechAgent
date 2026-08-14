@@ -21,6 +21,7 @@ from auth.security import (
     validate_password_strength,
 )
 from db.models import AccessRequest, User
+from services.graph_mail import notify_access_request
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,13 @@ def submit_access_request(
     db.add(row)
     db.commit()
     logger.info("[access] request queued company=%s email=%s", row.company_name, row.email)
+    notify_access_request(
+        company_name=row.company_name,
+        contact_name=row.contact_name,
+        email=row.email,
+        phone=row.phone,
+        message=row.message,
+    )
     return AccessRequestPublicResult(message=_SUCCESS_DETAIL)
 
 

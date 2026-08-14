@@ -370,6 +370,20 @@ PLATFORM_ADMIN_EMAILS = {
     for e in _env_str("PLATFORM_ADMIN_EMAILS", "").split(",")
     if e.strip()
 }
+# Microsoft Graph (app-only) — notify ops when a public access request is saved.
+# Token: POST /{tenant}/oauth2/v2.0/token  grant_type=client_credentials
+#        scope=https://graph.microsoft.com/.default
+# Mail:  POST /users/{GRAPH_SENDER}/sendMail  (Mail.Send application permission)
+# Env names CLIENT_ID / CLIENT_SECRET / TENANT_ID are accepted as aliases.
+GRAPH_TENANT_ID = _env_str("GRAPH_TENANT_ID", "") or _env_str("TENANT_ID", "")
+GRAPH_CLIENT_ID = _env_str("GRAPH_CLIENT_ID", "") or _env_str("CLIENT_ID", "")
+GRAPH_CLIENT_SECRET = _env_str("GRAPH_CLIENT_SECRET", "") or _env_str("CLIENT_SECRET", "")
+GRAPH_SENDER = _env_str("GRAPH_SENDER", "").lower()
+ACCESS_NOTIFY_TO = [
+    e.strip().lower()
+    for e in _env_str("ACCESS_NOTIFY_TO", "").split(",")
+    if e.strip()
+]
 # Comma-separated browser origins only (no hardcoded defaults). Example:
 # CORS_ORIGINS=http://20.244.7.67,http://localhost:5173
 CORS_ORIGINS = [
