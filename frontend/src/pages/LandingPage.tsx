@@ -2,10 +2,13 @@ import {
   ArrowRight,
   BarChart3,
   ChevronDown,
+  Code2,
+  FileSearch,
   MessageCircleQuestion,
   Mic,
   Sparkles,
   Target,
+  Upload,
   Video,
 } from 'lucide-react'
 import { AnimatedWaveform } from '@/components/landing/AnimatedWaveform'
@@ -69,6 +72,14 @@ const FAQ_ITEMS = [
   {
     q: 'What languages are supported?',
     a: 'English and Hinglish for live voice interviews.',
+  },
+  {
+    q: 'Can I add a coding assessment?',
+    a: 'Yes. Attach a timed coding round to a role. Candidates write and run code in the browser, with proctoring while they work. You review results next to the voice interview report.',
+  },
+  {
+    q: 'How does CV scoring work?',
+    a: 'Upload the job description and resumes — or pull them from your ATS. Prabhat scores each CV against the role so you can shortlist before you schedule a voice interview.',
   },
 ] as const
 
@@ -244,6 +255,30 @@ export function LandingPage() {
                 icon={Video}
                 title="Live session visibility"
                 description="Track bot status, active meetings, and session progress from the recruiter dashboard while the interview runs."
+              />
+            </Reveal>
+            <Reveal delay={0} className="h-full [&>*]:h-full">
+              <FeatureCard
+                accent="blue"
+                icon={Code2}
+                title="Coding assessment"
+                description="Attach a timed coding round to the screen. Candidates code in the browser, with language choice and proctoring while they work."
+              />
+            </Reveal>
+            <Reveal delay={80} className="h-full [&>*]:h-full">
+              <FeatureCard
+                accent="violet"
+                icon={FileSearch}
+                title="CV scoring"
+                description="Score each resume against the job description so recruiters can shortlist before the voice interview."
+              />
+            </Reveal>
+            <Reveal delay={160} className="h-full [&>*]:h-full">
+              <FeatureCard
+                accent="amber"
+                icon={Upload}
+                title="ATS & bulk roles"
+                description="Import jobs and candidates from your ATS, or bulk-upload requirements when you are filling many roles at once."
               />
             </Reveal>
           </div>
