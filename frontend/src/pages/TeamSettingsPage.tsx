@@ -7,7 +7,7 @@ import { useAuth } from '@/hooks/useAuth'
 import { ApiError } from '@/lib/api-client'
 import { formatApiError } from '@/lib/error-messages'
 import { queryKeys } from '@/lib/query-keys'
-import type { AuthUser, UserRole } from '@/types/api'
+import type { AuthUser, TenantUserRole } from '@/types/api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { PasswordInput } from '@/components/ui/password-input'
@@ -38,7 +38,7 @@ const emptyForm = {
   fullName: '',
   email: '',
   password: '',
-  role: 'recruiter' as UserRole,
+  role: 'recruiter' as TenantUserRole,
 }
 
 export function TeamSettingsPage() {
@@ -87,7 +87,7 @@ export function TeamSettingsPage() {
       fullName: u.full_name,
       email: u.email,
       password: '',
-      role: u.role,
+      role: u.role === 'platform_admin' ? 'admin' : u.role,
     })
     setFormError(null)
     setFormOk(null)
@@ -363,7 +363,7 @@ export function TeamSettingsPage() {
               <Label htmlFor="team-role">Role</Label>
               <Select
                 value={form.role}
-                onValueChange={(v) => setForm((f) => ({ ...f, role: v as UserRole }))}
+                onValueChange={(v) => setForm((f) => ({ ...f, role: v as TenantUserRole }))}
               >
                 <SelectTrigger id="team-role" className="mt-1.5">
                   <SelectValue />

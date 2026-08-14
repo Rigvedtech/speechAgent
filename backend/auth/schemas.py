@@ -8,7 +8,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
-UserRole = Literal["admin", "recruiter", "viewer"]
+UserRole = Literal["admin", "recruiter", "viewer", "platform_admin"]
+TenantUserRole = Literal["admin", "recruiter", "viewer"]
 
 
 class RegisterOrgRequest(BaseModel):
@@ -68,18 +69,20 @@ class AuthResponse(BaseModel):
     token_type: str = "bearer"
     user: UserOut
     organization: OrganizationOut
+    is_platform_admin: bool = False
 
 
 class MeResponse(BaseModel):
     user: UserOut
     organization: OrganizationOut
+    is_platform_admin: bool = False
 
 
 class CreateUserRequest(BaseModel):
     full_name: str = Field(..., min_length=2, max_length=255)
     email: EmailStr
     password: str = Field(..., min_length=8, max_length=128)
-    role: UserRole = "recruiter"
+    role: TenantUserRole = "recruiter"
 
     @field_validator("email")
     @classmethod
@@ -94,7 +97,7 @@ class CreateUserRequest(BaseModel):
 
 class UpdateUserRequest(BaseModel):
     full_name: Optional[str] = Field(None, min_length=2, max_length=255)
-    role: Optional[UserRole] = None
+    role: Optional[TenantUserRole] = None
     is_active: Optional[bool] = None
     password: Optional[str] = Field(None, min_length=8, max_length=128)
 

@@ -1,9 +1,10 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom'
 import { AppShell } from '@/layouts/AppShell'
+import { AdminShell } from '@/layouts/AdminShell'
 import { MarketingShell } from '@/layouts/MarketingShell'
 import { PublicShell } from '@/layouts/PublicShell'
 import { CodingShell } from '@/layouts/CodingShell'
-import { RequireAuth } from '@/components/auth/RequireAuth'
+import { RequireAuth, RequirePlatformAdmin, RequireTenant } from '@/components/auth/RequireAuth'
 import { LandingPage } from '@/pages/LandingPage'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { NewInterviewPage } from '@/pages/NewInterviewPage'
@@ -14,6 +15,12 @@ import { ReportsHistoryPage } from '@/pages/ReportsHistoryPage'
 import { CandidateFeedbackPage } from '@/pages/CandidateFeedbackPage'
 import { LoginPage } from '@/pages/LoginPage'
 import { RegisterOrgPage } from '@/pages/RegisterOrgPage'
+import { RequestAccessPage } from '@/pages/RequestAccessPage'
+import { AccessRequestsPage } from '@/pages/AccessRequestsPage'
+import { AdminOverviewPage } from '@/pages/AdminOverviewPage'
+import { AdminOperatorsPage } from '@/pages/AdminOperatorsPage'
+import { AdminOrganizationsPage } from '@/pages/AdminOrganizationsPage'
+import { AdminOrganizationDetailPage } from '@/pages/AdminOrganizationDetailPage'
 import { TeamSettingsPage } from '@/pages/TeamSettingsPage'
 import { AtsSettingsPage } from '@/pages/AtsSettingsPage'
 import { AtsBrowsePage } from '@/pages/AtsBrowsePage'
@@ -29,6 +36,7 @@ export const router = createBrowserRouter([
     children: [{ index: true, element: <LandingPage /> }],
   },
   { path: '/login', element: <LoginPage /> },
+  { path: '/request-access', element: <RequestAccessPage /> },
   { path: '/register', element: <RegisterOrgPage /> },
   {
     path: '/feedback',
@@ -38,7 +46,6 @@ export const router = createBrowserRouter([
       { path: ':botId', element: <CandidateFeedbackPage /> },
     ],
   },
-  // Candidate coding link — no login, no recruiter navbar
   {
     path: '/c',
     element: <CodingShell />,
@@ -51,27 +58,48 @@ export const router = createBrowserRouter([
     element: <RequireAuth />,
     children: [
       {
-        element: <AppShell />,
+        path: 'admin',
+        element: <RequirePlatformAdmin />,
         children: [
-          { path: 'dashboard', element: <DashboardPage /> },
-          { path: 'interviews/new', element: <NewInterviewPage /> },
-          // Must be before interviews/:botId so "scheduled" is not treated as a bot id
-          { path: 'interviews/scheduled', element: <ScheduledInterviewsPage /> },
-          { path: 'interviews/by-id/:interviewId/coding', element: <CodingPage /> },
-          { path: 'interviews/:botId/coding', element: <CodingPage /> },
-          { path: 'interviews/:botId/report', element: <ReportPage /> },
-          { path: 'interviews/:botId', element: <LiveSessionPage /> },
-          { path: 'coding/demo/:demoToken', element: <CodingPage /> },
-          { path: 'coding/demo', element: <CodingPage /> },
-          { path: 'coding', element: <CodingDashboardPage /> },
-          { path: 'reports', element: <ReportsHistoryPage /> },
-          { path: 'ats/jobs', element: <AtsBrowsePage /> },
-          { path: 'ats/jobs/:requestId', element: <AtsBrowsePage /> },
-          { path: 'jobs/bulk-upload', element: <BulkUploadPage /> },
-          { path: 'jobs/:jobId/resumes', element: <JobResumesPage /> },
-          { path: 'settings/team', element: <TeamSettingsPage /> },
-          { path: 'settings/ats', element: <AtsSettingsPage /> },
-          { path: '*', element: <Navigate to="/dashboard" replace /> },
+          {
+            element: <AdminShell />,
+            children: [
+              { index: true, element: <AdminOverviewPage /> },
+              { path: 'requests', element: <AccessRequestsPage /> },
+              { path: 'organizations', element: <AdminOrganizationsPage /> },
+              { path: 'organizations/:orgId', element: <AdminOrganizationDetailPage /> },
+              { path: 'operators', element: <AdminOperatorsPage /> },
+            ],
+          },
+        ],
+      },
+      {
+        element: <RequireTenant />,
+        children: [
+          {
+            element: <AppShell />,
+            children: [
+              { path: 'dashboard', element: <DashboardPage /> },
+              { path: 'interviews/new', element: <NewInterviewPage /> },
+              { path: 'interviews/scheduled', element: <ScheduledInterviewsPage /> },
+              { path: 'interviews/by-id/:interviewId/coding', element: <CodingPage /> },
+              { path: 'interviews/:botId/coding', element: <CodingPage /> },
+              { path: 'interviews/:botId/report', element: <ReportPage /> },
+              { path: 'interviews/:botId', element: <LiveSessionPage /> },
+              { path: 'coding/demo/:demoToken', element: <CodingPage /> },
+              { path: 'coding/demo', element: <CodingPage /> },
+              { path: 'coding', element: <CodingDashboardPage /> },
+              { path: 'reports', element: <ReportsHistoryPage /> },
+              { path: 'ats/jobs', element: <AtsBrowsePage /> },
+              { path: 'ats/jobs/:requestId', element: <AtsBrowsePage /> },
+              { path: 'jobs/bulk-upload', element: <BulkUploadPage /> },
+              { path: 'jobs/:jobId/resumes', element: <JobResumesPage /> },
+              { path: 'settings/team', element: <TeamSettingsPage /> },
+              { path: 'settings/access-requests', element: <Navigate to="/admin/requests" replace /> },
+              { path: 'settings/ats', element: <AtsSettingsPage /> },
+              { path: '*', element: <Navigate to="/dashboard" replace /> },
+            ],
+          },
         ],
       },
     ],

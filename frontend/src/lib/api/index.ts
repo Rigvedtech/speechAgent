@@ -64,6 +64,12 @@ import type {
   CodingProctorFrameResult,
   CodingProctorStartResult,
   CodingProctorSummary,
+  AccessRequest,
+  AccessRequestPublicResult,
+  GrantAccessResult,
+  AdminOrganization,
+  AdminOrganizationDetail,
+  AdminOverview,
 } from '@/types/api'
 
 export function joinMeeting(body: JoinMeetingRequest) {
@@ -134,19 +140,6 @@ export function submitFeedback(botId: string, body: FeedbackFormValues) {
   })
 }
 
-export function registerOrg(body: {
-  organization_name: string
-  organization_slug?: string
-  full_name: string
-  email: string
-  password: string
-}) {
-  return request<AuthSession>('/api/auth/register-org', {
-    method: 'POST',
-    body: JSON.stringify(body),
-  })
-}
-
 export function login(body: { email: string; password: string }) {
   return request<AuthSession>('/api/auth/login', {
     method: 'POST',
@@ -154,8 +147,124 @@ export function login(body: { email: string; password: string }) {
   })
 }
 
+export function submitAccessRequest(body: {
+  company_name: string
+  contact_name: string
+  email: string
+  phone: string
+  message?: string
+  website?: string
+}) {
+  return request<AccessRequestPublicResult>('/api/access-requests', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function listAccessRequests(status?: 'pending' | 'granted' | 'rejected') {
+  const qs = status ? `?status_filter=${encodeURIComponent(status)}` : ''
+  return request<AccessRequest[]>(`/api/access-requests${qs}`)
+}
+
+export function grantAccessRequest(requestId: string, body: { password: string; organization_slug?: string }) {
+  return request<GrantAccessResult>(`/api/access-requests/${requestId}/grant`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function rejectAccessRequest(requestId: string) {
+  return request<AccessRequest>(`/api/access-requests/${requestId}/reject`, {
+    method: 'POST',
+  })
+}
+
+export function listAdminOrganizations() {
+  return request<AdminOrganization[]>('/api/admin/organizations')
+}
+
+export function getAdminOrganization(orgId: string) {
+  return request<AdminOrganizationDetail>(`/api/admin/organizations/${orgId}`)
+}
+
+export function patchAdminOrganization(orgId: string, body: { is_active?: boolean; name?: string }) {
+  return request<AdminOrganization>(`/api/admin/organizations/${orgId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export function createAdminOrgUser(
+  orgId: string,
+  body: { full_name: string; email: string; password: string; role: 'admin' | 'recruiter' | 'viewer' },
+) {
+  return request<AuthUser>(`/api/admin/organizations/${orgId}/users`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function patchAdminUser(
+  userId: string,
+  body: { full_name?: string; role?: 'admin' | 'recruiter' | 'viewer'; is_active?: boolean; password?: string },
+) {
+  return request<AuthUser>(`/api/admin/users/${userId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export function getAdminOverview() {
+  return request<AdminOverview>('/api/admin/overview')
+}
+
+export function createAdminOrganization(body: {
+  name: string
+  admin_full_name: string
+  admin_email: string
+  admin_password: string
+  organization_slug?: string
+}) {
+  return request<{ organization: AdminOrganization; login_email: string }>('/api/admin/organizations', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function listAdminOperators() {
+  return request<AuthUser[]>('/api/admin/operators')
+}
+
+export function createAdminOperator(body: { full_name: string; email: string; password: string }) {
+  return request<AuthUser>('/api/admin/operators', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function patchAdminOperator(
+  userId: string,
+  body: { full_name?: string; is_active?: boolean; password?: string },
+) {
+  return request<AuthUser>(`/api/admin/operators/${userId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(body),
+  })
+}
+
+export function changeAdminPassword(body: { current_password: string; new_password: string }) {
+  return request<{ ok: boolean }>('/api/admin/me/password', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
 export function getMe() {
-  return request<{ user: AuthUser; organization: AuthSession['organization'] }>('/api/auth/me')
+  return request<{
+    user: AuthUser
+    organization: AuthSession['organization']
+    is_platform_admin?: boolean
+  }>('/api/auth/me')
 }
 
 export function listUsers() {

@@ -93,12 +93,16 @@ else:
 # Phase 0–1: auth + candidates + job postings (requires DATABASE_URL)
 from auth.routes import router as auth_router
 from auth.routes import users_router
+from routers.access_requests import router as access_requests_router
+from routers.platform_admin import router as platform_admin_router
 from routers.candidates import router as candidates_router
 from routers.job_postings import router as job_postings_router
 from routers.extractions import router as extractions_router
 
 app.include_router(auth_router)
 app.include_router(users_router)
+app.include_router(access_requests_router)
+app.include_router(platform_admin_router)
 app.include_router(candidates_router)
 app.include_router(job_postings_router)
 app.include_router(extractions_router)

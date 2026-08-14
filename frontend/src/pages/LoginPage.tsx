@@ -5,13 +5,12 @@ import { login } from '@/lib/api'
 import { useAuth } from '@/hooks/useAuth'
 import { ApiError } from '@/lib/api-client'
 import { formatApiError } from '@/lib/error-messages'
-import { PrabhatBrand } from '@/components/brand/PrabhatBrand'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { PasswordInput } from '@/components/ui/password-input'
 import { Label } from '@/components/ui/label'
 import { FlashAlert } from '@/components/ui/flash-alert'
-import { Card, CardContent } from '@/components/ui/card'
+import { AUTH_CONTROL_CLASS, AUTH_LABEL_CLASS, AuthSplitLayout } from '@/layouts/AuthSplitLayout'
 import { clearInterviewDraft } from '@/lib/draft-store'
 
 export function LoginPage() {
@@ -35,7 +34,7 @@ export function LoginPage() {
       // Fresh session: never resume another user's in-progress schedule wizard.
       clearInterviewDraft()
       setSession(data)
-      navigate(from, { replace: true })
+      navigate(data.is_platform_admin ? '/admin' : from, { replace: true })
     },
     onError: (err) => {
       if (err instanceof ApiError) {
@@ -47,70 +46,75 @@ export function LoginPage() {
   })
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background px-4">
-      <Card className="w-full max-w-md border-border shadow-sm">
-        <CardContent className="space-y-6 p-6 sm:p-8">
-          <div className="space-y-2 text-center">
-            <div className="flex justify-center">
-              <PrabhatBrand />
-            </div>
-            <h1 className="text-xl font-semibold tracking-tight">Sign in</h1>
-            <p className="text-sm text-muted-foreground">
-              Use your organization account to schedule interviews.
-            </p>
+    <AuthSplitLayout>
+      <div>
+        <h1 className="font-serif text-[2rem] font-medium leading-tight tracking-tight">
+          Sign in to your account
+        </h1>
+        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+          Use your organization account to schedule interviews.
+        </p>
+
+        <FlashAlert
+          message={error}
+          onDismiss={() => setError(null)}
+          className="mt-6 border-destructive/30 bg-destructive/5 text-destructive"
+        />
+
+        <form
+          className="mt-8 space-y-5"
+          onSubmit={(e) => {
+            e.preventDefault()
+            setError(null)
+            mutation.mutate()
+          }}
+        >
+          <div className="space-y-2">
+            <Label htmlFor="email" className={AUTH_LABEL_CLASS}>
+              Email
+            </Label>
+            <Input
+              id="email"
+              type="email"
+              autoComplete="email"
+              placeholder="name@company.com"
+              className={AUTH_CONTROL_CLASS}
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+            />
           </div>
-
-          <FlashAlert
-            message={error}
-            onDismiss={() => setError(null)}
-            className="border-destructive/30 bg-destructive/5 text-destructive"
-          />
-
-          <form
-            className="space-y-4"
-            onSubmit={(e) => {
-              e.preventDefault()
-              setError(null)
-              mutation.mutate()
-            }}
+          <div className="space-y-2">
+            <Label htmlFor="password" className={AUTH_LABEL_CLASS}>
+              Password
+            </Label>
+            <PasswordInput
+              id="password"
+              autoComplete="current-password"
+              placeholder="Enter your password"
+              className={AUTH_CONTROL_CLASS}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              minLength={8}
+            />
+          </div>
+          <Button
+            type="submit"
+            className="h-12 w-full rounded-xl text-[15px]"
+            disabled={mutation.isPending}
           >
-            <div>
-              <Label htmlFor="email">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                autoComplete="email"
-                className="mt-1.5"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-              />
-            </div>
-            <div>
-              <Label htmlFor="password">Password</Label>
-              <PasswordInput
-                id="password"
-                autoComplete="current-password"
-                className="mt-1.5"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                minLength={8}
-              />
-            </div>
-            <Button type="submit" className="w-full" disabled={mutation.isPending}>
-              {mutation.isPending ? 'Signing in…' : 'Sign in'}
-            </Button>
-          </form>
+            {mutation.isPending ? 'Signing in…' : 'Sign in'}
+          </Button>
+        </form>
 
-          <p className="text-center text-sm text-muted-foreground">
-            New company?{' '}
-            <Link to="/register" className="font-medium text-foreground underline-offset-4 hover:underline">
-              Register organization
-            </Link>
-          </p>
-        </CardContent>
-      </Card>
-    </div>
+        <p className="mt-8 text-sm text-muted-foreground">
+          Need access?{' '}
+          <Link to="/request-access" className="font-medium text-foreground underline-offset-4 hover:underline">
+            Request access
+          </Link>
+        </p>
+      </div>
+    </AuthSplitLayout>
   )
 }

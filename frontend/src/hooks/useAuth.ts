@@ -31,6 +31,7 @@ export function useAuth() {
     organization: session?.organization ?? null,
     isAuthenticated: Boolean(session?.access_token),
     isAdmin: session?.user?.role === 'admin',
+    isPlatformAdmin: Boolean(session?.is_platform_admin) || session?.user?.role === 'platform_admin',
     setSession,
     logout,
   }

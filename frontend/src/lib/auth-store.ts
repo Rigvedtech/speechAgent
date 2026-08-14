@@ -5,7 +5,7 @@ export interface AuthUser {
   organization_id: string
   full_name: string
   email: string
-  role: 'admin' | 'recruiter' | 'viewer'
+  role: 'admin' | 'recruiter' | 'viewer' | 'platform_admin'
   is_active: boolean
 }
 
@@ -22,6 +22,7 @@ export interface AuthSession {
   access_token: string
   user: AuthUser
   organization: AuthOrganization
+  is_platform_admin?: boolean
 }
 
 const AUTH_KEY = 'speechagent:auth:v1'

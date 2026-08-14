@@ -4,7 +4,7 @@ import { ArrowRight, Moon, Sun } from 'lucide-react'
 import { useTheme } from '@/hooks/useTheme'
 import { PrabhatBrand } from '@/components/brand/PrabhatBrand'
 import { Button } from '@/components/ui/button'
-import { GetStartedLink } from '@/lib/marketing'
+import { GetStartedLink, LANDING_ONLY, PRABHAT_APP_LOGIN_URL } from '@/lib/marketing'
 import { cn } from '@/lib/utils'
 
 const navLinks = [
@@ -68,6 +68,15 @@ export function MarketingShell() {
             >
               {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </Button>
+            {LANDING_ONLY ? (
+              <Button asChild variant="ghost" size="sm">
+                <a href={PRABHAT_APP_LOGIN_URL}>Sign in</a>
+              </Button>
+            ) : (
+              <Button asChild variant="ghost" size="sm">
+                <Link to="/login">Sign in</Link>
+              </Button>
+            )}
             <Button asChild size="sm" className="group">
               <GetStartedLink>
                 Get started

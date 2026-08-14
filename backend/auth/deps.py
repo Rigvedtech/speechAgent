@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from auth.security import decode_access_token
 from db.models import User
 from db.session import get_session_factory, is_db_configured
+import config as app_config
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -79,6 +80,26 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin role required",
+        )
+    return user
+
+
+def is_platform_admin_user(user: User) -> bool:
+    """True for DB role platform_admin, or legacy PLATFORM_ADMIN_EMAILS allow-list."""
+    if not user.is_active:
+        return False
+    if user.role == "platform_admin":
+        return True
+    if user.role == "admin" and user.email.lower() in app_config.PLATFORM_ADMIN_EMAILS:
+        return True
+    return False
+
+
+def require_platform_admin(user: User = Depends(get_current_user)) -> User:
+    if not is_platform_admin_user(user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Platform admin access required",
         )
     return user
 
