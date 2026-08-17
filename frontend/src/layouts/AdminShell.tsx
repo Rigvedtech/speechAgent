@@ -39,6 +39,7 @@ export function AdminShell() {
   const { theme, toggleTheme } = useTheme()
   const { user, logout } = useAuth()
   const { title, subtitle } = resolveHeader(location.pathname)
+  const isOverview = location.pathname === '/admin' || location.pathname === '/admin/'
 
   return (
     <div className="flex min-h-screen bg-background">
@@ -120,8 +121,18 @@ export function AdminShell() {
             )}
           </button>
         </header>
-        <main className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-          <div className="mx-auto flex min-h-full w-full max-w-6xl flex-col">
+        <main
+          className={cn(
+            'min-h-0 flex-1 px-6',
+            isOverview ? 'overflow-hidden py-4' : 'overflow-y-auto py-5',
+          )}
+        >
+          <div
+            className={cn(
+              'mx-auto flex w-full max-w-6xl flex-col',
+              isOverview ? 'h-full min-h-0' : 'min-h-full',
+            )}
+          >
             <Outlet />
           </div>
         </main>

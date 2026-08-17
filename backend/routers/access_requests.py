@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
-import re
 from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import UUID
+
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -14,14 +15,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from auth.deps import get_db, require_platform_admin
+from auth.password_setup import issue_invite_token, public_frontend_origin
 from auth.provisioning import create_organization_with_admin
 from auth.security import (
     client_ip,
     enforce_access_request_rate_limit,
-    validate_password_strength,
 )
 from db.models import AccessRequest, User
-from services.graph_mail import notify_access_request
+from services.graph_mail import notify_access_granted, notify_access_request
+from services.phone import validate_e164_phone
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,7 @@ class AccessRequestCreate(BaseModel):
     company_name: str = Field(..., min_length=2, max_length=255)
     contact_name: str = Field(..., min_length=2, max_length=255)
     email: EmailStr
-    phone: str = Field(..., min_length=7, max_length=40)
+    phone: str = Field(..., min_length=1, max_length=20)
     message: Optional[str] = Field(None, max_length=2000)
     # Honeypot — real users leave this empty. Bots that fill it get a fake success.
     website: Optional[str] = Field(None, max_length=200)
@@ -54,10 +56,7 @@ class AccessRequestCreate(BaseModel):
     @field_validator("phone")
     @classmethod
     def strip_phone(cls, v: str) -> str:
-        cleaned = v.strip()
-        if not cleaned:
-            raise ValueError("Phone is required")
-        return cleaned
+        return v.strip()
 
     @field_validator("message")
     @classmethod
@@ -89,7 +88,6 @@ class AccessRequestPublicResult(BaseModel):
 
 
 class GrantAccessRequest(BaseModel):
-    password: str = Field(..., min_length=8, max_length=128)
     organization_slug: Optional[str] = Field(None, max_length=100)
 
 
@@ -97,10 +95,26 @@ class GrantAccessResult(BaseModel):
     request: AccessRequestOut
     organization_name: str
     login_email: str
+    invite_email_sent: bool
 
 
-def _phone_ok(phone: str) -> bool:
-    return bool(re.fullmatch(r"[0-9+\-()\s]{7,40}", phone))
+def _invite_url(raw: str) -> str | None:
+    origin = public_frontend_origin()
+    if not origin:
+        return None
+    return f"{origin}/set-password?token={quote(raw, safe='')}"
+
+
+def _mail_invite(user: User, raw: str) -> bool:
+    url = _invite_url(raw)
+    if not url:
+        logger.warning("[access] invite not mailed — FRONTEND_BASE_URL / CORS_ORIGINS empty")
+        return False
+    return notify_access_granted(
+        contact_name=user.full_name,
+        email=user.email,
+        setup_url=url,
+    )
 
 
 @router.post("", response_model=AccessRequestPublicResult, status_code=status.HTTP_200_OK)
@@ -114,11 +128,10 @@ def submit_access_request(
         logger.info("[access] honeypot tripped ip=%s", client_ip(request))
         return AccessRequestPublicResult(message=_SUCCESS_DETAIL)
 
-    if not _phone_ok(body.phone):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Enter a valid phone number.",
-        )
+    try:
+        phone = validate_e164_phone(body.phone)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     enforce_access_request_rate_limit(request, body.email)
 
@@ -136,7 +149,7 @@ def submit_access_request(
         company_name=body.company_name,
         contact_name=body.contact_name,
         email=body.email,
-        phone=body.phone,
+        phone=phone,
         message=body.message,
         status="pending",
         ip_address=client_ip(request)[:64],
@@ -173,11 +186,11 @@ def list_access_requests(
 @router.post("/{request_id}/grant", response_model=GrantAccessResult)
 def grant_access(
     request_id: UUID,
-    body: GrantAccessRequest,
     admin: User = Depends(require_platform_admin),
     db: Session = Depends(get_db),
+    body: Optional[GrantAccessRequest] = None,
 ):
-    """Create the customer org + admin login. Platform admin only."""
+    """Create the company + org admin. Applicant sets their own password via email link."""
     row = db.get(AccessRequest, request_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Access request not found")
@@ -186,32 +199,68 @@ def grant_access(
     if row.status == "rejected":
         raise HTTPException(status_code=409, detail="This request was rejected")
 
-    validate_password_strength(body.password)
     org, user = create_organization_with_admin(
         db,
         organization_name=row.company_name,
-        organization_slug=body.organization_slug,
+        organization_slug=body.organization_slug if body else None,
         full_name=row.contact_name,
         email=row.email,
-        password=body.password,
+        password=None,
     )
     row.status = "granted"
     row.granted_org_id = org.id
     row.granted_by_user_id = admin.id
     row.granted_at = datetime.now(timezone.utc)
+    raw = issue_invite_token(db, user.id)
     db.commit()
     db.refresh(row)
+    sent = _mail_invite(user, raw)
     logger.info(
-        "[access] granted company=%s email=%s by=%s org=%s",
+        "[access] granted company=%s email=%s by=%s org=%s invite_sent=%s",
         row.company_name,
         row.email,
         admin.email,
         org.slug,
+        sent,
     )
     return GrantAccessResult(
         request=AccessRequestOut.model_validate(row),
         organization_name=org.name,
         login_email=user.email,
+        invite_email_sent=sent,
+    )
+
+
+@router.post("/{request_id}/resend-invite", response_model=GrantAccessResult)
+def resend_invite(
+    request_id: UUID,
+    admin: User = Depends(require_platform_admin),
+    db: Session = Depends(get_db),
+):
+    """Issue a new set-password link. Invalidates unused previous links."""
+    del admin
+    row = db.get(AccessRequest, request_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Access request not found")
+    if row.status != "granted":
+        raise HTTPException(status_code=409, detail="Only granted requests can be resent")
+    user = db.scalar(select(User).where(User.email == row.email))
+    if user is None or not user.is_active:
+        raise HTTPException(status_code=409, detail="Granted user was not found")
+    raw = issue_invite_token(db, user.id)
+    db.commit()
+    sent = _mail_invite(user, raw)
+    if not sent:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Could not send the invite email. Check Graph mail settings and try again.",
+        )
+    org = user.organization
+    return GrantAccessResult(
+        request=AccessRequestOut.model_validate(row),
+        organization_name=org.name if org else row.company_name,
+        login_email=user.email,
+        invite_email_sent=True,
     )
 
 

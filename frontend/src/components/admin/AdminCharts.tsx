@@ -1,3 +1,5 @@
+import { cn } from '@/lib/utils'
+
 export interface ChartSlice {
   label: string
   value: number
@@ -24,65 +26,88 @@ export function DonutChart({
   totalLabel?: string
 }) {
   const total = slices.reduce((sum, slice) => sum + slice.value, 0)
-  const cx = 48
-  const cy = 48
-  const r = 34
+  const cx = 60
+  const cy = 60
+  const r = 42
+  const gap = 7
 
   let cursor = 0
+  const visible = slices.filter((slice) => slice.value > 0)
   const arcs =
     total <= 0
       ? []
-      : slices
-          .filter((slice) => slice.value > 0)
-          .map((slice) => {
-            const sweep = (slice.value / total) * 360
-            const start = cursor
-            const end = cursor + sweep
-            cursor = end
-            return { ...slice, start, end, full: sweep >= 359.99 }
-          })
+      : visible.map((slice) => {
+          const sweep = (slice.value / total) * 360
+          const start = cursor
+          const end = cursor + sweep
+          cursor = end
+          return { ...slice, start, end, sweep, full: sweep >= 359.99 }
+        })
 
   return (
-    <div className="flex items-center gap-4">
-      <svg viewBox="0 0 96 96" className="h-[7.25rem] w-[7.25rem] shrink-0 text-foreground" aria-hidden>
-        {total <= 0 ? (
-          <circle cx={cx} cy={cy} r={r} fill="none" className="stroke-muted" strokeWidth={12} />
-        ) : (
-          arcs.map((arc) =>
-            arc.full ? (
-              <circle
-                key={arc.label}
-                cx={cx}
-                cy={cy}
-                r={r}
-                fill="none"
-                stroke={arc.color}
-                strokeWidth={12}
-              />
-            ) : (
-              <path
-                key={arc.label}
-                d={arcPath(cx, cy, r, arc.start, arc.end)}
-                fill="none"
-                stroke={arc.color}
-                strokeWidth={12}
-              />
-            ),
-          )
+    <div className="flex h-full min-h-0 w-full items-center gap-4 overflow-hidden">
+      <svg
+        viewBox="0 0 120 120"
+        className="aspect-square h-[min(100%,8.25rem)] w-auto shrink-0 text-foreground"
+        aria-hidden
+      >
+        <circle
+          cx={cx}
+          cy={cy}
+          r={r}
+          fill="none"
+          className="stroke-muted/80"
+          strokeWidth={11}
+        />
+        {arcs.map((arc) =>
+          arc.full ? (
+            <circle
+              key={arc.label}
+              cx={cx}
+              cy={cy}
+              r={r}
+              fill="none"
+              stroke={arc.color}
+              strokeWidth={11}
+            />
+          ) : (
+            <path
+              key={arc.label}
+              d={arcPath(
+                cx,
+                cy,
+                r,
+                arc.sweep > gap + 4 ? arc.start + gap / 2 : arc.start,
+                arc.sweep > gap + 4 ? arc.end - gap / 2 : arc.end,
+              )}
+              fill="none"
+              stroke={arc.color}
+              strokeWidth={11}
+              strokeLinecap="round"
+            />
+          ),
         )}
-        <circle cx={cx} cy={cy} r={24} className="fill-card" />
-        <text x={cx} y={cy + 4} textAnchor="middle" fill="currentColor" fontSize="13" fontWeight="600">
+        <circle cx={cx} cy={cy} r={30} className="fill-card" />
+        <text
+          x={cx}
+          y={cy + 1}
+          textAnchor="middle"
+          dominantBaseline="middle"
+          fill="currentColor"
+          fontSize="18"
+          fontWeight="600"
+        >
           {totalLabel ?? total}
         </text>
       </svg>
-      <ul className="min-w-0 flex-1 space-y-1 text-[12.5px] leading-tight">
+      <ul className="min-w-0 flex-1 space-y-2">
         {slices.map((slice) => (
           <li key={slice.label} className="flex items-center justify-between gap-3">
             <span className="flex min-w-0 items-center gap-2">
               <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: slice.color }} />
-              <span className="truncate text-muted-foreground">{slice.label}</span>
+              <span className="truncate text-[12.5px] text-muted-foreground">{slice.label}</span>
             </span>
-            <span className="tabular-nums font-medium">{slice.value}</span>
+            <span className="text-[12.5px] tabular-nums font-medium">{slice.value}</span>
           </li>
         ))}
       </ul>
@@ -98,27 +123,39 @@ export function BarChart({
   const max = Math.max(1, ...bars.map((bar) => bar.value))
 
   return (
-    <div>
-      <div className="flex items-end gap-3 border-b border-border/70">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden">
+      <div className="flex min-h-0 flex-1 items-end gap-3">
         {bars.map((bar) => {
-          const height = bar.value > 0 ? Math.max(8, (bar.value / max) * 112) : 0
+          const pct = bar.value > 0 ? Math.max(8, (bar.value / max) * 100) : 0
           return (
-            <div key={bar.label} className="flex min-w-0 flex-1 flex-col items-center gap-1">
-              <p className="h-4 text-[11px] tabular-nums text-muted-foreground">
-                {bar.value > 0 ? bar.value : ''}
+            <div key={bar.label} className="group flex h-full min-w-0 flex-1 flex-col items-center">
+              <p
+                className={cn(
+                  'mb-1 h-4 text-[11px] tabular-nums',
+                  bar.value > 0 ? 'font-medium text-foreground' : 'text-muted-foreground/45',
+                )}
+              >
+                {bar.value}
               </p>
-              <div className="flex h-[112px] w-full items-end justify-center">
+              <div className="relative flex min-h-0 w-full flex-1 items-end justify-center">
+                <div className="absolute inset-x-[22%] bottom-0 top-0 rounded-t-md bg-[#dbeafe] dark:bg-[#1e3a5f]/50" />
                 {bar.value > 0 ? (
-                  <div className="w-7 rounded-t-sm bg-foreground" style={{ height }} />
+                  <div
+                    className="relative z-[1] w-[56%] max-w-10 rounded-t-md bg-[#3b82f6] transition-opacity duration-200 group-hover:opacity-80"
+                    style={{ height: `${pct}%` }}
+                  />
                 ) : null}
               </div>
             </div>
           )
         })}
       </div>
-      <div className="mt-1.5 flex gap-3">
+      <div className="mt-2 flex gap-3 border-t border-border/80 pt-2">
         {bars.map((bar) => (
-          <p key={bar.label} className="min-w-0 flex-1 text-center text-[11px] font-medium text-muted-foreground">
+          <p
+            key={bar.label}
+            className="min-w-0 flex-1 text-center text-[11px] font-medium text-muted-foreground"
+          >
             {bar.label}
           </p>
         ))}

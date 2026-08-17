@@ -24,13 +24,13 @@ export const AUTH_BUTTON_CLASS =
 
 export function AuthSplitLayout({ children }: AuthSplitLayoutProps) {
   return (
-    <div className="auth-split min-h-dvh bg-[#2c2c2c] p-3 text-neutral-950 xl:p-4">
-      <div className="grid min-h-[calc(100dvh-1.5rem)] overflow-hidden bg-white p-[14px] lg:grid-cols-[minmax(0,1.15fr)_minmax(440px,0.85fr)] xl:min-h-[calc(100dvh-2rem)] xl:p-4">
-        <aside className="group relative hidden overflow-hidden bg-[#1a1814] lg:block">
+    <div className="auth-split h-dvh overflow-hidden bg-[#2c2c2c] p-3 text-neutral-950 xl:p-4">
+      <div className="grid h-full overflow-hidden bg-white p-[14px] lg:grid-cols-[minmax(0,1.15fr)_minmax(440px,0.85fr)]">
+        <aside className="group relative hidden h-full min-h-0 overflow-hidden bg-[#1a1814] lg:block">
           <img
             src="/auth-hero.png"
             alt=""
-            className="absolute inset-0 h-full w-full origin-center object-cover object-center transition-transform duration-700 ease-out group-hover:scale-[1.06]"
+            className="absolute inset-0 size-full origin-center object-cover object-center will-change-transform transition-transform duration-[1400ms] ease-[cubic-bezier(0.22,1,0.36,1)] group-hover:scale-[1.08] motion-reduce:transition-none motion-reduce:group-hover:scale-100"
           />
           <div
             className="absolute inset-0 bg-gradient-to-t from-black/55 via-black/5 to-transparent"
@@ -56,8 +56,8 @@ export function AuthSplitLayout({ children }: AuthSplitLayoutProps) {
           </div>
         </aside>
 
-        <main className="flex min-h-[calc(100dvh-1.5rem-28px)] flex-col bg-white text-neutral-950 lg:min-h-0">
-          <div className="flex flex-1 flex-col px-8 py-8 sm:px-12 lg:px-14 lg:py-10 xl:px-16 xl:py-12">
+        <main className="flex h-full min-h-0 flex-col overflow-y-auto bg-white text-neutral-950">
+          <div className="flex min-h-full flex-1 flex-col items-center justify-center px-8 py-8 sm:px-12 lg:px-14 lg:py-10 xl:px-16 xl:py-12">
             <div className="w-full max-w-[400px]">{children}</div>
           </div>
         </main>

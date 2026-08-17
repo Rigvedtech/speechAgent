@@ -1,15 +1,13 @@
 import { useMemo, useState } from 'react'
 import { Navigate } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { grantAccessRequest, listAccessRequests, rejectAccessRequest } from '@/lib/api'
+import { grantAccessRequest, listAccessRequests, rejectAccessRequest, resendAccessInvite } from '@/lib/api'
 import { useAuth } from '@/hooks/useAuth'
 import { ApiError } from '@/lib/api-client'
 import { formatApiError } from '@/lib/error-messages'
 import { queryKeys } from '@/lib/query-keys'
 import type { AccessRequest, AccessRequestStatus } from '@/types/api'
 import { Button } from '@/components/ui/button'
-import { PasswordInput } from '@/components/ui/password-input'
-import { Label } from '@/components/ui/label'
 import { FlashAlert } from '@/components/ui/flash-alert'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
@@ -54,7 +52,6 @@ export function AccessRequestsPage() {
   const queryClient = useQueryClient()
   const [filter, setFilter] = useState<'all' | AccessRequestStatus>('pending')
   const [grantTarget, setGrantTarget] = useState<AccessRequest | null>(null)
-  const [password, setPassword] = useState('')
   const [formError, setFormError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
@@ -82,14 +79,15 @@ export function AccessRequestsPage() {
   const grantMutation = useMutation({
     mutationFn: () => {
       if (!grantTarget) throw new Error('No request selected')
-      return grantAccessRequest(grantTarget.id, { password })
+      return grantAccessRequest(grantTarget.id)
     },
     onSuccess: (result) => {
       setGrantTarget(null)
-      setPassword('')
       setFormError(null)
       setNotice(
-        `Access granted for ${result.organization_name}. Send login email ${result.login_email} and the password you just set.`,
+        result.invite_email_sent
+          ? `Access granted for ${result.organization_name}. We emailed ${result.login_email} a link to set their password.`
+          : `Access granted for ${result.organization_name}. Invite email could not be sent — use Resend invite.`,
       )
       void queryClient.invalidateQueries({ queryKey: queryKeys.accessRequests })
       void queryClient.invalidateQueries({ queryKey: queryKeys.adminOverview })
@@ -99,6 +97,18 @@ export function AccessRequestsPage() {
         setFormError(formatApiError(err.message, err.detail))
       } else {
         setFormError('Could not grant access.')
+      }
+    },
+  })
+
+  const resendMutation = useMutation({
+    mutationFn: (id: string) => resendAccessInvite(id),
+    onSuccess: (result) => {
+      setNotice(`Invite sent again to ${result.login_email}. Previous unused links will not work.`)
+    },
+    onError: (err) => {
+      if (err instanceof ApiError) {
+        setNotice(formatApiError(err.message, err.detail))
       }
     },
   })
@@ -209,11 +219,23 @@ export function AccessRequestsPage() {
                       size="sm"
                       onClick={() => {
                         setGrantTarget(row)
-                        setPassword('')
                         setFormError(null)
                       }}
                     >
                       Grant access
+                    </Button>
+                  </div>
+                ) : null}
+                {row.status === 'granted' ? (
+                  <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-border pt-4">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled={resendMutation.isPending}
+                      onClick={() => resendMutation.mutate(row.id)}
+                    >
+                      {resendMutation.isPending ? 'Sending…' : 'Resend invite'}
                     </Button>
                   </div>
                 ) : null}
@@ -228,7 +250,6 @@ export function AccessRequestsPage() {
         onOpenChange={(open) => {
           if (!open) {
             setGrantTarget(null)
-            setPassword('')
             setFormError(null)
           }
         }}
@@ -237,7 +258,8 @@ export function AccessRequestsPage() {
           <DialogHeader>
             <DialogTitle>Grant access</DialogTitle>
             <DialogDescription>
-              Creates the company and first org admin. Send them email + password yourself.
+              Creates the company and first org admin. We email them a one-time link to set their
+              own password. You will not see a password.
             </DialogDescription>
           </DialogHeader>
           {grantTarget ? (
@@ -255,23 +277,8 @@ export function AccessRequestsPage() {
             }}
           >
             {formError ? <p className={cn('text-sm text-destructive')}>{formError}</p> : null}
-            <div>
-              <Label htmlFor="grant-password">Temporary password</Label>
-              <PasswordInput
-                id="grant-password"
-                className="mt-1.5"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                minLength={8}
-                autoComplete="new-password"
-              />
-              <p className="mt-1 text-xs text-muted-foreground">
-                At least 8 characters, including a letter and a number.
-              </p>
-            </div>
             <Button type="submit" className="w-full" disabled={grantMutation.isPending}>
-              {grantMutation.isPending ? 'Granting…' : 'Create login and grant'}
+              {grantMutation.isPending ? 'Granting…' : 'Grant and send invite'}
             </Button>
           </form>
         </DialogContent>

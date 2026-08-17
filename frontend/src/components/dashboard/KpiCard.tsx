@@ -14,6 +14,9 @@ interface KpiCardProps {
   hint?: string
   icon: LucideIcon
   iconClassName?: string
+  iconWell?: boolean
+  iconWellClassName?: string
+  compact?: boolean
   className?: string
   to?: string
   /** When set, show two metrics side-by-side instead of a single value. */
@@ -26,14 +29,25 @@ export function KpiCard({
   hint,
   icon: Icon,
   iconClassName,
+  iconWell,
+  iconWellClassName,
+  compact,
   className,
   to,
   split,
 }: KpiCardProps) {
   const classes = cn(
-    'surface-hover select-none rounded-lg border border-border bg-card p-5 hover:border-foreground/15',
+    'surface-hover select-none rounded-lg border border-border bg-card hover:border-foreground/15',
+    compact ? 'p-3.5' : 'p-5',
     to && !split ? 'cursor-pointer' : 'cursor-default',
     className,
+  )
+
+  const icon = (
+    <Icon
+      className={cn('h-4 w-4 shrink-0', iconClassName ?? 'text-muted-foreground/60')}
+      strokeWidth={1.5}
+    />
   )
 
   const header = (
@@ -41,10 +55,19 @@ export function KpiCard({
       <p className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground">
         {label}
       </p>
-      <Icon
-        className={cn('h-4 w-4 shrink-0', iconClassName ?? 'text-muted-foreground/60')}
-        strokeWidth={1.25}
-      />
+      {iconWell ? (
+        <span
+          className={cn(
+            'inline-flex shrink-0 items-center justify-center rounded-lg bg-muted',
+            compact ? 'h-7 w-7' : 'h-8 w-8',
+            iconWellClassName,
+          )}
+        >
+          {icon}
+        </span>
+      ) : (
+        icon
+      )}
     </div>
   )
 
@@ -97,8 +120,17 @@ export function KpiCard({
   ) : (
     <>
       {header}
-      <p className="mt-3 text-3xl font-semibold tabular-nums tracking-tight">{value}</p>
-      {hint ? <p className="mt-1.5 text-xs text-muted-foreground">{hint}</p> : null}
+      <p
+        className={cn(
+          'font-semibold tabular-nums tracking-tight',
+          compact ? 'mt-2 text-[1.65rem] leading-none' : 'mt-3 text-3xl',
+        )}
+      >
+        {value}
+      </p>
+      {hint ? (
+        <p className={cn('text-xs text-muted-foreground', compact ? 'mt-1' : 'mt-1.5')}>{hint}</p>
+      ) : null}
     </>
   )
 

@@ -16,6 +16,7 @@ import { CandidateFeedbackPage } from '@/pages/CandidateFeedbackPage'
 import { LoginPage } from '@/pages/LoginPage'
 import { RegisterOrgPage } from '@/pages/RegisterOrgPage'
 import { RequestAccessPage } from '@/pages/RequestAccessPage'
+import { SetPasswordPage } from '@/pages/SetPasswordPage'
 import { AccessRequestsPage } from '@/pages/AccessRequestsPage'
 import { AdminOverviewPage } from '@/pages/AdminOverviewPage'
 import { AdminOperatorsPage } from '@/pages/AdminOperatorsPage'
@@ -36,6 +37,7 @@ export const router = createBrowserRouter([
     children: [{ index: true, element: <LandingPage /> }],
   },
   { path: '/login', element: <LoginPage /> },
+  { path: '/set-password', element: <SetPasswordPage /> },
   { path: '/request-access', element: <RequestAccessPage /> },
   { path: '/register', element: <RegisterOrgPage /> },
   {

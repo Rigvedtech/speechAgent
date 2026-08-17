@@ -394,6 +394,8 @@ CORS_ORIGINS = [
 # Public frontend origin for candidate coding links in wrap-up TTS / emails.
 # Falls back to the first CORS_ORIGINS entry when empty.
 FRONTEND_BASE_URL = _env_str("FRONTEND_BASE_URL", "")
+# Invite / set-password link lifetime (hours).
+PASSWORD_SETUP_HOURS = max(1, min(168, _env_int("PASSWORD_SETUP_HOURS", 48)))
 
 # Master key for encrypting per-org ATS API keys in organization.ats_api_key_encrypted.
 # Prefer a Fernet key (python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")

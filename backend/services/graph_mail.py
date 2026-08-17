@@ -34,14 +34,18 @@ _cached_token: Optional[str] = None
 _cached_token_expires_at = 0.0
 
 
-def graph_mail_configured() -> bool:
+def graph_send_configured() -> bool:
+    """Can send mail as GRAPH_SENDER. Ops notify list is not required."""
     return bool(
         app_config.GRAPH_TENANT_ID
         and app_config.GRAPH_CLIENT_ID
         and app_config.GRAPH_CLIENT_SECRET
         and app_config.GRAPH_SENDER
-        and app_config.ACCESS_NOTIFY_TO
     )
+
+
+def graph_mail_configured() -> bool:
+    return graph_send_configured() and bool(app_config.ACCESS_NOTIFY_TO)
 
 
 def _access_token() -> str:
@@ -221,3 +225,58 @@ def notify_access_request(
         )
     except Exception:
         logger.exception("[graph-mail] failed to notify ops company=%s", company_name)
+
+
+def _invite_html(
+    *,
+    contact_name: str,
+    setup_url: str,
+    hours: int,
+) -> str:
+    return f"""
+    <div style="margin:0;padding:24px;background:#f5f5f5;font-family:Arial,Helvetica,sans-serif;">
+      <table role="presentation" cellpadding="0" cellspacing="0" width="100%" style="max-width:560px;margin:0 auto;background:#ffffff;border:1px solid #e5e5e5;border-radius:8px;">
+        <tr>
+          <td style="padding:20px 24px 16px;border-bottom:1px solid #ececec;">
+            <div style="font-size:13px;font-weight:700;letter-spacing:0.12em;color:#0a0a0a;">PRABHAT<span style="color:#7c3aed;">.</span></div>
+            <div style="margin-top:10px;font-size:18px;font-weight:600;color:#0a0a0a;">Your access is ready</div>
+            <div style="margin-top:4px;font-size:13px;color:#737373;">Hi {_esc(contact_name)}. Set a password to sign in. This link expires in {hours} hours and can be used once.</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:24px;">
+            <a href="{_esc(setup_url)}" style="display:inline-block;background:#0a0a0a;color:#ffffff;text-decoration:none;font-size:13px;font-weight:600;padding:10px 16px;border-radius:8px;">Set password</a>
+            <p style="margin:20px 0 0;font-size:12px;line-height:1.5;color:#737373;">If you did not request Prabhat access, ignore this email. We never send your password by email.</p>
+          </td>
+        </tr>
+      </table>
+    </div>
+    """
+
+
+def notify_access_granted(
+    *,
+    contact_name: str,
+    email: str,
+    setup_url: str,
+) -> bool:
+    """Email the applicant a set-password link. Never includes a password. Returns sent?"""
+    if not graph_send_configured():
+        logger.info("[graph-mail] invite skipped — Graph sender not configured")
+        return False
+    try:
+        send_mail(
+            subject="Your Prabhat access is ready",
+            body=_invite_html(
+                contact_name=contact_name,
+                setup_url=setup_url,
+                hours=app_config.PASSWORD_SETUP_HOURS,
+            ),
+            to=[email],
+            content_type="HTML",
+        )
+        logger.info("[graph-mail] invite mailed to applicant")
+        return True
+    except Exception:
+        logger.exception("[graph-mail] failed to mail invite")
+        return False

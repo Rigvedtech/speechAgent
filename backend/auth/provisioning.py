@@ -30,7 +30,7 @@ def create_organization_with_admin(
     organization_slug: str | None,
     full_name: str,
     email: str,
-    password: str,
+    password: str | None = None,
 ) -> tuple[Organization, User]:
     slug = organization_slug.strip().lower() if organization_slug else slugify_org_name(
         organization_name
@@ -66,7 +66,7 @@ def create_organization_with_admin(
         organization=org,
         full_name=full_name.strip(),
         email=email_norm,
-        password_hash=hash_password(password),
+        password_hash=hash_password(password) if (password or "").strip() else None,
         role="admin",
         auth_provider="password",
         last_login_at=None,

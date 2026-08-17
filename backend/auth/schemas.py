@@ -105,3 +105,22 @@ class UpdateUserRequest(BaseModel):
     @classmethod
     def strip_name(cls, v: Optional[str]) -> Optional[str]:
         return v.strip() if v else v
+
+
+class PasswordSetupTokenIn(BaseModel):
+    token: str = Field(..., min_length=20, max_length=128)
+
+
+class PasswordSetupVerifyOut(BaseModel):
+    ok: bool = True
+    full_name: str
+
+
+class PasswordSetupCompleteIn(BaseModel):
+    token: str = Field(..., min_length=20, max_length=128)
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class PasswordSetupCompleteOut(BaseModel):
+    ok: bool = True
+    message: str
