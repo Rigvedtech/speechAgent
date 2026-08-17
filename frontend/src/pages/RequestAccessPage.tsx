@@ -4,37 +4,66 @@ import { useMutation } from '@tanstack/react-query'
 import { submitAccessRequest } from '@/lib/api'
 import { ApiError } from '@/lib/api-client'
 import { formatApiError } from '@/lib/error-messages'
+import {
+  DEFAULT_PHONE_ISO,
+  PHONE_COUNTRIES,
+  countryFlagSrc,
+  nationalDigits,
+  phoneCountry,
+  phonePlaceholder,
+  validateNationalNumber,
+} from '@/lib/phone'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { FlashAlert } from '@/components/ui/flash-alert'
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select'
 import { AUTH_BUTTON_CLASS, AUTH_CONTROL_CLASS, AUTH_FOOTER_CLASS, AUTH_LABEL_CLASS, AUTH_LINK_CLASS, AUTH_SUB_CLASS, AUTH_TITLE_CLASS, AuthSplitLayout } from '@/layouts/AuthSplitLayout'
+import { cn } from '@/lib/utils'
+
+function CountryFlag({ iso, className }: { iso: string; className?: string }) {
+  return (
+    <img
+      src={countryFlagSrc(iso)}
+      alt=""
+      width={20}
+      height={15}
+      className={cn('h-[15px] w-5 shrink-0 rounded-[2px] object-cover', className)}
+    />
+  )
+}
 
 export function RequestAccessPage() {
   const [companyName, setCompanyName] = useState('')
   const [contactName, setContactName] = useState('')
   const [email, setEmail] = useState('')
-  const [phone, setPhone] = useState('')
+  const [phoneIso, setPhoneIso] = useState(DEFAULT_PHONE_ISO)
+  const [phoneNational, setPhoneNational] = useState('')
+  const [phoneError, setPhoneError] = useState<string | null>(null)
   const [website, setWebsite] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState(false)
+  const country = phoneCountry(phoneIso)
 
   const mutation = useMutation({
-    mutationFn: () =>
+    mutationFn: (phone: string) =>
       submitAccessRequest({
         company_name: companyName.trim(),
         contact_name: contactName.trim(),
         email: email.trim(),
-        phone: phone.trim(),
+        phone,
         website: website.trim() || undefined,
       }),
     onSuccess: () => {
       setDone(true)
       setError(null)
+      setPhoneError(null)
     },
     onError: (err) => {
       if (err instanceof ApiError) {
-        setError(formatApiError(err.message, err.detail))
+        const message = formatApiError(err.message, err.detail)
+        if (/phone|digit|country/i.test(message)) setPhoneError(message)
+        else setError(message)
       } else {
         setError('Could not submit the request. Try again.')
       }
@@ -73,7 +102,13 @@ export function RequestAccessPage() {
             onSubmit={(e) => {
               e.preventDefault()
               setError(null)
-              mutation.mutate()
+              const checked = validateNationalNumber(phoneIso, phoneNational)
+              if (!checked.ok) {
+                setPhoneError(checked.message)
+                return
+              }
+              setPhoneError(null)
+              mutation.mutate(checked.e164)
             }}
           >
             <div className="space-y-2">
@@ -85,44 +120,88 @@ export function RequestAccessPage() {
                 className={AUTH_CONTROL_CLASS}
                 value={companyName}
                 onChange={(e) => setCompanyName(e.target.value)}
-                placeholder="Acme Hiring"
+                placeholder="Your company"
                 required
                 minLength={2}
                 autoComplete="organization"
               />
             </div>
-            <div className="grid grid-cols-1 gap-5 sm:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="contact" className={AUTH_LABEL_CLASS}>
-                  Your name
-                </Label>
-                <Input
-                  id="contact"
-                  className={AUTH_CONTROL_CLASS}
-                  value={contactName}
-                  onChange={(e) => setContactName(e.target.value)}
-                  placeholder="Jane Shah"
-                  required
-                  minLength={2}
-                  autoComplete="name"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="phone" className={AUTH_LABEL_CLASS}>
-                  Phone
-                </Label>
+            <div className="space-y-2">
+              <Label htmlFor="contact" className={AUTH_LABEL_CLASS}>
+                Your name
+              </Label>
+              <Input
+                id="contact"
+                className={AUTH_CONTROL_CLASS}
+                value={contactName}
+                onChange={(e) => setContactName(e.target.value)}
+                placeholder="Your full name"
+                required
+                minLength={2}
+                autoComplete="name"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="phone" className={AUTH_LABEL_CLASS}>
+                Phone
+              </Label>
+              <div className="flex gap-2">
+                <Select
+                  value={phoneIso}
+                  onValueChange={(iso) => {
+                    setPhoneIso(iso)
+                    setPhoneError(null)
+                  }}
+                >
+                  <SelectTrigger
+                    aria-label="Country code"
+                    className={cn(
+                      AUTH_CONTROL_CLASS,
+                      'w-[6.75rem] shrink-0 justify-between gap-1.5 px-2.5 text-[13px] [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:opacity-40',
+                    )}
+                  >
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <CountryFlag iso={phoneIso} />
+                      <span className="tabular-nums">+{country.dial}</span>
+                    </span>
+                  </SelectTrigger>
+                  <SelectContent className="max-h-64 border-neutral-200 bg-white text-neutral-950">
+                    {PHONE_COUNTRIES.map((row) => (
+                      <SelectItem key={row.iso} value={row.iso} className="pr-3">
+                        <span className="flex items-center gap-2">
+                          <CountryFlag iso={row.iso} />
+                          <span className="text-neutral-800">{row.name}</span>
+                          <span className="tabular-nums text-neutral-400">+{row.dial}</span>
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
                 <Input
                   id="phone"
                   type="tel"
+                  inputMode="numeric"
                   className={AUTH_CONTROL_CLASS}
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  placeholder="98765 43210"
+                  value={phoneNational}
+                  onChange={(e) => {
+                    const next = nationalDigits(e.target.value).slice(0, country.max)
+                    setPhoneNational(next)
+                    setPhoneError(null)
+                  }}
+                  placeholder={phonePlaceholder(phoneIso)}
                   required
-                  minLength={7}
-                  autoComplete="tel"
+                  autoComplete="tel-national"
                 />
               </div>
+              {phoneError ? (
+                <p className="text-[13px] text-red-600">{phoneError}</p>
+              ) : (
+                <p className="text-[13px] text-neutral-500">
+                  {country.min === country.max
+                    ? `${country.name}: ${country.min} digits`
+                    : `${country.name}: ${country.min}–${country.max} digits`}
+                </p>
+              )}
             </div>
             <div className="space-y-2">
               <Label htmlFor="email" className={AUTH_LABEL_CLASS}>
@@ -132,7 +211,7 @@ export function RequestAccessPage() {
                 id="email"
                 type="email"
                 className={AUTH_CONTROL_CLASS}
-                placeholder="name@company.com"
+                placeholder="you@company.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required

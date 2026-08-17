@@ -271,6 +271,7 @@ export interface GrantAccessResult {
   request: AccessRequest
   organization_name: string
   login_email: string
+  invite_email_sent: boolean
 }
 
 export interface AdminOrganization {

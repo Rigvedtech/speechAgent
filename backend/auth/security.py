@@ -187,9 +187,15 @@ def enforce_register_rate_limit(request: Request) -> None:
 
 _access_request_limiter = AuthRateLimiter(max_attempts=5, window_sec=60 * 60)
 _access_request_email_limiter = AuthRateLimiter(max_attempts=3, window_sec=24 * 60 * 60)
+_password_setup_limiter = AuthRateLimiter(max_attempts=10, window_sec=15 * 60)
 
 
 def enforce_access_request_rate_limit(request: Request, email: str) -> None:
     ip = client_ip(request)
     _access_request_limiter.check(f"access:ip:{ip}")
     _access_request_email_limiter.check(f"access:email:{email.lower()}")
+
+
+def enforce_password_setup_rate_limit(request: Request) -> None:
+    ip = client_ip(request)
+    _password_setup_limiter.check(f"password-setup:ip:{ip}")

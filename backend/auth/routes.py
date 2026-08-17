@@ -19,16 +19,22 @@ from auth.schemas import (
     LoginRequest,
     MeResponse,
     OrganizationOut,
+    PasswordSetupCompleteIn,
+    PasswordSetupCompleteOut,
+    PasswordSetupTokenIn,
+    PasswordSetupVerifyOut,
     UpdateUserRequest,
     UserOut,
 )
 from auth.security import (
     create_access_token,
     enforce_login_rate_limit,
+    enforce_password_setup_rate_limit,
     hash_password,
     validate_password_strength,
     verify_password_against_possible_user,
 )
+from auth.password_setup import consume_invite_token, peek_invite_token
 from db.models import Organization, User
 logger = logging.getLogger(__name__)
 
@@ -89,6 +95,32 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
     return _auth_response(user, org)
+
+
+@router.post("/password-setup/verify", response_model=PasswordSetupVerifyOut)
+def verify_password_setup(
+    body: PasswordSetupTokenIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Check an invite token without consuming it. Same error for every failure."""
+    enforce_password_setup_rate_limit(request)
+    user = peek_invite_token(db, body.token.strip())
+    return PasswordSetupVerifyOut(full_name=user.full_name)
+
+
+@router.post("/password-setup", response_model=PasswordSetupCompleteOut)
+def complete_password_setup(
+    body: PasswordSetupCompleteIn,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Set password from a one-time invite token. Does not sign the user in."""
+    enforce_password_setup_rate_limit(request)
+    consume_invite_token(db, body.token.strip(), body.password)
+    return PasswordSetupCompleteOut(
+        message="Password saved. Sign in with your email and password."
+    )
 
 @router.get("/me", response_model=MeResponse)
 def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):

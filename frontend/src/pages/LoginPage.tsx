@@ -20,6 +20,11 @@ export function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(
+    typeof (location.state as { notice?: string } | null)?.notice === 'string'
+      ? (location.state as { notice: string }).notice
+      : null,
+  )
 
   const from =
     (location.state as { from?: string } | null)?.from &&
@@ -55,6 +60,11 @@ export function LoginPage() {
           Use your organization account to schedule interviews.
         </p>
 
+        <FlashAlert
+          message={notice}
+          onDismiss={() => setNotice(null)}
+          className="mt-6 border-success/30 bg-success/[0.06]"
+        />
         <FlashAlert
           message={error}
           onDismiss={() => setError(null)}

@@ -166,10 +166,30 @@ export function listAccessRequests(status?: 'pending' | 'granted' | 'rejected') 
   return request<AccessRequest[]>(`/api/access-requests${qs}`)
 }
 
-export function grantAccessRequest(requestId: string, body: { password: string; organization_slug?: string }) {
+export function grantAccessRequest(requestId: string, body?: { organization_slug?: string }) {
   return request<GrantAccessResult>(`/api/access-requests/${requestId}/grant`, {
     method: 'POST',
-    body: JSON.stringify(body),
+    body: JSON.stringify(body ?? {}),
+  })
+}
+
+export function resendAccessInvite(requestId: string) {
+  return request<GrantAccessResult>(`/api/access-requests/${requestId}/resend-invite`, {
+    method: 'POST',
+  })
+}
+
+export function verifyPasswordSetup(token: string) {
+  return request<{ ok: boolean; full_name: string }>('/api/auth/password-setup/verify', {
+    method: 'POST',
+    body: JSON.stringify({ token }),
+  })
+}
+
+export function completePasswordSetup(token: string, password: string) {
+  return request<{ ok: boolean; message: string }>('/api/auth/password-setup', {
+    method: 'POST',
+    body: JSON.stringify({ token, password }),
   })
 }
 
