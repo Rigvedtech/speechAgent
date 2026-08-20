@@ -508,25 +508,29 @@ Job Description:
 def _call_groq(prompt: str) -> Optional[dict]:
     """
     Call Groq LLM with the given prompt. Returns parsed JSON dict or None.
-    Uses the fast evaluator model (llama-3.1-8b-instant).
+    Uses GROQ_EVALUATOR_MODEL (GPT-OSS 20B after the Llama shutdown).
     """
     try:
         import config as app_config
         from groq import Groq
+        from groq_runtime import groq_kwargs
 
         api_key = getattr(app_config, "GROQ_API_KEY", "")
         if not api_key:
             return None
 
-        model = getattr(app_config, "GROQ_EVALUATOR_MODEL", "llama-3.1-8b-instant")
+        model = getattr(app_config, "GROQ_EVALUATOR_MODEL", "openai/gpt-oss-20b")
         client = Groq(api_key=api_key)
 
         resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=600,
-            timeout=20,
+            **groq_kwargs(
+                model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=600,
+                timeout=20,
+                json_mode=True,
+            )
         )
 
         content = resp.choices[0].message.content or ""

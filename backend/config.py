@@ -53,12 +53,13 @@ MODEL_SIZE = _env_str("MODEL_SIZE", "small.en")
 
 # LLM
 OLLAMA_MODEL = _env_str("OLLAMA_MODEL", "llama3.2:3b")
-GROQ_MODEL = _env_str("GROQ_MODEL", "llama-3.1-8b-instant")
-# Faster model for answer scoring only (keeps main GROQ_MODEL for clarifiers/intent).
-GROQ_EVALUATOR_MODEL = _env_str("GROQ_EVALUATOR_MODEL", GROQ_MODEL)
-GROQ_EVALUATOR_MAX_TOKENS = _env_int("GROQ_EVALUATOR_MAX_TOKENS", 250)
+# Groq retired llama-3.1-8b-instant and llama-3.3-70b-versatile on 2026-08-16.
+GROQ_MODEL = _env_str("GROQ_MODEL", "openai/gpt-oss-120b")
+# Faster / cheaper model for scoring, question gen, CV/JD extract.
+GROQ_EVALUATOR_MODEL = _env_str("GROQ_EVALUATOR_MODEL", "openai/gpt-oss-20b")
+GROQ_EVALUATOR_MAX_TOKENS = _env_int("GROQ_EVALUATOR_MAX_TOKENS", 1536)
 GROQ_TEMPERATURE = _env_float("GROQ_TEMPERATURE", 0.3)
-GROQ_MAX_TOKENS = _env_int("GROQ_MAX_TOKENS", 90)
+GROQ_MAX_TOKENS = _env_int("GROQ_MAX_TOKENS", 384)
 GROQ_REQUEST_TIMEOUT_SEC = _env_float("GROQ_REQUEST_TIMEOUT_SEC", 45.0)
 GROQ_API_KEY = _env_str("GROQ_API_KEY", "")
 # Ollama fallback for evaluator can block 60s+ if Ollama is down — off by default in production.

@@ -7,6 +7,7 @@ import time
 from typing import Optional
 import config
 from config import GROQ_API_KEY, GROQ_MODEL, GROQ_EVALUATOR_MODEL, GROQ_EVALUATOR_MAX_TOKENS, GROQ_TEMPERATURE, GROQ_MAX_TOKENS, OLLAMA_MODEL
+from groq_runtime import groq_kwargs
 import document as interview_documents
 from state import AgentState
 from system_prompt import (
@@ -565,11 +566,13 @@ class LLMBrain:
         if client:
             try:
                 completion = client.chat.completions.create(
-                    model=GROQ_EVALUATOR_MODEL,
-                    messages=messages,
-                    max_tokens=GROQ_EVALUATOR_MAX_TOKENS,
-                    temperature=0.1,
-                    response_format={"type": "json_object"},
+                    **groq_kwargs(
+                        GROQ_EVALUATOR_MODEL,
+                        messages=messages,
+                        max_tokens=GROQ_EVALUATOR_MAX_TOKENS,
+                        temperature=0.1,
+                        json_mode=True,
+                    )
                 )
                 raw = (completion.choices[0].message.content or "").strip()
             except Exception as ex:
@@ -649,11 +652,13 @@ class LLMBrain:
         if client:
             try:
                 completion = client.chat.completions.create(
-                    model=GROQ_MODEL,
-                    messages=messages,
-                    max_tokens=40,
-                    temperature=0.1,
-                    response_format={"type": "json_object"},
+                    **groq_kwargs(
+                        GROQ_MODEL,
+                        messages=messages,
+                        max_tokens=40,
+                        temperature=0.1,
+                        json_mode=True,
+                    )
                 )
                 raw = (completion.choices[0].message.content or "").strip()
             except Exception as ex:
@@ -977,11 +982,13 @@ class LLMBrain:
                 if client:
                     try:
                         completion = client.chat.completions.create(
-                            model=GROQ_EVALUATOR_MODEL,
-                            messages=messages,
-                            max_tokens=GROQ_EVALUATOR_MAX_TOKENS,
-                            temperature=0.1,
-                            response_format={"type": "json_object"},
+                            **groq_kwargs(
+                                GROQ_EVALUATOR_MODEL,
+                                messages=messages,
+                                max_tokens=GROQ_EVALUATOR_MAX_TOKENS,
+                                temperature=0.1,
+                                json_mode=True,
+                            )
                         )
                         raw = (completion.choices[0].message.content or "").strip()
                     except Exception as ex:
@@ -1244,10 +1251,12 @@ class LLMBrain:
         if client:
             try:
                 completion = client.chat.completions.create(
-                    model=GROQ_MODEL,
-                    messages=messages,
-                    max_tokens=40,
-                    temperature=0.2,
+                    **groq_kwargs(
+                        GROQ_MODEL,
+                        messages=messages,
+                        max_tokens=40,
+                        temperature=0.2,
+                    )
                 )
                 raw = (completion.choices[0].message.content or "").strip()
             except Exception as ex:
@@ -1443,14 +1452,16 @@ class LLMBrain:
                 f"Check #{payload.check_num} slot={payload.check_slot or '?'}"
             )
             completion = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": _PROGRESS_GATE_SYSTEM},
-                    {"role": "user", "content": user_content},
-                ],
-                max_tokens=60,
-                temperature=0.1,
-                response_format={"type": "json_object"},
+                **groq_kwargs(
+                    GROQ_MODEL,
+                    messages=[
+                        {"role": "system", "content": _PROGRESS_GATE_SYSTEM},
+                        {"role": "user", "content": user_content},
+                    ],
+                    max_tokens=60,
+                    temperature=0.1,
+                    json_mode=True,
+                )
             )
             raw = (completion.choices[0].message.content or "").strip()
             data = json.loads(raw)
@@ -1503,10 +1514,12 @@ class LLMBrain:
                 from groq import Groq
                 client = Groq(api_key=GROQ_API_KEY)
                 completion = client.chat.completions.create(
-                    model=GROQ_MODEL,
-                    messages=messages,
-                    max_tokens=60,
-                    temperature=0.2,
+                    **groq_kwargs(
+                        GROQ_MODEL,
+                        messages=messages,
+                        max_tokens=60,
+                        temperature=0.2,
+                    )
                 )
                 raw = (completion.choices[0].message.content or "").strip()
             except Exception as ex:
@@ -1600,10 +1613,12 @@ class LLMBrain:
         if client:
             try:
                 completion = client.chat.completions.create(
-                    model=GROQ_MODEL,
-                    messages=messages,
-                    max_tokens=70,
-                    temperature=0.2,
+                    **groq_kwargs(
+                        GROQ_MODEL,
+                        messages=messages,
+                        max_tokens=70,
+                        temperature=0.2,
+                    )
                 )
                 raw = (completion.choices[0].message.content or "").strip()
             except Exception as ex:
@@ -1672,23 +1687,25 @@ class LLMBrain:
                 f"Full partial:\n{partial_lower[:600]}"
             )
             completion = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Classify whether the candidate's recent tangent is still "
-                            "IN_CONTEXT (related domain/stack/project, worth one depth probe) "
-                            "or OFF_CONTEXT (unrelated topic, rambling). "
-                            'Return ONLY JSON: {"context": "IN_CONTEXT|OFF_CONTEXT", '
-                            '"confidence": 0.0-1.0}'
-                        ),
-                    },
-                    {"role": "user", "content": user_content},
-                ],
-                max_tokens=40,
-                temperature=0.1,
-                response_format={"type": "json_object"},
+                **groq_kwargs(
+                    GROQ_MODEL,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Classify whether the candidate's recent tangent is still "
+                                "IN_CONTEXT (related domain/stack/project, worth one depth probe) "
+                                "or OFF_CONTEXT (unrelated topic, rambling). "
+                                'Return ONLY JSON: {"context": "IN_CONTEXT|OFF_CONTEXT", '
+                                '"confidence": 0.0-1.0}'
+                            ),
+                        },
+                        {"role": "user", "content": user_content},
+                    ],
+                    max_tokens=40,
+                    temperature=0.1,
+                    json_mode=True,
+                )
             )
             raw = (completion.choices[0].message.content or "").strip()
             data = json.loads(raw)
@@ -1724,10 +1741,12 @@ class LLMBrain:
         if client:
             try:
                 completion = client.chat.completions.create(
-                    model=GROQ_MODEL,
-                    messages=messages,
-                    max_tokens=45,
-                    temperature=0.2,
+                    **groq_kwargs(
+                        GROQ_MODEL,
+                        messages=messages,
+                        max_tokens=45,
+                        temperature=0.2,
+                    )
                 )
                 raw = (completion.choices[0].message.content or "").strip()
             except Exception as ex:
@@ -2040,11 +2059,13 @@ class LLMBrain:
             if GROQ_API_KEY and client:
                 try:
                     stream = client.chat.completions.create(
-                        model=GROQ_MODEL,
-                        messages=request_messages,
-                        stream=True,
-                        max_tokens=GROQ_MAX_TOKENS,
-                        temperature=GROQ_TEMPERATURE,
+                        **groq_kwargs(
+                            GROQ_MODEL,
+                            messages=request_messages,
+                            stream=True,
+                            max_tokens=GROQ_MAX_TOKENS,
+                            temperature=GROQ_TEMPERATURE,
+                        )
                     )
                     for chunk in stream:
                         if self.state.interrupt_flag.is_set():

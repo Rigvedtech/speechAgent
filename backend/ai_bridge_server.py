@@ -215,7 +215,7 @@ def _load_reply_text(room_id: str, transcript: str, history: List[str]) -> str:
     request_messages = brain._build_request_messages()
 
     groq_api_key = (os.getenv("GROQ_API_KEY") or "").strip()
-    groq_model = (os.getenv("GROQ_MODEL") or "llama-3.1-8b-instant").strip()
+    groq_model = (os.getenv("GROQ_MODEL") or "openai/gpt-oss-120b").strip()
     ollama_model = (os.getenv("OLLAMA_MODEL") or "llama3.2:3b").strip()
 
     content = ""
@@ -223,12 +223,15 @@ def _load_reply_text(room_id: str, transcript: str, history: List[str]) -> str:
     if groq_api_key:
         try:
             from groq import Groq
+            from groq_runtime import groq_kwargs
 
             client = Groq(api_key=groq_api_key)
             completion = client.chat.completions.create(
-                model=groq_model,
-                messages=request_messages,
-                max_tokens=150,
+                **groq_kwargs(
+                    groq_model,
+                    messages=request_messages,
+                    max_tokens=150,
+                )
             )
             content = completion.choices[0].message.content if completion.choices else ""
         except Exception:

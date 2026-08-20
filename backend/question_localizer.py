@@ -12,6 +12,7 @@ import re
 from typing import Dict, List
 
 from config import GROQ_API_KEY, GROQ_MODEL, OLLAMA_MODEL
+from groq_runtime import groq_kwargs
 from interview_engine import BankQuestion
 
 logger = logging.getLogger(__name__)
@@ -57,11 +58,13 @@ def localize_planned_questions(
 
         client = Groq(api_key=GROQ_API_KEY)
         completion = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=messages,
-            max_tokens=min(120 * len(questions), 4000),
-            temperature=0.2,
-            response_format={"type": "json_object"},
+            **groq_kwargs(
+                GROQ_MODEL,
+                messages=messages,
+                max_tokens=min(120 * len(questions), 4000),
+                temperature=0.2,
+                json_mode=True,
+            )
         )
         raw = (completion.choices[0].message.content or "").strip()
     except Exception as ex:
