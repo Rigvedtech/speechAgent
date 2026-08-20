@@ -16,6 +16,7 @@ import re
 from typing import Any, Optional
 
 from services.coding_languages import language_label
+from groq_runtime import groq_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ def generate_dsa_problem(
         logger.warning("[coding_gen] GROQ_API_KEY missing")
         return None
 
-    model = getattr(app_config, "GROQ_EVALUATOR_MODEL", "llama-3.1-8b-instant")
+    model = getattr(app_config, "GROQ_EVALUATOR_MODEL", "openai/gpt-oss-20b")
     lang = (language or "python").strip().lower()
     label = language_label(lang)
     fn_style = _FN_STYLE.get(lang, f"idiomatic {label} function name")
@@ -167,29 +168,31 @@ No markdown.
         data: Optional[dict[str, Any]] = None
         try:
             resp = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "You generate one clear DSA interview problem as STRICT valid JSON. "
-                            "Never repeat an existing title. Never use Python triple-quoted strings. "
-                            "Put code in JSON strings with \\n escapes. "
-                            "You MUST always include a non-empty reference_solution string key — "
-                            "never omit it. reference_solution must be Python "
-                            "`def solution(data):` (or a Python def matching entry_function) "
-                            "reading fields via data['key'] using the exact same keys as the "
-                            "example input JSON objects — never JS/Java/C++, never separate "
-                            "positional params, never an identity/no-op return. "
-                            "Include exactly 2 correct examples."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.55,
-                max_tokens=2000,
-                timeout=60,
-                response_format={"type": "json_object"},
+                **groq_kwargs(
+                    model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "You generate one clear DSA interview problem as STRICT valid JSON. "
+                                "Never repeat an existing title. Never use Python triple-quoted strings. "
+                                "Put code in JSON strings with \\n escapes. "
+                                "You MUST always include a non-empty reference_solution string key — "
+                                "never omit it. reference_solution must be Python "
+                                "`def solution(data):` (or a Python def matching entry_function) "
+                                "reading fields via data['key'] using the exact same keys as the "
+                                "example input JSON objects — never JS/Java/C++, never separate "
+                                "positional params, never an identity/no-op return. "
+                                "Include exactly 2 correct examples."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.55,
+                    max_tokens=2000,
+                    timeout=60,
+                    json_mode=True,
+                )
             )
             raw = resp.choices[0].message.content or ""
             data = _loads_problem_json(raw)
@@ -316,21 +319,23 @@ examples:
 """
     try:
         resp = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You only write a Python reference_solution for an existing DSA "
-                        "problem draft. Return JSON {\"reference_solution\": \"...\"}."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.2,
-            max_tokens=900,
-            timeout=45,
-            response_format={"type": "json_object"},
+            **groq_kwargs(
+                model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You only write a Python reference_solution for an existing DSA "
+                            "problem draft. Return JSON {\"reference_solution\": \"...\"}."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.2,
+                max_tokens=900,
+                timeout=45,
+                json_mode=True,
+            )
         )
         raw = resp.choices[0].message.content or ""
         parsed = _loads_problem_json(raw)

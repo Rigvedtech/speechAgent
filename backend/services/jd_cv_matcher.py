@@ -243,13 +243,14 @@ def _llm_fit_judgment(
     """Ask Groq for experience_fit, skill_usage, strengths/gaps. Raises on hard failure."""
     import config as app_config
     from groq import Groq
+    from groq_runtime import groq_kwargs
 
     api_key = getattr(app_config, "GROQ_API_KEY", "") or ""
     if not api_key:
         raise RuntimeError("GROQ_API_KEY is not configured")
 
     model = getattr(app_config, "GROQ_EVALUATOR_MODEL", None) or getattr(
-        app_config, "GROQ_MODEL", "llama-3.1-8b-instant"
+        app_config, "GROQ_MODEL", "openai/gpt-oss-20b"
     )
     client = Groq(api_key=api_key)
 
@@ -278,23 +279,25 @@ CANDIDATE CV:
 """
 
     resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict technical recruiter scoring one CV against one JD. "
-                    "Return valid JSON only. Scores are 0-100 integers/numbers. "
-                    "Penalize resume keyword stuffing without usage evidence. "
-                    "Reward clear, relevant experience for the JD."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0,
-        max_tokens=700,
-        timeout=60,
-        response_format={"type": "json_object"},
+        **groq_kwargs(
+            model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a strict technical recruiter scoring one CV against one JD. "
+                        "Return valid JSON only. Scores are 0-100 integers/numbers. "
+                        "Penalize resume keyword stuffing without usage evidence. "
+                        "Reward clear, relevant experience for the JD."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+            max_tokens=700,
+            timeout=60,
+            json_mode=True,
+        )
     )
     raw = resp.choices[0].message.content or ""
     return _parse_llm_json(raw)

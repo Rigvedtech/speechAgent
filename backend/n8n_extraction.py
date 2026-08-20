@@ -133,6 +133,7 @@ CRITICAL:
 - Include "difficulty" field: "Low", "Intermediate", or "Hard"
 - Include "source" field: "jd" or "resume"
 - Include "question" field with the actual question text
+- The questions array MUST contain exactly 15 items — never 12, 13, or 14
 - Do not include explanations
 - Do not include answers
 - Do not include markdown
@@ -174,6 +175,10 @@ JOB DESCRIPTION:
 CANDIDATE RESUME:
 {cv_text}
 """
+
+_MAX_QUESTION_JD_CHARS = 2200
+_MAX_QUESTION_CV_CHARS = 2500
+_QUESTION_GEN_MAX_TOKENS = 3500
 
 _QUESTION_ACRONYM_RE = re.compile(
     r"\b(API|JWT|SQL|CRUD|REST|DNS|SSL|TLS|MERN|TCP/IP|TCP|VLAN|VLANs|AWS)\b"
@@ -471,6 +476,13 @@ def extract_jd_file(
     return parsed
 
 
+def _clip_for_question_gen(text: str, limit: int) -> str:
+    raw = (text or "").strip()
+    if len(raw) <= limit:
+        return raw
+    return raw[:limit].rsplit(" ", 1)[0].strip() + "\n[truncated]"
+
+
 def generate_questions(
     *,
     jd_text: str,
@@ -489,6 +501,7 @@ def generate_questions(
     try:
         import config as app_config
         from groq import Groq
+        from groq_runtime import groq_kwargs
     except Exception as ex:
         logger.error("[QUESTION-GEN] Groq import failed: %s", ex)
         raise ValueError("Local question generation is unavailable") from ex
@@ -497,7 +510,9 @@ def generate_questions(
     if not api_key:
         raise ValueError("GROQ_API_KEY is not configured")
 
-    model = getattr(app_config, "GROQ_EVALUATOR_MODEL", "llama-3.1-8b-instant")
+    jd_text = _clip_for_question_gen(jd_text, _MAX_QUESTION_JD_CHARS)
+    cv_text = _clip_for_question_gen(cv_text, _MAX_QUESTION_CV_CHARS)
+    model = getattr(app_config, "GROQ_EVALUATOR_MODEL", "openai/gpt-oss-20b")
     # Use direct token replacement so literal JSON braces in the prompt
     # are preserved and not parsed as str.format placeholders.
     prompt = (
@@ -509,28 +524,40 @@ def generate_questions(
     req_timeout = int(timeout_sec or 90)
 
     last_err = "invalid question payload"
+    last_count = 0
     for attempt in range(1, 3):
+        user_content = prompt
+        if attempt > 1 and last_count:
+            user_content = (
+                f"{prompt}\n\nCORRECTION: Your previous JSON had {last_count} questions. "
+                "Return EXACTLY 15 questions with ids 1-15, difficulties Low/Intermediate/Hard "
+                "as specified, and sources jd then resume. No fewer."
+            )
         try:
             resp = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": (
-                            "Return only strict valid JSON with key 'questions'. "
-                            "No markdown. No explanation."
-                        ),
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=0.35,
-                max_tokens=2400,
-                timeout=req_timeout,
-                response_format={"type": "json_object"},
+                **groq_kwargs(
+                    model,
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": (
+                                "Return only strict valid JSON with key 'questions'. "
+                                "The questions array length must be exactly 15. "
+                                "No markdown. No explanation."
+                            ),
+                        },
+                        {"role": "user", "content": user_content},
+                    ],
+                    max_tokens=_QUESTION_GEN_MAX_TOKENS,
+                    temperature=0.35,
+                    json_mode=True,
+                    timeout=req_timeout,
+                )
             )
             raw = resp.choices[0].message.content or ""
             payload = _coerce_llm_json_object(raw)
             questions = _parse_questions(payload.get("questions")) or []
+            last_count = len(questions)
             if _is_valid_generated_distribution(questions):
                 logger.info("[QUESTION-GEN] generated questions=%s", len(questions))
                 return {"questions": questions}
@@ -543,5 +570,8 @@ def generate_questions(
         except Exception as ex:
             last_err = str(ex)
             logger.warning("[QUESTION-GEN] failed attempt=%s: %s", attempt, ex)
+            err_l = last_err.lower()
+            if "413" in last_err or "request too large" in err_l or "tokens per minute" in err_l:
+                break
 
     raise ValueError(f"Question generation failed: {last_err}")
