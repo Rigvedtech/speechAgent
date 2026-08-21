@@ -58,7 +58,15 @@ export function AuthSplitLayout({ children }: AuthSplitLayoutProps) {
 
         <main className="flex h-full min-h-0 flex-col overflow-y-auto bg-white text-neutral-950">
           <div className="flex min-h-full flex-1 flex-col items-center justify-center px-8 py-8 sm:px-12 lg:px-14 lg:py-10 xl:px-16 xl:py-12">
-            <div className="w-full max-w-[400px]">{children}</div>
+            <div className="w-full max-w-[400px]">
+              <div className="mb-8 flex items-center gap-2.5">
+                <PrabhatMark className="h-4 w-auto text-neutral-950" />
+                <span className="text-xl font-semibold tracking-wide text-neutral-950">
+                  PRABHAT<span className="text-[#7c3aed]">.</span>
+                </span>
+              </div>
+              {children}
+            </div>
           </div>
         </main>
       </div>
