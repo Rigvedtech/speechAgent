@@ -463,7 +463,7 @@ python database/migrate.py dump --dir backups/db --keep 3
 
 ## 10. Environment and secrets checklist
 
-Canonical list: `backend/.env.example`. Frontend: `frontend/.env.example`.
+Canonical list with **use cases:** `KNOWLEDGE_TRANSFER_ENV.md`. Template: `backend/.env.example`. Frontend: `frontend/.env.example`.
 
 **Must work in production**
 
@@ -593,7 +593,8 @@ Read these when you need depth; this KT does not replace them.
 | Doc                                    | Topic                                     |
 | -------------------------------------- | ----------------------------------------- |
 | `backend/README.md`                    | Old STT→LLM→TTS diagram; runtime modes    |
-| `backend/.env.example`                 | Every backend flag                        |
+| `KNOWLEDGE_TRANSFER_ENV.md`        | **Every `backend/.env` variable and its use case** |
+| `backend/.env.example`                 | Template (fill secrets in `.env`, not in git)     |
 | `database/README.md`                   | Migrations, table map, query cheat sheet  |
 | `frontend/README.md`                   | Vite vs Vercel landing-only               |
 | `backend/API_REFERENCE.md`             | Older API notes — verify against `/docs`  |
