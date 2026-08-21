@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, List, Literal, Optional
 from uuid import UUID
@@ -25,6 +26,8 @@ from auth.deps import get_current_user, get_db, require_admin, require_writer
 from db.models import Organization, User
 from routers.candidates import CandidateOut
 from routers.job_postings import JobPostingOut
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ats", tags=["ats"])
 
@@ -371,9 +374,12 @@ def get_remote_job(
     user: User = Depends(require_writer),
     db: Session = Depends(get_db),
 ):
-    """Browse a remote ATS job without writing to the local DB."""
+    """Browse a remote ATS job. Extracts JD text from the file when needed (same as bulk upload).
+    Does not create a local job; may backfill jd_text if already imported."""
     from sqlalchemy import select
     from db.models import JobPosting
+
+    from ats.import_service import _auth_headers, text_from_ats_remote
 
     org = _org(db, user)
     provider = get_provider(org)
@@ -391,11 +397,31 @@ def get_remote_job(
         )
     ).first()
 
+    jd_text = None
+    if local and (local.jd_text or "").strip():
+        jd_text = local.jd_text
+    else:
+        try:
+            jd_text = text_from_ats_remote(
+                remote.jd_text,
+                remote.jd_url,
+                filename=remote.jd_filename or "",
+                headers=_auth_headers(provider),
+            )
+        except Exception as ex:
+            logger.warning("[ats] job JD extract failed external=%s: %s", ext, ex)
+            jd_text = None
+        if not jd_text:
+            jd_text = (remote.description or "").strip() or None
+        if local is not None and jd_text and not (local.jd_text or "").strip():
+            local.jd_text = jd_text
+            db.commit()
+
     return AtsJobDetailOut(
         external_id=remote.external_id,
         job_title=remote.job_title,
         description=remote.description,
-        jd_text=remote.jd_text,
+        jd_text=jd_text,
         company_name=_raw_str(remote.raw, "company_name"),
         status=_raw_str(remote.raw, "status") or remote.description,
         has_jd_url=bool(remote.jd_url),
@@ -414,10 +440,11 @@ def get_remote_candidate(
     user: User = Depends(require_writer),
     db: Session = Depends(get_db),
 ):
-    """Browse a remote ATS candidate without writing to the local DB."""
+    """Browse a remote ATS candidate. Extracts resume text from the PDF/DOCX (same as bulk upload).
+    Does not create a local candidate; may backfill cv_text if already imported."""
     from sqlalchemy import select
     from db.models import Candidate
-    from ats.import_service import _auth_headers, _download_bytes, _usable_extracted_text
+    from ats.import_service import _auth_headers, text_from_ats_remote
 
     org = _org(db, user)
     provider = get_provider(org)
@@ -433,21 +460,6 @@ def get_remote_candidate(
     except ValueError as ve:
         raise HTTPException(status_code=404, detail=str(ve)) from ve
 
-    cv_text = remote.cv_text
-    if not cv_text and remote.cv_url:
-        try:
-            content, mime = _download_bytes(
-                remote.cv_url, headers=_auth_headers(provider)
-            )
-            decoded = content.decode("utf-8", errors="ignore")
-            cv_text = _usable_extracted_text(
-                decoded,
-                mime=mime,
-                filename=remote.cv_filename or "",
-            ) or None
-        except Exception:
-            cv_text = None
-
     local = db.scalars(
         select(Candidate).where(
             Candidate.organization_id == org.id,
@@ -455,6 +467,24 @@ def get_remote_candidate(
             Candidate.deleted_at.is_(None),
         )
     ).first()
+
+    cv_text = None
+    if local and (local.cv_text or "").strip():
+        cv_text = local.cv_text
+    else:
+        try:
+            cv_text = text_from_ats_remote(
+                remote.cv_text,
+                remote.cv_url,
+                filename=remote.cv_filename or _raw_str(remote.raw, "resume_file_name") or "",
+                headers=_auth_headers(provider),
+            )
+        except Exception as ex:
+            logger.warning("[ats] candidate CV extract failed external=%s: %s", ext, ex)
+            cv_text = None
+        if local is not None and cv_text and not (local.cv_text or "").strip():
+            local.cv_text = cv_text
+            db.commit()
 
     return AtsCandidateDetailOut(
         external_id=remote.external_id,

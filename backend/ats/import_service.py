@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import tempfile
+from pathlib import Path
 from typing import Any, Optional
 from uuid import UUID
 
@@ -15,6 +18,7 @@ from ats.base import AtsRemoteCandidate, AtsRemoteJob
 from ats.factory import get_provider
 from db.models import Candidate, Document, JobPosting, Organization, User
 from document_store import create_uploaded_document, mark_document_ready
+from services.text_extractor import extract_document
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +96,151 @@ def _usable_extracted_text(text: str, *, mime: Optional[str], filename: str) -> 
     return text.strip()
 
 
+def _infer_mime_and_suffix(
+    file_bytes: bytes,
+    filename: str,
+    mime: Optional[str],
+) -> tuple[str, str]:
+    """Guess MIME + suffix from magic bytes, then filename, then reported Content-Type."""
+    header = file_bytes[:12] if file_bytes else b""
+    name = (filename or "").lower()
+    reported = (mime or "").split(";")[0].strip().lower()
+    suffix = Path(name).suffix.lower() if name else ""
+
+    if file_bytes[:1024].find(b"%PDF-") >= 0:
+        return "application/pdf", ".pdf"
+    if header.startswith(b"PK\x03\x04"):
+        return (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".docx",
+        )
+    if header.startswith(b"\xd0\xcf\x11\xe0"):
+        return "application/msword", ".doc"
+    if header.startswith(b"\x89PNG"):
+        return "image/png", ".png"
+    if header.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", ".jpg"
+    if header.startswith(b"GIF87a") or header.startswith(b"GIF89a"):
+        return "image/gif", ".gif"
+    if header[:4] == b"RIFF" and len(file_bytes) >= 12 and file_bytes[8:12] == b"WEBP":
+        return "image/webp", ".webp"
+
+    ext_map = {
+        ".pdf": "application/pdf",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ".doc": "application/msword",
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".txt": "text/plain",
+        ".md": "text/plain",
+    }
+    if suffix in ext_map:
+        return ext_map[suffix], suffix
+
+    if "pdf" in reported:
+        return "application/pdf", ".pdf"
+    if "wordprocessingml" in reported or reported.endswith("docx"):
+        return (
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".docx",
+        )
+    if reported in {"application/msword", "application/doc"}:
+        return "application/msword", ".doc"
+    if reported.startswith("image/"):
+        return reported, suffix or ".bin"
+    if reported.startswith("text/"):
+        return reported, suffix or ".txt"
+    if reported and reported not in {"application/octet-stream", "binary/octet-stream"}:
+        return reported, suffix or ".bin"
+    return "application/octet-stream", suffix or ".bin"
+
+
+def extract_file_bytes_to_text(
+    file_bytes: bytes,
+    *,
+    filename: str = "",
+    mime: Optional[str] = None,
+) -> str:
+    """Extract readable text the same way bulk upload does (PDF/DOCX/images)."""
+    if not file_bytes:
+        return ""
+
+    inferred_mime, suffix = _infer_mime_and_suffix(file_bytes, filename, mime)
+    safe_name = filename or f"ats_file{suffix}"
+
+    if inferred_mime.startswith("text/") or suffix in {".txt", ".md", ".csv"}:
+        try:
+            decoded = file_bytes.decode("utf-8", errors="ignore")
+        except Exception:
+            decoded = ""
+        return _usable_extracted_text(decoded, mime=inferred_mime, filename=safe_name)
+
+    tmp_path: Optional[str] = None
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=suffix or ".bin")
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(file_bytes)
+        result = extract_document(Path(tmp_path), inferred_mime)
+        text = (result.text or "").strip()
+        if text:
+            logger.info(
+                "[ats] extracted %d chars method=%s file=%s",
+                len(text),
+                result.extraction_method,
+                safe_name,
+            )
+            return text
+        logger.warning(
+            "[ats] extractor returned empty text method=%s warnings=%s file=%s",
+            result.extraction_method,
+            result.warnings,
+            safe_name,
+        )
+    except Exception as ex:
+        logger.warning("[ats] extract_document failed file=%s: %s", safe_name, ex)
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    try:
+        decoded = file_bytes.decode("utf-8", errors="ignore")
+    except Exception:
+        decoded = ""
+    return _usable_extracted_text(decoded, mime=inferred_mime, filename=safe_name)
+
+
+def text_from_ats_remote(
+    existing_text: Optional[str],
+    url: Optional[str],
+    *,
+    filename: str = "",
+    headers: Optional[dict] = None,
+) -> Optional[str]:
+    """Prefer ATS-provided text; otherwise download the file and extract it."""
+    usable = _usable_extracted_text(
+        existing_text or "",
+        mime="text/plain",
+        filename="ats.txt",
+    )
+    if usable:
+        return usable
+    if not url:
+        return None
+    content, mime = _download_bytes(url, headers=headers or {})
+    extracted = extract_file_bytes_to_text(
+        content,
+        filename=filename,
+        mime=mime,
+    )
+    return extracted or None
+
+
 def import_candidate(
     db: Session,
     user: User,
@@ -108,6 +257,11 @@ def import_candidate(
     except ValueError as ve:
         raise HTTPException(status_code=404, detail=str(ve)) from ve
 
+    cv_seed = _usable_extracted_text(
+        remote.cv_text or "",
+        mime="text/plain",
+        filename="ats.txt",
+    )
     row = _find_candidate_by_ats(db, org.id, remote.external_id)
     if row is None:
         row = Candidate(
@@ -116,7 +270,7 @@ def import_candidate(
             full_name=remote.full_name[:255],
             email=(remote.email or None),
             phone=(remote.phone or None)[:50] if remote.phone else None,
-            cv_text=remote.cv_text,
+            cv_text=cv_seed or None,
             source="ats",
             external_ats_id=remote.external_id[:255],
             is_active=True,
@@ -127,8 +281,8 @@ def import_candidate(
         row.full_name = remote.full_name[:255]
         row.email = remote.email or row.email
         row.phone = (remote.phone or row.phone)
-        if remote.cv_text:
-            row.cv_text = remote.cv_text
+        if cv_seed:
+            row.cv_text = cv_seed
         row.source = "ats"
         row.is_active = True
 
@@ -163,13 +317,18 @@ def import_job(
     except ValueError as ve:
         raise HTTPException(status_code=404, detail=str(ve)) from ve
 
+    jd_seed = _usable_extracted_text(
+        remote.jd_text or "",
+        mime="text/plain",
+        filename="ats.txt",
+    )
     row = _find_job_by_ats(db, org.id, remote.external_id)
     if row is None:
         row = JobPosting(
             organization_id=org.id,
             created_by=user.id,
             job_title=remote.job_title[:255],
-            jd_text=remote.jd_text,
+            jd_text=jd_seed or None,
             description=remote.description,
             source="ats",
             external_ats_id=remote.external_id[:255],
@@ -180,8 +339,8 @@ def import_job(
         db.flush()
     else:
         row.job_title = remote.job_title[:255]
-        if remote.jd_text:
-            row.jd_text = remote.jd_text
+        if jd_seed:
+            row.jd_text = jd_seed
         if remote.description:
             row.description = remote.description
         row.source = "ats"
@@ -238,20 +397,17 @@ def _persist_cv_document(
         candidate_id=candidate.id,
         source="ats",
     )
-    text = remote.cv_text or ""
+    text = _usable_extracted_text(
+        remote.cv_text or "",
+        mime="text/plain",
+        filename="ats.txt",
+    )
     if not text and file_bytes:
-        try:
-            decoded = file_bytes.decode("utf-8", errors="ignore")
-        except Exception:
-            decoded = ""
-        text = _usable_extracted_text(decoded, mime=mime, filename=filename)
+        text = extract_file_bytes_to_text(file_bytes, filename=filename, mime=mime)
     if text:
         mark_document_ready(db, doc.id, extracted_text=text)
-        if not candidate.cv_text:
-            candidate.cv_text = text
-            db.commit()
-    elif remote.cv_text:
-        mark_document_ready(db, doc.id, extracted_text=remote.cv_text)
+        candidate.cv_text = text
+        db.commit()
     return doc
 
 
@@ -288,24 +444,18 @@ def _persist_jd_document(
         job_posting_id=job.id,
         source="ats",
     )
-    text = remote.jd_text or ""
+    text = _usable_extracted_text(
+        remote.jd_text or "",
+        mime="text/plain",
+        filename="ats.txt",
+    )
     if not text and file_bytes:
-        try:
-            decoded = file_bytes.decode("utf-8", errors="ignore")
-        except Exception:
-            decoded = ""
-        text = _usable_extracted_text(decoded, mime=mime, filename=filename)
+        text = extract_file_bytes_to_text(file_bytes, filename=filename, mime=mime)
     if text:
         mark_document_ready(db, doc.id, extracted_text=text)
         job.jd_text = text
         job.jd_document_id = doc.id
         job.pipeline_status = "ready"
-        db.commit()
-    elif remote.jd_text:
-        job.jd_text = remote.jd_text
-        job.jd_document_id = doc.id
-        job.pipeline_status = "ready"
-        mark_document_ready(db, doc.id, extracted_text=remote.jd_text)
         db.commit()
     else:
         job.jd_document_id = doc.id

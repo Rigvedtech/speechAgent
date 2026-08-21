@@ -235,7 +235,7 @@ export function AtsImportDialog({
               ? 'Choose the role first, then select a candidate under it.'
               : lockedParentId && mode === 'candidate'
                 ? 'Showing candidates for the job you already selected. Saved to your workspace when you schedule or send the bot.'
-                : 'Selection fills this interview. CV/JD are saved only when you schedule or send the bot to lobby.'}
+                : 'Selecting a candidate extracts the resume. Files are saved when you schedule or send the bot.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -334,7 +334,7 @@ export function AtsImportDialog({
                           {pickingId === row.external_id ? (
                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
                           ) : null}
-                          Use
+                          {pickingId === row.external_id ? 'Extracting…' : 'Use'}
                         </Button>
                       )}
                     </div>
@@ -407,7 +407,7 @@ export function AtsImportDialog({
                     {pickingId === row.external_id ? (
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     ) : null}
-                    Use
+                    {pickingId === row.external_id ? 'Extracting…' : 'Use'}
                   </Button>
                 </div>
               </div>

@@ -747,7 +747,9 @@ export function listAtsJobs(params?: { q?: string; page?: number; page_size?: nu
 }
 
 export function getAtsJob(externalId: string) {
-  return request<AtsJobDetail>(`/api/ats/jobs/${encodeURIComponent(externalId)}`)
+  return request<AtsJobDetail>(`/api/ats/jobs/${encodeURIComponent(externalId)}`, {
+    timeoutMs: 120_000,
+  })
 }
 
 export function getAtsCandidate(externalId: string, requestId?: string) {
@@ -756,12 +758,14 @@ export function getAtsCandidate(externalId: string, requestId?: string) {
   const suffix = qs.toString() ? `?${qs.toString()}` : ''
   return request<AtsCandidateDetail>(
     `/api/ats/candidates/${encodeURIComponent(externalId)}${suffix}`,
+    { timeoutMs: 120_000 },
   )
 }
 
 export function importAtsCandidate(externalId: string, parentId?: string) {
   return request<Candidate>('/api/ats/import/candidate', {
     method: 'POST',
+    timeoutMs: 120_000,
     body: JSON.stringify({
       external_id: externalId,
       ...(parentId ? { parent_id: parentId } : {}),
@@ -772,6 +776,7 @@ export function importAtsCandidate(externalId: string, parentId?: string) {
 export function importAtsJob(externalId: string) {
   return request<JobPosting>('/api/ats/import/job', {
     method: 'POST',
+    timeoutMs: 120_000,
     body: JSON.stringify({ external_id: externalId }),
   })
 }

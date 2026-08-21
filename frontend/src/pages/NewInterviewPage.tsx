@@ -1042,14 +1042,18 @@ export function NewInterviewPage() {
 
                     {values.cvText.trim() ? (
                       <div className="rounded-lg border border-border bg-muted/20 px-3 py-2.5">
-                        <p className="text-xs font-medium text-foreground">Resume loaded from database</p>
+                        <p className="text-xs font-medium text-foreground">
+                          {pendingAtsCandidateExternalId
+                            ? 'Resume extracted from ATS'
+                            : 'Resume loaded from database'}
+                        </p>
                         <p className="mt-1 text-[11px] text-muted-foreground">
                           {values.cvText.trim().length.toLocaleString()} characters — review on the next step.
                         </p>
                       </div>
                     ) : candidateId || pendingAtsCandidateExternalId ? (
                       <p className="text-xs text-destructive">
-                        No resume text on this candidate. Process the CV in Bulk Upload first.
+                        Could not extract resume text from this ATS file. Try another candidate or upload the CV in Bulk Upload.
                       </p>
                     ) : null}
                   </div>
