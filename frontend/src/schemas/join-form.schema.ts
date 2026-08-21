@@ -13,11 +13,17 @@ export const DIFFICULTY_PATTERN = [
   'Low',
 ] as const
 
-export const REQUIRED_COUNTS = {
+export type DifficultyCounts = {
+  Low: number
+  Hard: number
+  Intermediate: number
+}
+
+export const REQUIRED_COUNTS: DifficultyCounts = {
   Low: 4,
   Hard: 3,
   Intermediate: 3,
-} as const
+}
 
 const questionSchema = z.object({
   id: z.string().min(1, 'ID is required'),
@@ -98,9 +104,12 @@ export function isStep3TextReady(values: Pick<JoinFormValues, 'jdText' | 'cvText
   return true
 }
 
-export function isStep3Ready(values: Pick<JoinFormValues, 'jdText' | 'cvText' | 'questions'>) {
+export function isStep3Ready(
+  values: Pick<JoinFormValues, 'jdText' | 'cvText' | 'questions'>,
+  required?: DifficultyCounts,
+) {
   if (!isStep3TextReady(values)) return false
-  return checkBankCoverage(values.questions).ok
+  return checkBankCoverage(values.questions, required).ok
 }
 
 export function isStep4Ready(meetingUrl: string) {
@@ -121,7 +130,23 @@ export function normalizeSource(s: string): string {
   return 'other'
 }
 
-export function checkBankCoverage(questions: JoinFormValues['questions']): {
+export function requiredCountsFromPlan(plan?: {
+  beginner: number
+  intermediate: number
+  hard: number
+} | null): DifficultyCounts {
+  if (!plan) return REQUIRED_COUNTS
+  return {
+    Low: plan.beginner,
+    Intermediate: plan.intermediate,
+    Hard: plan.hard,
+  }
+}
+
+export function checkBankCoverage(
+  questions: JoinFormValues['questions'],
+  required: DifficultyCounts = REQUIRED_COUNTS,
+): {
   ok: boolean
   counts: Record<string, number>
   missing: string[]
@@ -132,9 +157,9 @@ export function checkBankCoverage(questions: JoinFormValues['questions']): {
     counts[diff] = (counts[diff] ?? 0) + 1
   }
   const missing: string[] = []
-  for (const [diff, required] of Object.entries(REQUIRED_COUNTS)) {
-    if ((counts[diff] ?? 0) < required) {
-      missing.push(`${diff}: need ${required}, have ${counts[diff] ?? 0}`)
+  for (const [diff, need] of Object.entries(required)) {
+    if ((counts[diff] ?? 0) < need) {
+      missing.push(`${diff}: need ${need}, have ${counts[diff] ?? 0}`)
     }
   }
   return { ok: missing.length === 0, counts, missing }

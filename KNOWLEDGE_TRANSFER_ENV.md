@@ -172,7 +172,10 @@ ngrok is only for machines Recall cannot reach (laptop). Command: `ngrok http 80
 
 | Variable | Use case |
 | --- | --- |
-| `MAX_QUESTIONS` | Cap on core questions (15). |
+| `MAX_QUESTIONS` | Total questions Groq generates and the interview can ask. |
+| `QUESTION_COUNT_BEGINNER` | How many Low/beginner (JD) questions. |
+| `QUESTION_COUNT_INTERMEDIATE` | How many Intermediate (JD) questions. |
+| `QUESTION_COUNT_HARD` | How many Hard (resume) questions. If the three counts ≠ `MAX_QUESTIONS`, they are auto-scaled. |
 | `MAX_INTERVIEW_MINUTES` | Hard interview clock (30). |
 | `MAX_STRIKES` | Off-track / policy strikes before close. |
 | `MAX_OFF_TOPIC_REDIRECTS` | How often the bot may pull the candidate back. |

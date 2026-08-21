@@ -185,12 +185,21 @@ export interface InterviewReportResponse {
   report: InterviewReport
 }
 
+export interface QuestionPlan {
+  total: number
+  beginner: number
+  intermediate: number
+  hard: number
+  adjusted?: boolean
+}
+
 export interface HealthResponse {
   status: string
   service: string
   websocket_url?: string
   bot_name?: string
   lobby_timeout_minutes?: number
+  question_plan?: QuestionPlan
 }
 
 export interface ApiErrorDetail {

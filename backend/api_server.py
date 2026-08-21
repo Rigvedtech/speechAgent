@@ -1832,6 +1832,13 @@ async def health_check():
         "websocket_url": PUBLIC_WEBSOCKET_URL,
         "bot_name": BOT_NAME,
         "lobby_timeout_minutes": LOBBY_TIMEOUT_MINUTES,
+        "question_plan": {
+            "total": int(app_config.QUESTION_PLAN.total),
+            "beginner": int(app_config.QUESTION_PLAN.beginner),
+            "intermediate": int(app_config.QUESTION_PLAN.intermediate),
+            "hard": int(app_config.QUESTION_PLAN.hard),
+            "adjusted": bool(app_config.QUESTION_PLAN.adjusted),
+        },
     }
 
 
@@ -1861,8 +1868,11 @@ if __name__ == "__main__":
     logger.info(f"Docs: http://0.0.0.0:8000/docs")
     logger.info(f"Bot Name: {BOT_NAME}")
     logger.info(
-        "Camera integrity: %s",
-        "ON" if app_config.CAMERA_INTEGRITY_ENABLED else "OFF",
+        "Questions: total=%s beginner=%s intermediate=%s hard=%s",
+        app_config.QUESTION_PLAN.total,
+        app_config.QUESTION_PLAN.beginner,
+        app_config.QUESTION_PLAN.intermediate,
+        app_config.QUESTION_PLAN.hard,
     )
     logger.info("=" * 60)
     

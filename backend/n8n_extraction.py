@@ -39,7 +39,17 @@ _DIFFICULTY_ALIASES = {
     "advanced": "Hard",
 }
 
-_QUESTION_PROMPT_TEMPLATE = """You are conducting a LIVE technical interview right now. The candidate is sitting across from you. You have already read their resume and the job description.
+def _build_question_prompt(jd_text: str, cv_text: str, plan) -> str:
+    from question_plan import QuestionPlan, format_id_span
+
+    if not isinstance(plan, QuestionPlan):
+        raise TypeError("plan must be a QuestionPlan")
+    low_span = format_id_span(*plan.id_range("beginner"))
+    mid_span = format_id_span(*plan.id_range("intermediate"))
+    hard_span = format_id_span(*plan.id_range("hard"))
+    jd_span = format_id_span(1, plan.jd_count) if plan.jd_count else ""
+    resume_span = format_id_span(*plan.id_range("hard")) if plan.resume_count else ""
+    return f"""You are conducting a LIVE technical interview right now. The candidate is sitting across from you. You have already read their resume and the job description.
 
 Your goal is to assess:
 - Technical competency
@@ -50,42 +60,50 @@ Your goal is to assess:
 
 QUESTION DISTRIBUTION
 
-Generate exactly 15 questions.
+Generate exactly {plan.total} questions.
 
-Questions 1-10:
+{jd_span}:
 - Based primarily on the skills, technologies, frameworks, tools, and responsibilities from the job description.
 - Include a mix of conceptual understanding and practical implementation experience.
 - Pull REAL nouns (specific tools, stack, technologies) from the JD into your questions.
 - Ask questions naturally as a real interviewer would during a technical interview.
+- source must be "jd"
 
-Questions 11-15:
+{resume_span}:
 - Based primarily on the candidate's Resume/CV.
 - Focus on specific projects, work experience, achievements, technologies explicitly mentioned in the resume.
 - USE THE ACTUAL PROJECT NAMES, COMPANY NAMES from the resume in your questions.
 - Ask for implementation details, decisions made, challenges faced, tradeoffs, debugging approaches, and ownership.
 - These questions verify whether the candidate genuinely worked on what they claim.
+- source must be "resume"
 
 DIFFICULTY DISTRIBUTION
 
-Questions 1-5:
-Difficulty: Low
+{low_span}:
+Difficulty: Low (beginner)
+Count: {plan.beginner}
 - Fundamentals
 - Basic implementation experience
 - Technology familiarity
+- source: jd
 
-Questions 6-10:
+{mid_span}:
 Difficulty: Intermediate
+Count: {plan.intermediate}
 - Practical engineering knowledge
 - Real-world development experience
 - Design choices and tradeoffs
+- source: jd
 
-Questions 11-15:
+{hard_span}:
 Difficulty: Hard
+Count: {plan.hard}
 - Deep resume validation
 - Project implementation details
 - Technical decisions
 - Problem-solving experiences
 - Ownership and impact
+- source: resume
 
 QUESTION STYLE RULES (for voice/TTS):
 
@@ -111,29 +129,29 @@ OUTPUT FORMAT
 
 Return ONLY a JSON object using this EXACT structure:
 
-{
+{{
   "questions": [
-    {
+    {{
       "id": 1,
       "difficulty": "Low",
       "source": "jd",
       "question": "Your question text here"
-    },
-    {
+    }},
+    {{
       "id": 2,
       "difficulty": "Low",
       "source": "jd",
       "question": "Your question text here"
-    }
+    }}
   ]
-}
+}}
 
 CRITICAL:
-- Include "id" field for each question (1 through 15)
+- Include "id" field for each question (1 through {plan.total})
 - Include "difficulty" field: "Low", "Intermediate", or "Hard"
 - Include "source" field: "jd" or "resume"
 - Include "question" field with the actual question text
-- The questions array MUST contain exactly 15 items — never 12, 13, or 14
+- The questions array MUST contain exactly {plan.total} items
 - Do not include explanations
 - Do not include answers
 - Do not include markdown
@@ -320,23 +338,27 @@ def _coerce_llm_json_object(raw: str) -> Dict[str, Any]:
     return {}
 
 
-def _is_valid_generated_distribution(questions: List[Dict[str, str]]) -> bool:
-    if len(questions) != 15:
+def _is_valid_generated_distribution(questions: List[Dict[str, str]], plan) -> bool:
+    if len(questions) != plan.total:
         return False
+    low_lo, low_hi = plan.id_range("beginner")
+    mid_lo, mid_hi = plan.id_range("intermediate")
+    hard_lo, hard_hi = plan.id_range("hard")
     for i, q in enumerate(questions, start=1):
         if str(q.get("id")) != str(i):
             return False
         difficulty = q.get("difficulty")
         source = q.get("source")
-        if i <= 5 and difficulty != "Low":
-            return False
-        if 6 <= i <= 10 and difficulty != "Intermediate":
-            return False
-        if i >= 11 and difficulty != "Hard":
-            return False
-        if i <= 10 and source != "jd":
-            return False
-        if i >= 11 and source != "resume":
+        if low_lo and low_lo <= i <= low_hi:
+            if difficulty != "Low" or source != "jd":
+                return False
+        elif mid_lo and mid_lo <= i <= mid_hi:
+            if difficulty != "Intermediate" or source != "jd":
+                return False
+        elif hard_lo and hard_lo <= i <= hard_hi:
+            if difficulty != "Hard" or source != "resume":
+                return False
+        else:
             return False
     return True
 
@@ -513,13 +535,16 @@ def generate_questions(
     jd_text = _clip_for_question_gen(jd_text, _MAX_QUESTION_JD_CHARS)
     cv_text = _clip_for_question_gen(cv_text, _MAX_QUESTION_CV_CHARS)
     model = getattr(app_config, "GROQ_EVALUATOR_MODEL", "openai/gpt-oss-20b")
-    # Use direct token replacement so literal JSON braces in the prompt
-    # are preserved and not parsed as str.format placeholders.
-    prompt = (
-        _QUESTION_PROMPT_TEMPLATE
-        .replace("{jd_text}", jd_text)
-        .replace("{cv_text}", cv_text)
+    plan = app_config.QUESTION_PLAN
+    logger.info(
+        "[QUESTION-GEN] plan total=%s beginner=%s intermediate=%s hard=%s adjusted=%s",
+        plan.total,
+        plan.beginner,
+        plan.intermediate,
+        plan.hard,
+        plan.adjusted,
     )
+    prompt = _build_question_prompt(jd_text, cv_text, plan)
     client = Groq(api_key=api_key)
     req_timeout = int(timeout_sec or 90)
 
@@ -530,8 +555,9 @@ def generate_questions(
         if attempt > 1 and last_count:
             user_content = (
                 f"{prompt}\n\nCORRECTION: Your previous JSON had {last_count} questions. "
-                "Return EXACTLY 15 questions with ids 1-15, difficulties Low/Intermediate/Hard "
-                "as specified, and sources jd then resume. No fewer."
+                f"Return EXACTLY {plan.total} questions with ids 1-{plan.total}, "
+                f"{plan.beginner} Low (jd), {plan.intermediate} Intermediate (jd), "
+                f"{plan.hard} Hard (resume). No fewer."
             )
         try:
             resp = client.chat.completions.create(
@@ -542,7 +568,7 @@ def generate_questions(
                             "role": "system",
                             "content": (
                                 "Return only strict valid JSON with key 'questions'. "
-                                "The questions array length must be exactly 15. "
+                                f"The questions array length must be exactly {plan.total}. "
                                 "No markdown. No explanation."
                             ),
                         },
@@ -558,7 +584,7 @@ def generate_questions(
             payload = _coerce_llm_json_object(raw)
             questions = _parse_questions(payload.get("questions")) or []
             last_count = len(questions)
-            if _is_valid_generated_distribution(questions):
+            if _is_valid_generated_distribution(questions, plan):
                 logger.info("[QUESTION-GEN] generated questions=%s", len(questions))
                 return {"questions": questions}
             last_err = "shape/distribution mismatch"
