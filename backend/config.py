@@ -1,6 +1,7 @@
 import os
 import torch
 from dotenv import load_dotenv
+from question_plan import resolve_question_plan
 
 load_dotenv()
 
@@ -191,7 +192,19 @@ _STARTUP_GREETING_DEFAULT = (
 STARTUP_GREETING = _env_str("STARTUP_GREETING", _STARTUP_GREETING_DEFAULT)
 
 # Interview orchestration
-MAX_QUESTIONS = _env_int("MAX_QUESTIONS", 10)
+MAX_QUESTIONS = _env_int("MAX_QUESTIONS", 15)
+QUESTION_COUNT_BEGINNER = _env_int("QUESTION_COUNT_BEGINNER", 5)
+QUESTION_COUNT_INTERMEDIATE = _env_int("QUESTION_COUNT_INTERMEDIATE", 5)
+QUESTION_COUNT_HARD = _env_int("QUESTION_COUNT_HARD", 5)
+
+QUESTION_PLAN = resolve_question_plan(
+    MAX_QUESTIONS,
+    QUESTION_COUNT_BEGINNER,
+    QUESTION_COUNT_INTERMEDIATE,
+    QUESTION_COUNT_HARD,
+)
+# After auto-adjust, this is the real generate/ask total.
+MAX_QUESTIONS = QUESTION_PLAN.total
 MAX_ANSWER_SEC = _env_int("MAX_ANSWER_SEC", 420)
 MAX_OFF_TOPIC_REDIRECTS = _env_int("MAX_OFF_TOPIC_REDIRECTS", 2)
 MAX_STRIKES = _env_int("MAX_STRIKES", 3)

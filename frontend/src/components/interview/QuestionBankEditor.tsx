@@ -1,4 +1,5 @@
 import { useFieldArray, useFormContext } from 'react-hook-form'
+import { useQuery } from '@tanstack/react-query'
 import { Plus, Trash2, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -11,6 +12,8 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
+import { getHealth } from '@/lib/api'
+import { queryKeys } from '@/lib/query-keys'
 import type { JoinFormValues } from '@/schemas/join-form.schema'
 
 const defaultRow = {
@@ -28,6 +31,12 @@ export function QuestionBankEditor({ fillHeight = false }: QuestionBankEditorPro
   const { control, register, setValue, watch } = useFormContext<JoinFormValues>()
   const { fields, append, remove } = useFieldArray({ control, name: 'questions' })
   const questions = watch('questions')
+  const { data: health } = useQuery({ queryKey: queryKeys.health, queryFn: getHealth })
+  const plan = health?.question_plan
+  const askTotal = plan?.total ?? 10
+  const askLow = plan?.beginner ?? 4
+  const askHard = plan?.hard ?? 3
+  const askMid = plan?.intermediate ?? 3
 
   const handleImport = () => {
     const raw = window.prompt('Paste JSON array of questions:')
@@ -53,9 +62,11 @@ export function QuestionBankEditor({ fillHeight = false }: QuestionBankEditorPro
         <div className="min-w-0 space-y-1">
           <Label>Question bank</Label>
           <p className="text-xs leading-relaxed text-muted-foreground">
-           The bot asks{' '}
-            <span className="font-medium text-foreground">10 during the interview</span> — 4 Low,
-            3 Hard, and 3 Intermediate — picked from this bank.
+            The bot asks{' '}
+            <span className="font-medium text-foreground">
+              {askTotal} during the interview
+            </span>{' '}
+            — {askLow} Low, {askHard} Hard, and {askMid} Intermediate — picked from this bank.
           </p>
         </div>
         <div className="flex gap-2">

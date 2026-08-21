@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Download, Loader2, Sparkles } from 'lucide-react'
 import {
   getAtsSettings,
+  getHealth,
   importAtsCandidate,
   importAtsJob,
   joinMeeting,
@@ -27,6 +28,7 @@ import {
 import { isTeamsLauncherUrl, MEETING_URL_HINT } from '@/lib/meeting-url'
 import {
   checkBankCoverage,
+  requiredCountsFromPlan,
   formatCandidateDisplayName,
   isCandidateSelectReady,
   isJobSelectReady,
@@ -140,6 +142,8 @@ export function NewInterviewPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   const queryClient = useQueryClient()
+  const { data: health } = useQuery({ queryKey: queryKeys.health, queryFn: getHealth })
+  const coverageRequired = requiredCountsFromPlan(health?.question_plan)
   const savedDraft = loadInterviewDraft()
   const savedMeta = loadInterviewDraftMeta()
   const shortlistPrefill = useMemo(
@@ -341,7 +345,7 @@ export function NewInterviewPage() {
   )
   const step1bReady = isStep1bReady(values)
   const step2bReady = isStep2bReady(values)
-  const step3Ready = isStep3Ready(values)
+  const step3Ready = isStep3Ready(values, coverageRequired)
   const step4Ready = isStep4Ready(values.meeting_url ?? '')
 
   const proceedEnabled = useMemo(() => {
@@ -404,7 +408,7 @@ export function NewInterviewPage() {
     }
 
     const data = parsed.data
-    const coverage = checkBankCoverage(data.questions)
+    const coverage = checkBankCoverage(data.questions, coverageRequired)
     if (!coverage.ok) {
       setError(`Question bank incomplete: ${coverage.missing.join('; ')}`)
       setStep(5)
@@ -873,7 +877,7 @@ export function NewInterviewPage() {
       }
 
       if (!step3Ready) {
-        const coverage = checkBankCoverage(form.getValues('questions'))
+        const coverage = checkBankCoverage(form.getValues('questions'), coverageRequired)
         if (!coverage.ok) {
           setError(`Question bank incomplete: ${coverage.missing.join('; ')}`)
         } else {
@@ -1185,7 +1189,8 @@ export function NewInterviewPage() {
                       </span>
                       <p className="text-sm font-medium">Ready to generate questions</p>
                       <p className="mt-1 max-w-sm text-xs leading-relaxed text-muted-foreground">
-                        We will create ~15 questions from the selected resume and job description.
+                        We will create questions from the selected resume and job description
+                        (count and difficulty mix come from server MAX_QUESTIONS).
                         You can edit them before continuing.
                       </p>
                     </div>

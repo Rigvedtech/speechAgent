@@ -323,7 +323,7 @@ This is the highest-risk area. Small `.env` changes alter candidate experience.
 
 | Knob                               | Example in `.env.example` | Meaning                                      |
 | ---------------------------------- | ------------------------- | -------------------------------------------- |
-| `MAX_QUESTIONS`                    | 15                        | Cap on core questions                        |
+| `MAX_QUESTIONS`                    | 15                        | Total generated/asked questions              |
 | `MAX_INTERVIEW_MINUTES`            | 30                        | Hard interview length                        |
 | `STAGE1_QUESTION_COUNT`            | 7                         | Questions that feed the gate average         |
 | `STAGE1_BRIDGE_QUESTION`           | 8                         | Always asked; decide continue/stop after     |
@@ -340,8 +340,8 @@ This is the highest-risk area. Small `.env` changes alter candidate experience.
 
 **Question generation vs playback**
 
-- Generator (`n8n_extraction.py`) asks Groq for **exactly 15** questions with a JD/CV split and Low/Intermediate/Hard **blocks**.
-- Engine also has `DIFFICULTY_PATTERN` Low/Hard/Intermediate repeating when selecting from buckets. If you “fix difficulty order”, check **both** files.
+- Generator (`n8n_extraction.py`) uses `MAX_QUESTIONS` plus `QUESTION_COUNT_BEGINNER` / `INTERMEDIATE` / `HARD`. Beginner+intermediate = JD; hard = resume. If the three counts do not sum to `MAX_QUESTIONS`, they are auto-scaled (`question_plan.py`).
+- Asking order is Low → Hard → Intermediate cycling (`QUESTION_PLAN.difficulty_pattern`), not a hardcoded 15-slot list.
 
 **Languages**
 

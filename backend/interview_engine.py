@@ -22,24 +22,8 @@ from language_profiles import LanguageMode, get_ui_strings
 
 logger = logging.getLogger(__name__)
 
-# Fixed difficulty mix: Low → Hard → Intermediate (repeating).
-DIFFICULTY_PATTERN: Tuple[str, ...] = (
-    "Low",
-    "Hard",
-    "Intermediate",
-    "Low",
-    "Hard",
-    "Intermediate",
-    "Low",
-    "Hard",
-    "Intermediate",
-    "Low",
-    "Hard",
-    "Intermediate",
-    "Low",
-    "Hard",
-    "Intermediate",
-)
+# Ask order: Low → Hard → Intermediate cycling, sized from QUESTION_PLAN.
+DIFFICULTY_PATTERN: Tuple[str, ...] = config.QUESTION_PLAN.difficulty_pattern
 
 _DIFFICULTY_ALIASES: Dict[str, str] = {
     "low": "Low",
